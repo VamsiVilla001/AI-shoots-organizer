@@ -1,0 +1,31 @@
+[package]
+name = "teo-face-detection"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "ONNX-based face detection (SCRFD) with a swappable detector interface"
+
+[dependencies]
+thiserror = "2.0"
+serde = { version = "1.0", features = ["derive"] }
+image = "0.25"
+tracing = "0.1"
+num_cpus = "1.17"
+ort = { version = "=2.0.0-rc.13", default-features = false, features = [
+    "std",
+    "ndarray",
+    "tracing",
+    "download-binaries",
+    "tls-native",
+    "copy-dylibs",
+    "api-27",
+] }
+
+[features]
+default = []
+# GPU providers are opt-in: the binaries they need are not present in every
+# ONNX Runtime build, and a missing provider must not break a CPU-only machine.
+directml = ["ort/directml"]
+coreml = ["ort/coreml"]
+cuda = ["ort/cuda"]

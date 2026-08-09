@@ -1,0 +1,12 @@
+[package]
+name = "teo-clustering"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Player matching against the face library, and clustering of unknown faces"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+rayon = "1.12"
+tracing = "0.1"

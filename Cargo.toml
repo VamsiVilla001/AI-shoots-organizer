@@ -1,0 +1,38 @@
+[workspace]
+resolver = "2"
+members = [
+    "apps/desktop/src-tauri",
+    "crates/clustering",
+    "crates/database",
+    "crates/export-engine",
+    "crates/face-detection",
+    "crates/face-recognition",
+    "crates/media-core",
+    "crates/video-analysis",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "MIT"
+
+[workspace.dependencies]
+teo-clustering = { path = "crates/clustering" }
+teo-database = { path = "crates/database" }
+teo-export-engine = { path = "crates/export-engine" }
+teo-face-detection = { path = "crates/face-detection" }
+teo-face-recognition = { path = "crates/face-recognition" }
+teo-media-core = { path = "crates/media-core" }
+teo-video-analysis = { path = "crates/video-analysis" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# AI inference is unusably slow in a debug build; always optimise the heavy crates.
+[profile.dev.package."*"]
+opt-level = 3

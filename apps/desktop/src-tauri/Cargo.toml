@@ -1,0 +1,55 @@
+[package]
+name = "teo-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Esports AI Media Organiser desktop application"
+default-run = "teo-desktop"
+
+[lib]
+# Deliberately not `teo_desktop`: the bin target of the same name would emit a
+# `teo_desktop.pdb` to the same path, which Cargo warns about today and will
+# reject outright in future.
+name = "teo_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+teo-clustering = { path = "../../../crates/clustering" }
+teo-database = { path = "../../../crates/database" }
+teo-export-engine = { path = "../../../crates/export-engine" }
+teo-face-detection = { path = "../../../crates/face-detection" }
+teo-face-recognition = { path = "../../../crates/face-recognition" }
+teo-media-core = { path = "../../../crates/media-core" }
+teo-video-analysis = { path = "../../../crates/video-analysis" }
+
+# No `protocol-asset`: media is served through the teomedia:// handler, which
+# resolves ids against the database instead of exposing raw filesystem paths.
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+
+anyhow = "1.0"
+thiserror = "2.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = "0.4"
+image = "0.25"
+num_cpus = "1.17"
+parking_lot = "0.12"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile = "3.27"
+
+[features]
+default = []
+# Mirrors the AI crates' provider features so the whole app can be built with
+# GPU acceleration in one flag.
+directml = ["teo-face-detection/directml", "teo-face-recognition/directml"]
+coreml = ["teo-face-detection/coreml", "teo-face-recognition/coreml"]
+cuda = ["teo-face-detection/cuda", "teo-face-recognition/cuda"]

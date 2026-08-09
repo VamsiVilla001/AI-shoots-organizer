@@ -1,0 +1,18 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Permissions the organiser's main window needs. Media reading goes through the teomedia:// protocol handler, which resolves ids against the database, so no broad filesystem permission is granted here.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-set-title",
+    "dialog:allow-open",
+    "dialog:allow-save",
+    "dialog:allow-message",
+    "dialog:allow-ask",
+    "dialog:allow-confirm",
+    "opener:allow-open-path",
+    "opener:allow-reveal-item-in-dir"
+  ]
+}

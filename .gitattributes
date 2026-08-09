@@ -1,0 +1,22 @@
+# Normalise text files to LF in the repository; Git checks them out with the
+# platform's convention.
+* text=auto
+
+# Shell scripts must keep LF even on a Windows checkout — a .sh file with CRLF
+# line endings fails to run on macOS and Linux, which is exactly where
+# fetch-models.sh is needed.
+*.sh text eol=lf
+
+# Windows-only scripts are the mirror case.
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# Binary assets: never transform, and don't try to diff them.
+*.png binary
+*.ico binary
+*.icns binary
+*.onnx binary
+*.jpg binary
+*.jpeg binary
+*.webp binary

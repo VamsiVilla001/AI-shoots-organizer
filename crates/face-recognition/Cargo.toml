@@ -1,0 +1,29 @@
+[package]
+name = "teo-face-recognition"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Face alignment and ArcFace-compatible embedding over ONNX Runtime"
+
+[dependencies]
+teo-face-detection = { path = "../face-detection" }
+thiserror = "2.0"
+serde = { version = "1.0", features = ["derive"] }
+image = "0.25"
+tracing = "0.1"
+ort = { version = "=2.0.0-rc.13", default-features = false, features = [
+    "std",
+    "ndarray",
+    "tracing",
+    "download-binaries",
+    "tls-native",
+    "copy-dylibs",
+    "api-27",
+] }
+
+[features]
+default = []
+directml = ["teo-face-detection/directml", "ort/directml"]
+coreml = ["teo-face-detection/coreml", "ort/coreml"]
+cuda = ["teo-face-detection/cuda", "ort/cuda"]

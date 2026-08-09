@@ -1,0 +1,23 @@
+[package]
+name = "teo-media-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Media scanning, metadata extraction, decoding and thumbnails"
+
+[dependencies]
+anyhow = "1.0"
+thiserror = "2.0"
+serde = { version = "1.0", features = ["derive"] }
+chrono = "0.4"
+image = "0.25"
+kamadak-exif = "0.6"
+blake3 = "1.8"
+walkdir = "2.5"
+rayon = "1.12"
+tracing = "0.1"
+which = "8.0"
+
+[dev-dependencies]
+tempfile = "3.27"

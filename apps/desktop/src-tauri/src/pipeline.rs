@@ -1,0 +1,414 @@
+//! Per-file analysis: decode, detect, embed, persist.
+//!
+//! An [`Engine`] owns one detector session and one embedder session and is
+//! therefore **not** shared between threads — each worker builds its own. That
+//! is deliberate: ONNX Runtime sessions need exclusive access to run, and
+//! loading the models once per worker rather than once per file is the "avoid
+//! loading models repeatedly" rule from §19.
+
+use std::path::{Path, PathBuf};
+
+use image::RgbImage;
+use teo_database::models::{BoundingBox, Media, MediaMetadata, NewFace, ProcessingStatus};
+use teo_database::repo::{faces, media as media_repo, video as video_repo};
+use teo_database::Database;
+use teo_face_detection::{Detection, FaceDetector, ScrfdDetector};
+use teo_face_recognition::{ArcFaceEmbedder, FaceEmbedder};
+use teo_media_core::formats::{self, MediaKind};
+use teo_media_core::{Ffmpeg, ThumbnailCache};
+
+use crate::models::{ModelRegistry, ModelRole};
+use crate::paths::AppPaths;
+use crate::settings::AppSettings;
+
+#[derive(Debug, thiserror::Error)]
+pub enum PipelineError {
+    #[error("face models are not installed: {0}")]
+    ModelsUnavailable(String),
+    #[error("FFmpeg is required for this file but is not available")]
+    FfmpegUnavailable,
+    #[error(transparent)]
+    Media(#[from] teo_media_core::MediaError),
+    #[error(transparent)]
+    Database(#[from] teo_database::DbError),
+    #[error("{0}")]
+    Other(String),
+}
+
+pub type Result<T> = std::result::Result<T, PipelineError>;
+
+/// What one file's analysis produced.
+#[derive(Debug, Clone, Default)]
+pub struct AnalysisOutcome {
+    pub faces_detected: usize,
+    pub faces_embedded: usize,
+    /// Distinct frames looked at. Always 1 for a photo.
+    pub frames_analysed: usize,
+}
+
+pub struct Engine {
+    detector: ScrfdDetector,
+    embedder: ArcFaceEmbedder,
+    ffmpeg: Option<Ffmpeg>,
+    settings: AppSettings,
+}
+
+impl Engine {
+    /// Builds an engine, loading both models. Fails when either is missing —
+    /// the caller turns that into a message pointing at the model setup step
+    /// rather than a stack trace.
+    pub fn new(paths: &AppPaths, settings: &AppSettings) -> Result<Self> {
+        let registry = ModelRegistry::new(&paths.models);
+        let status = registry.status(settings.detector_model.as_deref(), settings.embedder_model.as_deref());
+        if !status.ready {
+            return Err(PipelineError::ModelsUnavailable(status.message));
+        }
+
+        let detector_path = registry
+            .resolve(ModelRole::Detector, settings.detector_model.as_deref())
+            .ok_or_else(|| PipelineError::ModelsUnavailable(status.message.clone()))?;
+        let embedder_path = registry
+            .resolve(ModelRole::Embedder, settings.embedder_model.as_deref())
+            .ok_or_else(|| PipelineError::ModelsUnavailable(status.message.clone()))?;
+
+        let session_config = settings.session_config();
+        let detector = ScrfdDetector::load(&detector_path, settings.detector_config(), &session_config)
+            .map_err(|e| PipelineError::Other(format!("loading detector: {e}")))?;
+        let embedder = ArcFaceEmbedder::load(&embedder_path, &session_config)
+            .map_err(|e| PipelineError::Other(format!("loading embedder: {e}")))?;
+
+        Ok(Self {
+            detector,
+            embedder,
+            ffmpeg: discover_ffmpeg(settings),
+            settings: settings.clone(),
+        })
+    }
+
+    pub fn detector_name(&self) -> &str {
+        self.detector.name()
+    }
+
+    pub fn embedder_name(&self) -> &str {
+        self.embedder.name()
+    }
+
+    pub fn ffmpeg(&self) -> Option<&Ffmpeg> {
+        self.ffmpeg.as_ref()
+    }
+
+    /// Full analysis of a still image.
+    pub fn analyse_photo(&mut self, db: &Database, item: &Media) -> Result<AnalysisOutcome> {
+        let path = PathBuf::from(&item.path);
+        let orientation = item.orientation.clamp(1, 8) as u16;
+
+        let image = teo_media_core::decode::load_image(
+            &path,
+            orientation,
+            Some(self.settings.analysis_max_dim),
+            self.ffmpeg.as_ref(),
+        )?;
+
+        // Re-analysis must replace, not append.
+        {
+            let conn = db.conn()?;
+            faces::delete_for_media(&conn, item.id)?;
+        }
+
+        let outcome = self.detect_and_store(db, item, &image, None)?;
+
+        {
+            let conn = db.conn()?;
+            media_repo::set_status(&conn, item.id, ProcessingStatus::Analysed, None)?;
+            media_repo::refresh_face_count(&conn, item.id)?;
+        }
+        Ok(outcome)
+    }
+
+    /// Full analysis of a video: sample frames, then treat each like a photo.
+    pub fn analyse_video(&mut self, db: &Database, item: &Media) -> Result<AnalysisOutcome> {
+        let Some(ffmpeg) = self.ffmpeg.clone() else {
+            return Err(PipelineError::FfmpegUnavailable);
+        };
+        let path = PathBuf::from(&item.path);
+        let orientation = item.orientation.clamp(1, 8) as u16;
+        let config = self.settings.video_config();
+
+        let plan = teo_video_analysis::plan_video(&ffmpeg, &path, item.duration, &config);
+        let frames = teo_video_analysis::sample_frames(&ffmpeg, &path, &plan, orientation, &config);
+
+        {
+            let conn = db.conn()?;
+            faces::delete_for_media(&conn, item.id)?;
+            video_repo::delete_for_media(&conn, item.id)?;
+        }
+
+        let mut outcome = AnalysisOutcome::default();
+        for frame in &frames {
+            let frame_outcome = self.detect_and_store(db, item, &frame.image, Some(frame.timestamp))?;
+            outcome.faces_detected += frame_outcome.faces_detected;
+            outcome.faces_embedded += frame_outcome.faces_embedded;
+            outcome.frames_analysed += 1;
+        }
+
+        {
+            let conn = db.conn()?;
+            media_repo::set_status(&conn, item.id, ProcessingStatus::Analysed, None)?;
+            media_repo::refresh_face_count(&conn, item.id)?;
+        }
+
+        tracing::debug!(
+            video = %item.filename,
+            planned = plan.len(),
+            decoded = frames.len(),
+            faces = outcome.faces_detected,
+            "video analysed"
+        );
+        Ok(outcome)
+    }
+
+    /// Detects faces in one frame, embeds them in a single batch, and writes
+    /// the rows. `frame_time` is `None` for stills.
+    fn detect_and_store(
+        &mut self,
+        db: &Database,
+        item: &Media,
+        image: &RgbImage,
+        frame_time: Option<f64>,
+    ) -> Result<AnalysisOutcome> {
+        let detections: Vec<Detection> = self
+            .detector
+            .detect(image)
+            .map_err(|e| PipelineError::Other(format!("detection failed: {e}")))?;
+
+        if detections.is_empty() {
+            return Ok(AnalysisOutcome { frames_analysed: 1, ..Default::default() });
+        }
+
+        // One inference call for every face in the frame (§19).
+        let embeddings = self.embedder.embed_batch(image, &detections);
+
+        let (width, height) = image.dimensions();
+        let mut outcome = AnalysisOutcome { frames_analysed: 1, ..Default::default() };
+
+        let conn = db.conn()?;
+        for (detection, embedding) in detections.iter().zip(embeddings) {
+            let (x, y, w, h) = detection.bbox.normalised(width, height);
+            let embedding = match embedding {
+                Ok(e) => Some(e.into_vec()),
+                Err(e) => {
+                    // Keep the detection so the box still shows in review, but
+                    // without a vector it cannot be matched or clustered.
+                    tracing::debug!(file = %item.filename, error = %e, "embedding failed for one face");
+                    None
+                }
+            };
+            if embedding.is_some() {
+                outcome.faces_embedded += 1;
+            }
+
+            let face_id = faces::insert(
+                &conn,
+                &NewFace {
+                    media_id: item.id,
+                    shoot_id: item.shoot_id,
+                    bbox: BoundingBox { x, y, w, h },
+                    landmarks: detection.landmarks.map(|lm| {
+                        lm.iter().flat_map(|(px, py)| [*px, *py]).collect::<Vec<f32>>()
+                    }),
+                    detection_confidence: detection.score as f64,
+                    embedding,
+                    quality: Some(detection.quality(width, height)),
+                    frame_time,
+                    crop_path: None,
+                },
+            )?;
+            outcome.faces_detected += 1;
+
+            // Videos additionally get a timeline entry, filled in with a person
+            // once recognition runs.
+            if let Some(at) = frame_time {
+                video_repo::insert(&conn, item.id, None, Some(face_id), at, detection.score as f64)?;
+            }
+        }
+
+        Ok(outcome)
+    }
+
+    /// Routes to the photo or video path based on the file's type.
+    pub fn analyse(&mut self, db: &Database, item: &Media) -> Result<AnalysisOutcome> {
+        match formats::classify(Path::new(&item.path)).map(|(kind, _)| kind) {
+            Some(MediaKind::Video) => {
+                if !self.settings.video_enabled {
+                    let conn = db.conn()?;
+                    media_repo::set_status(&conn, item.id, ProcessingStatus::Skipped, Some("video analysis is off"))?;
+                    return Ok(AnalysisOutcome::default());
+                }
+                self.analyse_video(db, item)
+            }
+            Some(MediaKind::Photo) => self.analyse_photo(db, item),
+            None => Err(PipelineError::Other(format!("unsupported file: {}", item.path))),
+        }
+    }
+}
+
+/// Finds FFmpeg, honouring an explicit directory from Settings.
+pub fn discover_ffmpeg(settings: &AppSettings) -> Option<Ffmpeg> {
+    let hint = settings.ffmpeg_directory.as_ref().map(PathBuf::from);
+    Ffmpeg::discover(hint.as_deref())
+}
+
+/// Reads metadata and writes a thumbnail. Cheap enough to run over a whole
+/// shoot before any AI starts, which is what makes the media grid usable while
+/// analysis is still going (§19).
+///
+/// Deliberately a free function rather than an [`Engine`] method: indexing
+/// must never depend on the AI models being installed. A machine without
+/// models still gets a fully browsable shoot — only recognition waits.
+pub fn index_media(db: &Database, thumbnails: &ThumbnailCache, ffmpeg: Option<&Ffmpeg>, item: &Media) -> Result<()> {
+    let path = PathBuf::from(&item.path);
+    if !path.exists() {
+        let conn = db.conn()?;
+        media_repo::set_status(&conn, item.id, ProcessingStatus::Failed, Some("file no longer exists"))?;
+        return Err(PipelineError::Other(format!("{} no longer exists", item.path)));
+    }
+
+    let (kind, decoder) = formats::classify(&path)
+        .ok_or_else(|| PipelineError::Other(format!("unsupported file: {}", item.path)))?;
+    let meta = teo_media_core::metadata::read(&path, kind, decoder, ffmpeg);
+
+    {
+        let conn = db.conn()?;
+        media_repo::set_metadata(
+            &conn,
+            item.id,
+            &MediaMetadata {
+                width: meta.width.map(|v| v as i64),
+                height: meta.height.map(|v| v as i64),
+                duration: meta.duration,
+                captured_at: meta.captured_at.clone(),
+                camera_make: meta.camera_make.clone(),
+                camera_model: meta.camera_model.clone(),
+                lens: meta.lens.clone(),
+                iso: meta.iso.map(|v| v as i64),
+                focal_length: meta.focal_length,
+                aperture: meta.aperture,
+                shutter: meta.shutter.clone(),
+                orientation: meta.orientation as i64,
+            },
+        )?;
+    }
+
+    match thumbnails.ensure(&path, &item.content_key, meta.orientation, meta.duration, ffmpeg) {
+        Ok(thumb) => {
+            let conn = db.conn()?;
+            media_repo::set_thumbnail(&conn, item.id, &thumb.display().to_string())?;
+            media_repo::set_status(&conn, item.id, ProcessingStatus::Thumbnailed, None)?;
+        }
+        Err(e) => {
+            // A missing thumbnail is a cosmetic failure; the file can still
+            // be analysed and exported, so it must not stop the pipeline.
+            tracing::warn!(file = %item.path, error = %e, "thumbnail generation failed");
+            let conn = db.conn()?;
+            media_repo::set_status(&conn, item.id, ProcessingStatus::Indexed, None)?;
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use teo_database::models::{MediaType, NewMedia};
+    use teo_database::repo::shoots;
+
+    /// Writes a real JPEG so the decode path is genuinely exercised.
+    fn write_jpeg(path: &std::path::Path) {
+        let mut image = RgbImage::new(320, 240);
+        for (x, y, pixel) in image.enumerate_pixels_mut() {
+            *pixel = image::Rgb([(x % 256) as u8, (y % 256) as u8, 128]);
+        }
+        image.save(path).expect("failed to write the test jpeg");
+    }
+
+    /// The regression this guards: indexing used to be a method on [`Engine`],
+    /// so it demanded both ONNX models. On a machine without them every
+    /// thumbnail job failed instantly, burned its retries and buried the UI in
+    /// identical errors — while the shoot could have been perfectly browsable.
+    #[test]
+    fn indexing_works_with_no_models_and_no_ffmpeg() {
+        let source = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let photo = source.path().join("IMG_0231.jpg");
+        write_jpeg(&photo);
+
+        let db = Database::open_in_memory().unwrap();
+        let item = {
+            let conn = db.conn().unwrap();
+            let shoot = shoots::create(&conn, "Shoot", &source.path().display().to_string()).unwrap();
+            let media_id = media_repo::upsert(
+                &conn,
+                &NewMedia {
+                    shoot_id: shoot.id,
+                    path: photo.display().to_string(),
+                    filename: "IMG_0231.jpg".into(),
+                    media_type: MediaType::Photo,
+                    extension: "jpg".into(),
+                    file_size: 1,
+                    content_key: "testkey".into(),
+                    captured_at: None,
+                },
+            )
+            .unwrap();
+            media_repo::get_by_id(&conn, media_id).unwrap().unwrap()
+        };
+
+        let thumbnails = ThumbnailCache::new(cache.path());
+        // No models directory, no FFmpeg — both deliberately absent.
+        index_media(&db, &thumbnails, None, &item).expect("indexing must not need AI models");
+
+        let conn = db.conn().unwrap();
+        let stored = media_repo::get_by_id(&conn, item.id).unwrap().unwrap();
+        assert_eq!(stored.processing_status, "thumbnailed");
+        assert!(stored.thumbnail_path.is_some(), "a thumbnail should have been produced");
+        assert_eq!(stored.width, Some(320));
+        assert_eq!(stored.height, Some(240));
+        assert!(std::path::Path::new(&stored.thumbnail_path.unwrap()).is_file());
+    }
+
+    #[test]
+    fn a_missing_source_file_is_reported_not_panicked() {
+        let cache = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let item = {
+            let conn = db.conn().unwrap();
+            let shoot = shoots::create(&conn, "Shoot", "C:\\gone").unwrap();
+            let media_id = media_repo::upsert(
+                &conn,
+                &NewMedia {
+                    shoot_id: shoot.id,
+                    path: "C:\\gone\\missing.jpg".into(),
+                    filename: "missing.jpg".into(),
+                    media_type: MediaType::Photo,
+                    extension: "jpg".into(),
+                    file_size: 1,
+                    content_key: "k".into(),
+                    captured_at: None,
+                },
+            )
+            .unwrap();
+            media_repo::get_by_id(&conn, media_id).unwrap().unwrap()
+        };
+
+        let thumbnails = ThumbnailCache::new(cache.path());
+        assert!(index_media(&db, &thumbnails, None, &item).is_err());
+
+        let conn = db.conn().unwrap();
+        assert_eq!(
+            media_repo::get_by_id(&conn, item.id).unwrap().unwrap().processing_status,
+            "failed"
+        );
+    }
+}
+

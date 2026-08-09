@@ -1,0 +1,29 @@
+# Rust
+/target
+**/target/
+
+# Node
+node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+
+# Tauri
+apps/desktop/src-tauri/gen/
+
+# AI models are large binaries fetched by scripts/fetch-models.ps1
+/models/*
+!/models/README.md
+!/models/manifest.json
+
+# Local data / scratch
+*.db
+*.db-wal
+*.db-shm
+/.scratch/
+/tests/fixtures/media/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
