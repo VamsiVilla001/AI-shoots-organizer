@@ -53,6 +53,10 @@ pub struct ExportOptions {
     pub existing: ExistingFilePolicy,
     /// Also write multi-player albums as their own folders.
     pub include_multi_player: bool,
+    /// Also write the group-size albums ("Single", "Two persons", …) as
+    /// folders. Off by default: every file is in both a player album and a
+    /// group-size album, so enabling this writes the whole shoot twice.
+    pub include_group_size: bool,
 }
 
 impl Default for ExportOptions {
@@ -64,6 +68,7 @@ impl Default for ExportOptions {
             preserve_metadata: true,
             existing: ExistingFilePolicy::Skip,
             include_multi_player: false,
+            include_group_size: false,
         }
     }
 }

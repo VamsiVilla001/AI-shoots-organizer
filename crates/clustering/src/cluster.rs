@@ -232,13 +232,38 @@ fn build_cluster(embeddings: &[Vec<f32>], members: Vec<usize>) -> Cluster {
     Cluster { members, centroid: centre, cohesion }
 }
 
+/// How many times [`merge_close_clusters`] may sweep before giving up. Each
+/// sweep that changes anything strictly reduces the cluster count, so this is
+/// only a guard against pathological input, not a real limit.
+const MAX_MERGE_PASSES: usize = 8;
+
 /// Folds together clusters whose centroids are close enough to be the same
 /// person seen under different conditions.
-fn merge_close_clusters(embeddings: &[Vec<f32>], clusters: Vec<Cluster>, threshold: f32) -> Vec<Cluster> {
+///
+/// Sweeps repeatedly rather than once. Absorbing a cluster moves the
+/// survivor's centroid, which can bring it within range of a group that was
+/// previously too far away — and a single pass never revisits a cluster it has
+/// already accepted. Left as one pass, the same player stays split across
+/// several "Unknown Person" groups, which was observed on real shoot data:
+/// seven pairs sat *above* the merge threshold yet were never joined.
+fn merge_close_clusters(embeddings: &[Vec<f32>], mut clusters: Vec<Cluster>, threshold: f32) -> Vec<Cluster> {
     if clusters.len() < 2 || threshold >= 1.0 {
         return clusters;
     }
 
+    for _ in 0..MAX_MERGE_PASSES {
+        let before = clusters.len();
+        clusters = merge_pass(embeddings, clusters, threshold);
+        if clusters.len() == before {
+            break; // nothing moved; the result is stable
+        }
+    }
+    clusters
+}
+
+/// One sweep: each cluster joins the first already-accepted cluster it is close
+/// enough to, or is accepted in its own right.
+fn merge_pass(embeddings: &[Vec<f32>], clusters: Vec<Cluster>, threshold: f32) -> Vec<Cluster> {
     let mut merged: Vec<Cluster> = Vec::with_capacity(clusters.len());
     for cluster in clusters {
         let target = merged
@@ -350,6 +375,47 @@ mod tests {
         let loose = cluster_faces(&identity(0, 6, 6, 0.5), &ClusterConfig::default());
         assert!(tight.clusters[0].cohesion >= loose.clusters[0].cohesion);
         assert!(tight.clusters[0].cohesion <= 1.0001);
+    }
+
+    /// Reproduces the single-pass gap found on real shoot data.
+    ///
+    /// Three groups at 0°, 60° and 30°. At a 0.62 threshold, 0° and 60° are far
+    /// apart (cos 0.50) so they are accepted separately; then 30° merges into
+    /// 0°, dragging its centroid to 15°. That leaves it 45° from the 60° group
+    /// — cos 0.71, comfortably mergeable — but a single pass never looks again.
+    #[test]
+    fn merging_keeps_sweeping_until_it_reaches_a_fixed_point() {
+        let at = |degrees: f32| {
+            let r = degrees.to_radians();
+            vec![r.cos(), r.sin(), 0.0]
+        };
+        // Two identical members per group, so each centroid is its own angle.
+        let embeddings = vec![at(0.0), at(0.0), at(60.0), at(60.0), at(30.0), at(30.0)];
+        let clusters = vec![
+            build_cluster(&embeddings, vec![0, 1]),
+            build_cluster(&embeddings, vec![2, 3]),
+            build_cluster(&embeddings, vec![4, 5]),
+        ];
+
+        // One sweep leaves the 60° group stranded.
+        assert_eq!(merge_pass(&embeddings, clusters.clone(), 0.62).len(), 2);
+
+        // Sweeping to a fixed point pulls all three together.
+        let settled = merge_close_clusters(&embeddings, clusters, 0.62);
+        assert_eq!(settled.len(), 1);
+        assert_eq!(settled[0].size(), 6);
+    }
+
+    #[test]
+    fn merging_still_leaves_genuinely_different_people_apart() {
+        let a: Vec<Vec<f32>> = vec![unit(vec![1.0, 0.0, 0.0]); 2];
+        let b: Vec<Vec<f32>> = vec![unit(vec![0.0, 1.0, 0.0]); 2];
+        let embeddings: Vec<Vec<f32>> = a.into_iter().chain(b).collect();
+        let clusters = vec![
+            build_cluster(&embeddings, vec![0, 1]),
+            build_cluster(&embeddings, vec![2, 3]),
+        ];
+        assert_eq!(merge_close_clusters(&embeddings, clusters, 0.62).len(), 2);
     }
 
     #[test]

@@ -5,9 +5,9 @@
 
 import { useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import type { Album, ClusterSummary, MediaType } from '@teo/shared-types'
+import { GROUP_SIZE_CAP, type Album, type ClusterSummary, type MediaType } from '@teo/shared-types'
 import * as api from '../api'
-import { formatCount, thumbUrl } from '../media'
+import { formatCount, groupSizeName, thumbUrl } from '../media'
 import { MediaGrid } from '../components/MediaGrid'
 import { ProgressPanel } from '../components/ProgressPanel'
 import { Modal } from '../components/Modal'
@@ -31,6 +31,17 @@ function AlbumsBody({ shootId }: { shootId: number }) {
     queryFn: () => api.listClusters(shootId, false),
   })
 
+  const queryClient = useQueryClient()
+  const pushNotice = useUi((s) => s.pushNotice)
+  const regenerate = useMutation({
+    mutationFn: () => api.regenerateAlbums(shootId),
+    onSuccess: (count) => {
+      queryClient.invalidateQueries({ queryKey: ['albums', shootId] })
+      pushNotice({ level: 'success', message: `Rebuilt ${count} album(s).` })
+    },
+    onError: (e) => pushNotice({ level: 'error', message: String(e) }),
+  })
+
   const grouped = useMemo(() => {
     const all = albums.data ?? []
     return {
@@ -38,6 +49,8 @@ function AlbumsBody({ shootId }: { shootId: number }) {
       multi: all.filter((a) => a.albumType === 'multiPlayer'),
       teams: all.filter((a) => a.albumType === 'team'),
       unidentified: all.filter((a) => a.albumType === 'unidentified'),
+      // Already ordered by size from the backend; sortOrder holds the bucket.
+      groupSize: all.filter((a) => a.albumType === 'groupSize'),
     }
   }, [albums.data])
 
@@ -56,6 +69,11 @@ function AlbumsBody({ shootId }: { shootId: number }) {
     <>
       <div className="workspace-header">
         <h1>{shoot.data?.name ?? 'AI Albums'}</h1>
+        <div className="actions">
+          <button onClick={() => regenerate.mutate()} disabled={regenerate.isPending}>
+            {regenerate.isPending ? 'Rebuilding…' : 'Regenerate albums'}
+          </button>
+        </div>
       </div>
 
       <ProgressPanel shootId={shootId} />
@@ -87,6 +105,20 @@ function AlbumsBody({ shootId }: { shootId: number }) {
         <Section title="Teams">
           <div className="card-grid">
             {grouped.teams.map((album) => (
+              <AlbumCard key={album.id} album={album} onOpen={() => setOpenAlbum(album)} />
+            ))}
+          </div>
+        </Section>
+      )}
+
+      {grouped.groupSize.length > 0 && (
+        <Section title="By group size">
+          <div className="hint" style={{ marginBottom: 10 }}>
+            Every file appears here as well as in its player album — this is a second way to
+            find things, not a second copy.
+          </div>
+          <div className="card-grid">
+            {grouped.groupSize.map((album) => (
               <AlbumCard key={album.id} album={album} onOpen={() => setOpenAlbum(album)} />
             ))}
           </div>
@@ -240,13 +272,19 @@ function AlbumDetail(props: {
   onBack: () => void
 }) {
   const { album, typeFilter } = props
+  // Narrowing an existing album by group size is the useful cross-filter:
+  // "Jonathan's solo shots". Redundant inside a size album, so hidden there.
+  const [sizeFilter, setSizeFilter] = useState<number | null>(null)
+  const showSizeFilter = album.albumType !== 'groupSize'
+
   const media = useQuery({
-    queryKey: ['media', album.shootId, 'album', album.id, typeFilter],
+    queryKey: ['media', album.shootId, 'album', album.id, typeFilter, sizeFilter],
     queryFn: () =>
       api.listMedia({
         shootId: album.shootId,
         albumId: album.id,
         mediaType: typeFilter === 'all' ? null : typeFilter,
+        groupSize: sizeFilter,
         limit: 2000,
       }),
   })
@@ -273,7 +311,29 @@ function AlbumDetail(props: {
                 : `Videos (${formatCount(album.videoCount)})`}
           </button>
         ))}
+
+        {showSizeFilter && (
+          <label className="checkbox-row" style={{ marginLeft: 'auto' }}>
+            <span className="hint">Group size</span>
+            <select
+              value={sizeFilter ?? ''}
+              onChange={(e) => setSizeFilter(e.target.value === '' ? null : Number(e.target.value))}
+            >
+              <option value="">Any</option>
+              {Array.from({ length: GROUP_SIZE_CAP + 1 }, (_, size) => (
+                <option key={size} value={size}>
+                  {groupSizeName(size)}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
       </div>
+      {sizeFilter !== null && media.data?.length === 0 && (
+        <div className="hint" style={{ marginBottom: 10 }}>
+          Nothing in this album has {groupSizeName(sizeFilter).toLowerCase()} in it.
+        </div>
+      )}
       <MediaGrid media={media.data ?? []} />
     </>
   )

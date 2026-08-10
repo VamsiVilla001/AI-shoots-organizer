@@ -18,6 +18,7 @@ const DEFAULT_OPTIONS: ExportOptions = {
   preserveMetadata: true,
   existing: 'skip',
   includeMultiPlayer: false,
+  includeGroupSize: false,
 }
 
 export function ExportScreen() {
@@ -121,6 +122,14 @@ function ExportBody({ shootId }: { shootId: number }) {
               onChange={(e) => setOptions({ ...options, includeMultiPlayer: e.target.checked })}
             />
             Include multi-player albums (duplicates files)
+          </label>
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              checked={options.includeGroupSize}
+              onChange={(e) => setOptions({ ...options, includeGroupSize: e.target.checked })}
+            />
+            Include group-size folders — Single, Two persons… (duplicates files)
           </label>
           <label className="checkbox-row">
             <input

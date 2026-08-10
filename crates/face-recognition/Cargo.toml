@@ -22,6 +22,9 @@ ort = { version = "=2.0.0-rc.13", default-features = false, features = [
     "api-27",
 ] }
 
+[dev-dependencies]
+tracing-subscriber = "0.3"
+
 [features]
 default = []
 directml = ["teo-face-detection/directml", "ort/directml"]

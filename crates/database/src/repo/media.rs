@@ -30,6 +30,7 @@ fn map(row: &Row<'_>) -> rusqlite::Result<Media> {
         thumbnail_path: get(row, "thumbnail_path")?,
         processing_status: get(row, "processing_status")?,
         face_count: get(row, "face_count")?,
+        person_count: get(row, "person_count")?,
         error: get(row, "error")?,
     })
 }
@@ -130,6 +131,64 @@ pub fn refresh_face_count(conn: &Connection, id: i64) -> Result<()> {
     Ok(())
 }
 
+/// Recomputes how many distinct *people* are in each file of a shoot.
+///
+/// `face_count` cannot answer this: video analysis stores one face row per
+/// detection per sampled frame, so a one-person interview sampled twenty times
+/// has twenty rows. The count here is
+///
+/// ```text
+/// max( distinct identities + most unidentified faces in one frame,
+///      most faces visible in any one frame )
+/// ```
+///
+/// An identity is `person_id`, or `cluster_id` when the face is grouped but not
+/// yet named. Each term earns its place:
+///
+/// * *distinct identities* is what makes a clip of one player, sampled twenty
+///   times, count as one person rather than twenty.
+/// * *most unidentified faces in one frame* estimates how many distinct
+///   strangers there are before clustering has had a chance to group them.
+/// * *most faces in one frame* is a floor. Two faces in a single frame are two
+///   people — nobody appears twice in one photograph — so when clustering
+///   wrongly merges two of them, this stops the count sagging below reality.
+///
+/// The expression needs no branching on media type: a photo's `frame_time` is
+/// NULL, so all its faces fall into one group and it collapses to "faces in
+/// the frame".
+pub fn refresh_person_counts(conn: &Connection, shoot_id: i64) -> Result<()> {
+    conn.execute(
+        "WITH per_frame AS (
+             SELECT media_id, frame_time,
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN person_id IS NULL AND cluster_id IS NULL THEN 1 ELSE 0 END) AS unknown
+               FROM faces
+              WHERE shoot_id = ?1 AND assignment != 'ignored'
+              GROUP BY media_id, frame_time
+         ),
+         frame_max AS (
+             SELECT media_id, MAX(total) AS max_total, MAX(unknown) AS max_unknown
+               FROM per_frame GROUP BY media_id
+         ),
+         identified AS (
+             SELECT media_id,
+                    COUNT(DISTINCT CASE WHEN person_id  IS NOT NULL THEN 'p' || person_id
+                                        WHEN cluster_id IS NOT NULL THEN 'c' || cluster_id END) AS c
+               FROM faces
+              WHERE shoot_id = ?1 AND assignment != 'ignored'
+              GROUP BY media_id
+         )
+         UPDATE media SET person_count = MAX(
+               COALESCE((SELECT c           FROM identified WHERE media_id = media.id), 0)
+             + COALESCE((SELECT max_unknown FROM frame_max  WHERE media_id = media.id), 0),
+               COALESCE((SELECT max_total   FROM frame_max  WHERE media_id = media.id), 0)
+         )
+          WHERE shoot_id = ?1",
+        params![shoot_id],
+    )?;
+    Ok(())
+}
+
 /// Paths already indexed for a shoot — used by the scanner to skip work.
 pub fn existing_content_keys(conn: &Connection, shoot_id: i64) -> Result<std::collections::HashMap<String, String>> {
     let mut stmt = conn.prepare("SELECT path, content_key FROM media WHERE shoot_id = ?1")?;
@@ -194,6 +253,16 @@ pub fn query(conn: &Connection, q: &MediaQuery) -> Result<Vec<Media>> {
     }
     if q.only_unidentified {
         wheres.push("f.person_id IS NULL AND f.assignment != 'ignored'".to_string());
+    }
+    if let Some(size) = q.group_size {
+        // At the cap this means "or more", so the filter matches the album it
+        // came from (see repo::albums::GROUP_SIZE_CAP).
+        if size >= crate::repo::albums::GROUP_SIZE_CAP {
+            wheres.push(format!("m.person_count >= ?{}", args.len() + 1));
+        } else {
+            wheres.push(format!("m.person_count = ?{}", args.len() + 1));
+        }
+        args.push(Box::new(size));
     }
     if let Some(media_type) = &q.media_type {
         wheres.push(format!("m.media_type = ?{}", args.len() + 1));

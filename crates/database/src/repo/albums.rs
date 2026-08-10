@@ -19,6 +19,34 @@ const MAX_MULTI_PLAYER_ALBUMS: usize = 60;
 /// rather than a real "these two together" set.
 const MIN_MULTI_PLAYER_MEDIA: i64 = 2;
 
+/// Group sizes at or above this collapse into a single "10+ persons" album.
+/// Without a cap, a team shoot produces a long tail of albums holding one file
+/// each ("Seventeen persons"), which is noise rather than a useful grouping.
+pub const GROUP_SIZE_CAP: i64 = 10;
+
+/// Names a group-size album. `size` is already bucketed, so anything at the cap
+/// is the "or more" bucket.
+pub fn group_size_name(size: i64) -> String {
+    match size {
+        n if n <= 0 => "No people".to_string(),
+        1 => "Single".to_string(),
+        2 => "Two persons".to_string(),
+        3 => "Three persons".to_string(),
+        4 => "Four persons".to_string(),
+        5 => "Five persons".to_string(),
+        6 => "Six persons".to_string(),
+        7 => "Seven persons".to_string(),
+        8 => "Eight persons".to_string(),
+        9 => "Nine persons".to_string(),
+        _ => format!("{GROUP_SIZE_CAP}+ persons"),
+    }
+}
+
+/// Which album a file of `person_count` people belongs to.
+pub fn group_size_bucket(person_count: i64) -> i64 {
+    person_count.clamp(0, GROUP_SIZE_CAP)
+}
+
 fn map(row: &Row<'_>) -> rusqlite::Result<Album> {
     let person_ids: Option<String> = get(row, "person_ids")?;
     Ok(Album {
@@ -53,9 +81,13 @@ pub fn list(conn: &Connection, shoot_id: i64) -> Result<Vec<Album>> {
                      WHEN 'player'       THEN 0
                      WHEN 'multiPlayer'  THEN 1
                      WHEN 'team'         THEN 2
-                     ELSE 3
+                     WHEN 'groupSize'    THEN 3
+                     ELSE 4
                    END,
-                   media_count DESC, name COLLATE NOCASE",
+                   -- Group-size albums read naturally in size order; every
+                   -- other type is most-populated first.
+                   CASE WHEN album_type = 'groupSize' THEN sort_order ELSE -media_count END,
+                   name COLLATE NOCASE",
     )?;
     let rows = stmt
         .query_map(params![shoot_id], map)?
@@ -113,6 +145,12 @@ fn refresh_album_counts(conn: &Connection, album_id: i64) -> Result<i64> {
 ///
 /// Run this inside a transaction — it deletes before it writes.
 pub fn regenerate(conn: &Connection, shoot_id: i64) -> Result<usize> {
+    // Group sizes depend on identity, which review actions change (confirming a
+    // face, naming a cluster, merging two people). Refreshing here makes
+    // regeneration the one place counts are guaranteed current, so no caller
+    // has to remember to do it.
+    super::media::refresh_person_counts(conn, shoot_id)?;
+
     conn.execute("DELETE FROM albums WHERE shoot_id = ?1", params![shoot_id])?;
     let mut created = 0usize;
 
@@ -252,6 +290,44 @@ pub fn regenerate(conn: &Connection, shoot_id: i64) -> Result<usize> {
         created += 1;
     }
 
+    // ---- Group size --------------------------------------------------------
+    // A second, independent axis: how many people are in the file, regardless
+    // of who they are. Every file lands in exactly one of these.
+    let buckets: Vec<i64> = {
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT MIN(person_count, ?2) FROM media WHERE shoot_id = ?1 ORDER BY 1",
+        )?;
+        let rows = stmt
+            .query_map(params![shoot_id, GROUP_SIZE_CAP], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+
+    for bucket in buckets {
+        let album_id = insert_album(
+            conn,
+            shoot_id,
+            &group_size_name(bucket),
+            AlbumType::GroupSize,
+            &[],
+            None,
+            // Sorting by size makes the section read 0, 1, 2 … 10+ for free.
+            bucket,
+        )?;
+        conn.execute(
+            "INSERT OR IGNORE INTO album_media (album_id, media_id)
+             SELECT ?1, id FROM media
+              WHERE shoot_id = ?2
+                AND (person_count = ?3 OR (?3 = ?4 AND person_count >= ?4))",
+            params![album_id, shoot_id, bucket, GROUP_SIZE_CAP],
+        )?;
+        if refresh_album_counts(conn, album_id)? == 0 {
+            conn.execute("DELETE FROM albums WHERE id = ?1", params![album_id])?;
+        } else {
+            created += 1;
+        }
+    }
+
     Ok(created)
 }
 
@@ -368,6 +444,320 @@ mod tests {
         let second = regenerate(&conn, shoot_id).unwrap();
         assert_eq!(first, second);
         assert_eq!(list(&conn, shoot_id).unwrap().len(), first);
+    }
+
+    /// Adds a media row with `faces` detections. `frame_times` of `None` means
+    /// a photo; a video passes one entry per sampled frame.
+    fn add_media_with_faces(
+        conn: &Connection,
+        shoot_id: i64,
+        filename: &str,
+        is_video: bool,
+        // (frame_time, person_id) per detected face
+        detections: &[(Option<f64>, Option<i64>)],
+    ) -> i64 {
+        let media_id = media::upsert(
+            conn,
+            &NewMedia {
+                shoot_id,
+                path: format!("C:\\s\\{filename}"),
+                filename: filename.to_string(),
+                media_type: if is_video { MediaType::Video } else { MediaType::Photo },
+                extension: if is_video { "mp4".into() } else { "jpg".into() },
+                file_size: 1,
+                content_key: filename.to_string(),
+                captured_at: None,
+            },
+        )
+        .unwrap();
+
+        for (frame_time, person_id) in detections {
+            let face_id = faces::insert(
+                conn,
+                &NewFace {
+                    media_id,
+                    shoot_id,
+                    bbox: BoundingBox { x: 0.0, y: 0.0, w: 0.1, h: 0.1 },
+                    landmarks: None,
+                    detection_confidence: 0.9,
+                    embedding: Some(vec![1.0, 0.0]),
+                    quality: Some(0.5),
+                    frame_time: *frame_time,
+                    crop_path: None,
+                },
+            )
+            .unwrap();
+            if let Some(person_id) = person_id {
+                faces::assign(conn, face_id, *person_id, Some(0.99)).unwrap();
+            }
+        }
+        media_id
+    }
+
+    fn person_count_of(conn: &Connection, media_id: i64) -> i64 {
+        media::get_by_id(conn, media_id).unwrap().unwrap().person_count
+    }
+
+    #[test]
+    fn group_size_names_cover_the_range() {
+        assert_eq!(group_size_name(0), "No people");
+        assert_eq!(group_size_name(1), "Single");
+        assert_eq!(group_size_name(2), "Two persons");
+        assert_eq!(group_size_name(3), "Three persons");
+        assert_eq!(group_size_name(9), "Nine persons");
+        assert_eq!(group_size_name(10), "10+ persons");
+        assert_eq!(group_size_bucket(25), GROUP_SIZE_CAP);
+        assert_eq!(group_size_bucket(0), 0);
+        assert_eq!(group_size_bucket(3), 3);
+    }
+
+    /// The trap this whole feature had to avoid: video analysis writes one face
+    /// row per detection *per sampled frame*, so `face_count` for a one-person
+    /// interview sampled five times is 5. The person count must still be 1.
+    #[test]
+    fn a_video_of_one_player_across_many_frames_counts_as_one_person() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+        let shoot = shoots::create(&conn, "S", "C:\\s").unwrap();
+        let jonathan = people::get_or_create(&conn, "Jonathan", None).unwrap();
+
+        let media_id = add_media_with_faces(
+            &conn,
+            shoot.id,
+            "interview.mp4",
+            true,
+            &[
+                (Some(0.0), Some(jonathan.id)),
+                (Some(5.0), Some(jonathan.id)),
+                (Some(10.0), Some(jonathan.id)),
+                (Some(15.0), Some(jonathan.id)),
+                (Some(20.0), Some(jonathan.id)),
+            ],
+        );
+        media::refresh_face_count(&conn, media_id).unwrap();
+        media::refresh_person_counts(&conn, shoot.id).unwrap();
+
+        assert_eq!(
+            media::get_by_id(&conn, media_id).unwrap().unwrap().face_count,
+            5,
+            "face_count counts rows, one per sampled frame"
+        );
+        assert_eq!(person_count_of(&conn, media_id), 1, "but there is only one person in the clip");
+    }
+
+    /// The agreed semantics: distinct people across the whole clip, so two
+    /// players interviewed one after the other is "Two persons" even though
+    /// they never share a frame.
+    #[test]
+    fn a_video_counts_players_who_never_share_a_frame() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+        let shoot = shoots::create(&conn, "S", "C:\\s").unwrap();
+        let jonathan = people::get_or_create(&conn, "Jonathan", None).unwrap();
+        let mavi = people::get_or_create(&conn, "Mavi", None).unwrap();
+
+        let media_id = add_media_with_faces(
+            &conn,
+            shoot.id,
+            "two.mp4",
+            true,
+            &[
+                (Some(0.0), Some(jonathan.id)),
+                (Some(5.0), Some(jonathan.id)),
+                (Some(60.0), Some(mavi.id)),
+                (Some(65.0), Some(mavi.id)),
+            ],
+        );
+        media::refresh_person_counts(&conn, shoot.id).unwrap();
+        assert_eq!(person_count_of(&conn, media_id), 2);
+    }
+
+    /// An unrecognised stranger sampled across many frames is still one person.
+    /// This is the max-per-frame fallback doing its job.
+    #[test]
+    fn an_unidentified_stranger_in_a_video_counts_once() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+        let shoot = shoots::create(&conn, "S", "C:\\s").unwrap();
+
+        let solo = add_media_with_faces(
+            &conn,
+            shoot.id,
+            "stranger.mp4",
+            true,
+            &[(Some(0.0), None), (Some(5.0), None), (Some(10.0), None)],
+        );
+        // Two strangers share the second frame, so that clip holds two people.
+        let pair = add_media_with_faces(
+            &conn,
+            shoot.id,
+            "strangers.mp4",
+            true,
+            &[(Some(0.0), None), (Some(5.0), None), (Some(5.0), None)],
+        );
+        media::refresh_person_counts(&conn, shoot.id).unwrap();
+
+        assert_eq!(person_count_of(&conn, solo), 1);
+        assert_eq!(person_count_of(&conn, pair), 2);
+    }
+
+    #[test]
+    fn a_photo_counts_its_faces_and_ignores_false_detections() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+        let shoot = shoots::create(&conn, "S", "C:\\s").unwrap();
+
+        let media_id =
+            add_media_with_faces(&conn, shoot.id, "group.jpg", false, &[(None, None), (None, None), (None, None)]);
+        media::refresh_person_counts(&conn, shoot.id).unwrap();
+        assert_eq!(person_count_of(&conn, media_id), 3);
+
+        // Marking one as a false detection drops the count.
+        let face_ids: Vec<i64> = faces::for_media(&conn, media_id).unwrap().iter().map(|f| f.id).collect();
+        faces::ignore_many(&conn, &face_ids[..1]).unwrap();
+        media::refresh_person_counts(&conn, shoot.id).unwrap();
+        assert_eq!(person_count_of(&conn, media_id), 2);
+    }
+
+    /// Found against real shoot data: the clusterer had put two faces from the
+    /// same photo into one cluster, so counting distinct identities reported 12
+    /// people in a 13-face photo. Nobody appears twice in one photograph, so
+    /// the per-frame face count is a floor the count may not sag below.
+    #[test]
+    fn two_faces_in_one_photo_are_two_people_even_if_clustering_merged_them() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+        let shoot = shoots::create(&conn, "S", "C:\\s").unwrap();
+        let jonathan = people::get_or_create(&conn, "Jonathan", None).unwrap();
+
+        // Both faces wrongly attributed to the same player.
+        let media_id = add_media_with_faces(
+            &conn,
+            shoot.id,
+            "pair.jpg",
+            false,
+            &[(None, Some(jonathan.id)), (None, Some(jonathan.id))],
+        );
+        media::refresh_person_counts(&conn, shoot.id).unwrap();
+        assert_eq!(person_count_of(&conn, media_id), 2);
+    }
+
+    /// The floor must not break the video case it was added alongside: a player
+    /// sampled across many frames is still one person, because no single frame
+    /// ever holds more than one face.
+    #[test]
+    fn the_per_frame_floor_does_not_inflate_videos() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+        let shoot = shoots::create(&conn, "S", "C:\\s").unwrap();
+        let jonathan = people::get_or_create(&conn, "Jonathan", None).unwrap();
+
+        let media_id = add_media_with_faces(
+            &conn,
+            shoot.id,
+            "solo.mp4",
+            true,
+            &[(Some(0.0), Some(jonathan.id)), (Some(5.0), Some(jonathan.id)), (Some(10.0), Some(jonathan.id))],
+        );
+        media::refresh_person_counts(&conn, shoot.id).unwrap();
+        assert_eq!(person_count_of(&conn, media_id), 1);
+    }
+
+    #[test]
+    fn generates_one_album_per_group_size() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+        let shoot = shoots::create(&conn, "S", "C:\\s").unwrap();
+
+        add_media_with_faces(&conn, shoot.id, "solo.jpg", false, &[(None, None)]);
+        add_media_with_faces(&conn, shoot.id, "duo.jpg", false, &[(None, None), (None, None)]);
+        add_media_with_faces(&conn, shoot.id, "duo2.jpg", false, &[(None, None), (None, None)]);
+        // A file with no faces at all — a venue or logo shot.
+        add_media_with_faces(&conn, shoot.id, "venue.jpg", false, &[]);
+
+        regenerate(&conn, shoot.id).unwrap();
+        let by_size: Vec<(String, i64)> = list(&conn, shoot.id)
+            .unwrap()
+            .into_iter()
+            .filter(|a| a.album_type == "groupSize")
+            .map(|a| (a.name, a.media_count))
+            .collect();
+
+        assert_eq!(
+            by_size,
+            vec![
+                ("No people".to_string(), 1),
+                ("Single".to_string(), 1),
+                ("Two persons".to_string(), 2),
+            ],
+            "albums come back in size order"
+        );
+    }
+
+    #[test]
+    fn large_groups_collapse_into_one_album() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+        let shoot = shoots::create(&conn, "S", "C:\\s").unwrap();
+
+        for (name, count) in [("ten.jpg", 10), ("eleven.jpg", 11), ("fifteen.jpg", 15)] {
+            let detections: Vec<(Option<f64>, Option<i64>)> = (0..count).map(|_| (None, None)).collect();
+            add_media_with_faces(&conn, shoot.id, name, false, &detections);
+        }
+
+        regenerate(&conn, shoot.id).unwrap();
+        let big: Vec<(String, i64)> = list(&conn, shoot.id)
+            .unwrap()
+            .into_iter()
+            .filter(|a| a.album_type == "groupSize")
+            .map(|a| (a.name, a.media_count))
+            .collect();
+
+        assert_eq!(big, vec![("10+ persons".to_string(), 3)]);
+    }
+
+    #[test]
+    fn group_size_albums_coexist_with_player_albums() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+        let shoot_id = seed(&conn);
+
+        regenerate(&conn, shoot_id).unwrap();
+        let albums = list(&conn, shoot_id).unwrap();
+
+        // The two axes are independent: the same file is in both.
+        assert!(albums.iter().any(|a| a.album_type == "player" && a.name == "Jonathan"));
+        assert!(albums.iter().any(|a| a.album_type == "groupSize"));
+
+        let total_in_group_size: i64 = albums
+            .iter()
+            .filter(|a| a.album_type == "groupSize")
+            .map(|a| a.media_count)
+            .sum();
+        let media_total = media::count_for_shoot(&conn, shoot_id).unwrap();
+        assert_eq!(total_in_group_size, media_total, "every file lands in exactly one size bucket");
+    }
+
+    #[test]
+    fn the_group_size_filter_matches_its_album() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+        let shoot = shoots::create(&conn, "S", "C:\\s").unwrap();
+        add_media_with_faces(&conn, shoot.id, "solo.jpg", false, &[(None, None)]);
+        add_media_with_faces(&conn, shoot.id, "duo.jpg", false, &[(None, None), (None, None)]);
+        regenerate(&conn, shoot.id).unwrap();
+
+        let singles = media::query(
+            &conn,
+            &crate::models::MediaQuery {
+                shoot_id: Some(shoot.id),
+                group_size: Some(1),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(singles.len(), 1);
+        assert_eq!(singles[0].filename, "solo.jpg");
     }
 
     #[test]

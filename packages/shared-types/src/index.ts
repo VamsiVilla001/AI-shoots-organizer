@@ -41,7 +41,10 @@ export type FaceAssignment =
 
 export type ClusterStatus = 'unnamed' | 'named' | 'ignored'
 
-export type AlbumType = 'player' | 'multiPlayer' | 'unidentified' | 'team'
+export type AlbumType = 'player' | 'multiPlayer' | 'unidentified' | 'team' | 'groupSize'
+
+/** Sizes at or above this collapse into one "10+ persons" album. */
+export const GROUP_SIZE_CAP = 10
 
 export type JobState = 'queued' | 'running' | 'done' | 'failed' | 'cancelled'
 
@@ -98,7 +101,11 @@ export interface Media {
   orientation: number
   thumbnailPath: string | null
   processingStatus: ProcessingStatus
+  /** Detected face *rows*. For a video this counts every sampled frame, so it
+   *  is not the number of people — use `personCount` for that. */
   faceCount: number
+  /** Distinct people in the file; what group-size albums are built from. */
+  personCount: number
   error: string | null
 }
 
@@ -270,6 +277,9 @@ export interface MediaQuery {
   mediaType?: MediaType | null
   search?: string | null
   onlyUnidentified?: boolean
+  /** Only files holding exactly this many people; at `GROUP_SIZE_CAP` it means
+   *  "this many or more", matching how the albums bucket. */
+  groupSize?: number | null
   limit?: number | null
   offset?: number | null
 }
@@ -375,6 +385,9 @@ export interface ExportOptions {
   preserveMetadata: boolean
   existing: ExistingFilePolicy
   includeMultiPlayer: boolean
+  /** Write "Single", "Two persons" … folders too. Off by default: every file
+   *  is in both a player album and a size album, so this doubles the output. */
+  includeGroupSize: boolean
 }
 
 export interface ExportPreview {

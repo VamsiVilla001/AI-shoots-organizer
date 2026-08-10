@@ -87,6 +87,9 @@ string_enum!(AlbumType {
     MultiPlayer => "multiPlayer",
     Unidentified => "unidentified",
     Team => "team",
+    /// Grouped by how many people are in the file, independently of who they
+    /// are: "Single", "Two persons", and so on.
+    GroupSize => "groupSize",
 });
 
 string_enum!(JobKind {
@@ -168,7 +171,12 @@ pub struct Media {
     pub orientation: i64,
     pub thumbnail_path: Option<String>,
     pub processing_status: String,
+    /// Number of detected face *rows*. For a video this counts every sampled
+    /// frame, so it is not the number of people — see `person_count`.
     pub face_count: i64,
+    /// Number of distinct people in the file, which is what group-size albums
+    /// are built from.
+    pub person_count: i64,
     pub error: Option<String>,
 }
 
@@ -421,6 +429,9 @@ pub struct MediaQuery {
     pub search: Option<String>,
     /// Only media with at least one face nobody has identified yet.
     pub only_unidentified: bool,
+    /// Only media holding exactly this many people. Values at or above the
+    /// group-size cap mean "this many or more", matching how the albums bucket.
+    pub group_size: Option<i64>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
 }

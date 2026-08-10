@@ -67,10 +67,15 @@ pub struct AppSettings {
 impl Default for AppSettings {
     fn default() -> Self {
         let cores = num_cpus::get();
+        let worker_threads = cores.div_ceil(2).clamp(1, 4);
         Self {
             accelerator: Accelerator::Auto,
-            inference_threads: (cores / 2).max(1),
-            worker_threads: cores.div_ceil(2).clamp(1, 4),
+            // Threads are shared out across the workers rather than handed to
+            // each in full. The previous default gave every worker `cores / 2`,
+            // so on a 16-core machine four workers asked for 32 threads and
+            // spent much of their time fighting each other for cores.
+            inference_threads: (cores / worker_threads).max(1),
+            worker_threads,
 
             detection_threshold: 0.5,
             detection_nms_threshold: 0.4,
@@ -202,6 +207,22 @@ mod tests {
         assert_eq!(sanitised.detection_threshold, defaults.detection_threshold);
         assert_eq!(sanitised.detection_input_size, defaults.detection_input_size);
         assert_eq!(sanitised.recognition_threshold, defaults.recognition_threshold);
+    }
+
+    /// Workers each build their own inference session, so handing every one of
+    /// them a full share of the machine oversubscribes it badly.
+    #[test]
+    fn default_threads_do_not_oversubscribe_the_machine() {
+        let settings = AppSettings::default();
+        let cores = num_cpus::get();
+        assert!(
+            settings.worker_threads * settings.inference_threads <= cores.max(1),
+            "{} workers x {} threads exceeds {cores} cores",
+            settings.worker_threads,
+            settings.inference_threads
+        );
+        assert!(settings.inference_threads >= 1);
+        assert!(settings.worker_threads >= 1);
     }
 
     #[test]
