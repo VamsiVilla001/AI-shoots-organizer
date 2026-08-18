@@ -95,13 +95,15 @@ impl ArcFaceEmbedder {
 
         for (n, crop) in crops.iter().enumerate() {
             let base = n * 3 * plane;
-            for y in 0..side.min(crop.height() as usize) {
-                for x in 0..side.min(crop.width() as usize) {
-                    let px = crop.get_pixel(x as u32, y as u32);
+            let image_data = &mut data[base..base + 3 * plane];
+            let (red, remaining) = image_data.split_at_mut(plane);
+            let (green, blue) = remaining.split_at_mut(plane);
+            for (y, pixels) in crop.rows().take(side).enumerate() {
+                for (x, px) in pixels.take(side).enumerate() {
                     let offset = y * side + x;
-                    for c in 0..3 {
-                        data[base + c * plane + offset] = (px[c] as f32 - PIXEL_MEAN) / PIXEL_SCALE;
-                    }
+                    red[offset] = (px[0] as f32 - PIXEL_MEAN) / PIXEL_SCALE;
+                    green[offset] = (px[1] as f32 - PIXEL_MEAN) / PIXEL_SCALE;
+                    blue[offset] = (px[2] as f32 - PIXEL_MEAN) / PIXEL_SCALE;
                 }
             }
         }

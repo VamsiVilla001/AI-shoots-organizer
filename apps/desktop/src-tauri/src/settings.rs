@@ -12,6 +12,12 @@ use teo_face_detection::{Accelerator, DetectorConfig, SessionConfig};
 use teo_video_analysis::VideoAnalysisConfig;
 
 const KEY: &str = "app_settings";
+/// More than two concurrent decoders and ONNX engine pairs makes the desktop
+/// shell compete with its own background work for RAM, CPU and GPU time.
+const MAX_BACKGROUND_WORKERS: usize = 2;
+/// Leave CPU capacity for the webview, SQLite and image decoding even on large
+/// workstations. ONNX inference scales poorly beyond this per-session limit.
+const MAX_INFERENCE_THREADS: usize = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -67,14 +73,15 @@ pub struct AppSettings {
 impl Default for AppSettings {
     fn default() -> Self {
         let cores = num_cpus::get();
-        let worker_threads = cores.div_ceil(2).clamp(1, 4);
+        let worker_threads = cores.clamp(1, MAX_BACKGROUND_WORKERS);
+        let background_cores = cores.saturating_sub(1).max(1);
         Self {
             accelerator: Accelerator::Auto,
             // Threads are shared out across the workers rather than handed to
             // each in full. The previous default gave every worker `cores / 2`,
             // so on a 16-core machine four workers asked for 32 threads and
             // spent much of their time fighting each other for cores.
-            inference_threads: (cores / worker_threads).max(1),
+            inference_threads: (background_cores / worker_threads).clamp(1, MAX_INFERENCE_THREADS),
             worker_threads,
 
             detection_threshold: 0.5,
@@ -123,8 +130,10 @@ impl AppSettings {
     /// build, so neither source is trusted.
     pub fn sanitised(mut self) -> Self {
         let cores = num_cpus::get();
-        self.inference_threads = self.inference_threads.clamp(1, cores.max(1));
-        self.worker_threads = self.worker_threads.clamp(1, cores.max(1));
+        self.worker_threads = self.worker_threads.clamp(1, cores.clamp(1, MAX_BACKGROUND_WORKERS));
+        let background_cores = cores.saturating_sub(1).max(1);
+        let max_threads = (background_cores / self.worker_threads).clamp(1, MAX_INFERENCE_THREADS);
+        self.inference_threads = self.inference_threads.clamp(1, max_threads);
 
         self.detection_threshold = self.detection_threshold.clamp(0.05, 0.99);
         self.detection_nms_threshold = self.detection_nms_threshold.clamp(0.1, 0.9);
@@ -223,6 +232,8 @@ mod tests {
         );
         assert!(settings.inference_threads >= 1);
         assert!(settings.worker_threads >= 1);
+        assert!(settings.worker_threads <= MAX_BACKGROUND_WORKERS);
+        assert!(settings.inference_threads <= MAX_INFERENCE_THREADS);
     }
 
     #[test]
@@ -241,7 +252,8 @@ mod tests {
         assert!(wild.detection_threshold <= 0.99);
         assert!(wild.recognition_threshold >= 0.1);
         assert_eq!(wild.cluster_min_size, 1);
-        assert!(wild.worker_threads <= num_cpus::get());
+        assert!(wild.worker_threads <= MAX_BACKGROUND_WORKERS);
+        assert!(wild.inference_threads <= MAX_INFERENCE_THREADS);
         assert_eq!(wild.analysis_max_dim, 640);
         assert_eq!(wild.video_max_frames, 1);
     }

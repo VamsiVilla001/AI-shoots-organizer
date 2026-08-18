@@ -16,6 +16,10 @@ use teo_media_core::{scan, MediaKind, ScanOptions};
 
 use crate::settings::AppSettings;
 
+/// Bound each SQLite write transaction so UI reads and progress updates get a
+/// regular chance to run during very large imports.
+const SCAN_DB_BATCH_SIZE: usize = 200;
+
 /// Job priorities. Lower numbers run first, so the queue naturally moves
 /// through indexing, then per-file AI, then the shoot-wide stages.
 pub mod priority {
@@ -80,31 +84,36 @@ pub fn scan_shoot(
         new_media: 0,
     };
 
-    // One transaction for the whole insert: on a 2,400-file shoot this is the
-    // difference between a couple of seconds and a couple of minutes.
-    let queued: Vec<(i64, MediaKind)> = db.transaction(|conn| {
-        let mut queued = Vec::with_capacity(report.files.len());
-        for file in &report.files {
-            let media_id = media_repo::upsert(
-                conn,
-                &NewMedia {
-                    shoot_id,
-                    path: file.path.display().to_string(),
-                    filename: file.filename.clone(),
-                    media_type: match file.kind {
-                        MediaKind::Photo => MediaType::Photo,
-                        MediaKind::Video => MediaType::Video,
+    // Batch inserts rather than holding one writer lock for an entire large
+    // shoot. This keeps the UI and progress monitor responsive without paying
+    // the cost of one transaction per file.
+    let mut queued: Vec<(i64, MediaKind)> = Vec::with_capacity(report.files.len());
+    for batch in report.files.chunks(SCAN_DB_BATCH_SIZE) {
+        let mut rows = db.transaction(|conn| {
+            let mut rows = Vec::with_capacity(batch.len());
+            for file in batch {
+                let media_id = media_repo::upsert(
+                    conn,
+                    &NewMedia {
+                        shoot_id,
+                        path: file.path.display().to_string(),
+                        filename: file.filename.clone(),
+                        media_type: match file.kind {
+                            MediaKind::Photo => MediaType::Photo,
+                            MediaKind::Video => MediaType::Video,
+                        },
+                        extension: file.extension.clone(),
+                        file_size: file.file_size as i64,
+                        content_key: file.content_key.clone(),
+                        captured_at: file.modified_at.clone(),
                     },
-                    extension: file.extension.clone(),
-                    file_size: file.file_size as i64,
-                    content_key: file.content_key.clone(),
-                    captured_at: file.modified_at.clone(),
-                },
-            )?;
-            queued.push((media_id, file.kind));
-        }
-        Ok(queued)
-    })?;
+                )?;
+                rows.push((media_id, file.kind));
+            }
+            Ok(rows)
+        })?;
+        queued.append(&mut rows);
+    }
 
     // Queue per-file work only for files that still need it, so a re-scan of a
     // mostly-processed shoot is nearly free.
@@ -116,21 +125,25 @@ pub fn scan_shoot(
             .collect()
     };
 
-    db.transaction(|conn| {
-        for (media_id, kind) in &queued {
-            if !pending.contains(media_id) {
-                continue;
+    for batch in queued.chunks(SCAN_DB_BATCH_SIZE) {
+        let added = db.transaction(|conn| {
+            let mut added = 0usize;
+            for (media_id, kind) in batch {
+                if !pending.contains(media_id) {
+                    continue;
+                }
+                added += 1;
+                jobs::enqueue(conn, shoot_id, JobKind::Thumbnail, Some(*media_id), priority::INDEX, None)?;
+                let (job_kind, job_priority) = match kind {
+                    MediaKind::Photo => (JobKind::AnalysePhoto, priority::ANALYSE_PHOTO),
+                    MediaKind::Video => (JobKind::AnalyseVideo, priority::ANALYSE_VIDEO),
+                };
+                jobs::enqueue(conn, shoot_id, job_kind, Some(*media_id), job_priority, None)?;
             }
-            summary.new_media += 1;
-            jobs::enqueue(conn, shoot_id, JobKind::Thumbnail, Some(*media_id), priority::INDEX, None)?;
-            let (job_kind, job_priority) = match kind {
-                MediaKind::Photo => (JobKind::AnalysePhoto, priority::ANALYSE_PHOTO),
-                MediaKind::Video => (JobKind::AnalyseVideo, priority::ANALYSE_VIDEO),
-            };
-            jobs::enqueue(conn, shoot_id, job_kind, Some(*media_id), job_priority, None)?;
-        }
-        Ok(())
-    })?;
+            Ok(added)
+        })?;
+        summary.new_media += added;
+    }
 
     {
         let conn = db.conn()?;

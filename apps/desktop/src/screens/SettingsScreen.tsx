@@ -104,7 +104,7 @@ export function SettingsScreen() {
               Falls back to CPU automatically when the GPU provider cannot start.
             </span>
           </label>
-          {number('Worker threads', 'workerThreads', 1, `Files analysed at once. ${info.data?.cpuCores ?? '?'} cores available.`)}
+          {number('Worker threads', 'workerThreads', 1, `Background workers (maximum 2). Face AI uses one GPU worker; the second assists scanning and thumbnails. ${info.data?.cpuCores ?? '?'} cores available.`)}
           {number('Analysis image size', 'analysisMaxDim', 64, 'Longest edge before detection. Lower is faster; higher finds smaller faces.')}
 
           <h2 style={{ marginTop: 8 }}>Models</h2>

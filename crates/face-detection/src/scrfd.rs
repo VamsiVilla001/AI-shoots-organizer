@@ -83,13 +83,21 @@ impl ScrfdDetector {
 
         let plane = (target * target) as usize;
         let mut tensor = vec![0.0f32; plane * 3];
-        for y in 0..lb.height.min(target) {
-            for x in 0..lb.width.min(target) {
-                let px = resized.get_pixel(x, y);
-                let offset = (y * target + x) as usize;
-                for c in 0..3 {
-                    tensor[c * plane + offset] = (px[c] as f32 - PIXEL_MEAN) / PIXEL_SCALE;
-                }
+        let (red, remaining) = tensor.split_at_mut(plane);
+        let (green, blue) = remaining.split_at_mut(plane);
+        let copy_width = lb.width.min(target);
+        let copy_height = lb.height.min(target);
+
+        // Write directly into the three NCHW planes. Avoiding the inner
+        // channel loop and repeated `c * plane` arithmetic matters here: this
+        // runs across all 409,600 detector pixels for every media item.
+        for (y, pixels) in resized.rows().take(copy_height as usize).enumerate() {
+            let row = y * target as usize;
+            for (x, px) in pixels.take(copy_width as usize).enumerate() {
+                let offset = row + x;
+                red[offset] = (px[0] as f32 - PIXEL_MEAN) / PIXEL_SCALE;
+                green[offset] = (px[1] as f32 - PIXEL_MEAN) / PIXEL_SCALE;
+                blue[offset] = (px[2] as f32 - PIXEL_MEAN) / PIXEL_SCALE;
             }
         }
         (tensor, lb, target)
