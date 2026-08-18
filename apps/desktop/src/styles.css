@@ -352,6 +352,28 @@ h2 {
   padding: 2px 6px;
 }
 
+.media-tile .corner.confidence {
+  left: 6px;
+  right: auto;
+  color: var(--ok);
+  border: 1px solid rgba(76, 217, 123, 0.35);
+}
+
+.grouping-bar {
+  align-items: flex-end;
+  margin-bottom: 18px;
+}
+
+.grouping-bar label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.grouping-bar select {
+  min-width: 210px;
+}
+
 .media-tile .placeholder {
   display: flex;
   align-items: center;

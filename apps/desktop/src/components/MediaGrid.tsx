@@ -10,6 +10,7 @@ export function MediaGrid(props: {
   media: Media[]
   selected?: Set<number>
   onToggleSelect?: (mediaId: number, additive: boolean) => void
+  cornerLabels?: ReadonlyMap<number, string>
 }) {
   const openViewer = useUi((s) => s.openViewer)
 
@@ -45,6 +46,9 @@ export function MediaGrid(props: {
               <div className="placeholder">
                 {item.processingStatus === 'failed' ? 'failed' : 'indexing…'}
               </div>
+            )}
+            {props.cornerLabels?.get(item.id) && (
+              <span className="corner confidence">{props.cornerLabels.get(item.id)}</span>
             )}
             {item.mediaType === 'video' && (
               <span className="corner">▶ {item.duration ? formatTime(item.duration) : 'video'}</span>

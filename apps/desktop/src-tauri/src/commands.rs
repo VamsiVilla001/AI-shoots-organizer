@@ -165,6 +165,37 @@ pub fn delete_shoot_index(app: AppHandle, state: State<'_, Arc<AppState>>, shoot
     Ok(())
 }
 
+/// Removes all scanned shoot indexes and generated thumbnails while keeping
+/// settings, player profiles, logs and installed models. Original media
+/// folders are never modified.
+#[tauri::command]
+pub fn clear_scanned_data(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<usize> {
+    state.set_paused(true);
+
+    let cleared = (|| {
+        let shoot_ids = {
+            let conn = state.db.conn()?;
+            shoots::list(&conn)?.into_iter().map(|shoot| shoot.id).collect::<Vec<_>>()
+        };
+        for shoot_id in shoot_ids {
+            state.cancel_shoot(shoot_id);
+        }
+        state.db.transaction(shoots::clear_all_indexes)
+    })();
+
+    // Never leave processing paused if the database operation fails.
+    state.set_paused(false);
+    let removed = cleared?;
+
+    match state.thumbnails.clear() {
+        Ok(count) => tracing::info!(shoots = removed, thumbnails = count, "cleared scanned data"),
+        Err(error) => tracing::warn!(%error, "scan indexes were cleared but some thumbnails could not be removed"),
+    }
+
+    events::emit(&app, events::LIBRARY_CHANGED, ());
+    Ok(removed)
+}
+
 /// Re-scans the folder and queues anything unfinished — the "Resume
 /// Processing" action.
 #[tauri::command]

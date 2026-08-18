@@ -7,6 +7,7 @@
 //! loading models repeatedly" rule from §19.
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use image::RgbImage;
 use teo_database::models::{BoundingBox, Media, MediaMetadata, NewFace, ProcessingStatus};
@@ -53,11 +54,25 @@ pub struct Engine {
     settings: AppSettings,
 }
 
+/// ONNX Runtime's DirectML provider can corrupt the native heap when several
+/// large sessions are created concurrently. Workers still own and run their
+/// engines independently, but construction must pass through this process-wide
+/// gate so provider and model initialisation happen one engine at a time.
+fn with_serialized_engine_initialization<T>(build: impl FnOnce() -> T) -> T {
+    static ENGINE_INITIALIZATION: OnceLock<parking_lot::Mutex<()>> = OnceLock::new();
+    let _guard = ENGINE_INITIALIZATION.get_or_init(|| parking_lot::Mutex::new(())).lock();
+    build()
+}
+
 impl Engine {
     /// Builds an engine, loading both models. Fails when either is missing —
     /// the caller turns that into a message pointing at the model setup step
     /// rather than a stack trace.
     pub fn new(paths: &AppPaths, settings: &AppSettings) -> Result<Self> {
+        with_serialized_engine_initialization(|| Self::new_unlocked(paths, settings))
+    }
+
+    fn new_unlocked(paths: &AppPaths, settings: &AppSettings) -> Result<Self> {
         let registry = ModelRegistry::new(&paths.models);
         let status = registry.status(settings.detector_model.as_deref(), settings.embedder_model.as_deref());
         if !status.ready {
@@ -320,6 +335,8 @@ pub fn index_media(db: &Database, thumbnails: &ThumbnailCache, ffmpeg: Option<&F
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier};
     use teo_database::models::{MediaType, NewMedia};
     use teo_database::repo::shoots;
 
@@ -330,6 +347,37 @@ mod tests {
             *pixel = image::Rgb([(x % 256) as u8, (y % 256) as u8, 128]);
         }
         image.save(path).expect("failed to write the test jpeg");
+    }
+
+    #[test]
+    fn engine_initialization_is_process_wide_serialized() {
+        const THREADS: usize = 8;
+        let ready = Arc::new(Barrier::new(THREADS));
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+
+        let handles: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let ready = Arc::clone(&ready);
+                let active = Arc::clone(&active);
+                let peak = Arc::clone(&peak);
+                std::thread::spawn(move || {
+                    ready.wait();
+                    with_serialized_engine_initialization(|| {
+                        let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                        peak.fetch_max(now, Ordering::SeqCst);
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                        active.fetch_sub(1, Ordering::SeqCst);
+                    });
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        assert_eq!(peak.load(Ordering::SeqCst), 1);
     }
 
     /// The regression this guards: indexing used to be a method on [`Engine`],

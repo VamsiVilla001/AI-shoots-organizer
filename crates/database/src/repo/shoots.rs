@@ -110,6 +110,15 @@ pub fn delete_index(conn: &Connection, id: i64) -> Result<()> {
     Ok(())
 }
 
+/// Removes every scanned shoot index. Shoot-owned media, faces, clusters,
+/// albums, jobs and exports cascade away; global settings and player profiles
+/// are deliberately retained. Source media is never touched.
+pub fn clear_all_indexes(conn: &Connection) -> Result<usize> {
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM shoots", [], |row| row.get(0))?;
+    conn.execute("DELETE FROM shoots", [])?;
+    Ok(count as usize)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,5 +139,22 @@ mod tests {
 
         set_status(&conn, shoot.id, ShootStatus::Completed).unwrap();
         assert_eq!(get_by_id(&conn, shoot.id).unwrap().unwrap().status, "completed");
+    }
+
+    #[test]
+    fn clearing_scanned_indexes_preserves_settings() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+        create(&conn, "One", "D:\\one").unwrap();
+        create(&conn, "Two", "D:\\two").unwrap();
+        conn.execute("INSERT INTO settings (key, value) VALUES ('theme', 'dark')", [])
+            .unwrap();
+
+        assert_eq!(clear_all_indexes(&conn).unwrap(), 2);
+        assert!(list(&conn).unwrap().is_empty());
+        let setting: String = conn
+            .query_row("SELECT value FROM settings WHERE key = 'theme'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(setting, "dark");
     }
 }
