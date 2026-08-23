@@ -13,7 +13,7 @@ source for the final product documentation.
 | --- | --- |
 | 0 — groundwork | done |
 | 1 — extract the Tauri-free core | done |
-| 2 — HTTP server | not started |
+| 2 — HTTP server | done |
 | 3 — one front end, two transports | not started |
 | 4 — desktop shell becomes a client | not started |
 | 5 — NAS container | not started |
@@ -30,7 +30,7 @@ layer   │                          │        │  NullProgressSink      │
         │  state    settings       │        │  RecordingProgressSink │
 HTTP ──▶│  worker   pipeline       │        └────────────────────────┘
 routes  │  stages   export  models │
-(soon)  │  paths    events         │
+        │  paths    events  media  │
         └──────────┬───────────────┘
                    │
    database · media-core · face-detection · face-recognition
@@ -40,8 +40,9 @@ routes  │  stages   export  models │
 Crates added:
 
 - **`crates/app-core` (`teo-app-core`)** — the application minus its front door.
-- **`crates/server` (`teo-server`)** — lib + bin scaffold. Config only so far:
-  `TEO_BIND`, `TEO_DATA_DIR`, `TEO_MEDIA_ROOTS`, `TEO_OUTPUT_ROOTS`, `TEO_TOKEN`.
+- **`crates/server` (`teo-server`)** — the HTTP front door: routes, SSE, media,
+  filesystem browser, auth, static bundle. Configured entirely from flags and
+  environment.
 
 Both are registered in the root `Cargo.toml` under `[workspace.members]`,
 `[workspace.dependencies]` **and** `[profile.dev.package.*]` with
@@ -101,6 +102,104 @@ Verified after the move: `cargo test --workspace` (56 tests: 48 in `app-core`,
 --all-targets -- -D warnings`, `npm run typecheck`, `npm run web:build`, and the
 packaged desktop app launching and driving a real shoot.
 
+## Phase 2 — the HTTP server
+
+`crates/server` is axum over the same core the desktop app runs: same database,
+same job queue, same worker policy. `boot()` opens the database, starts the
+worker pool and returns the state; `serve()` binds and runs the router.
+
+Configuration is flags first, environment second: `TEO_BIND`, `TEO_DATA_DIR`,
+`TEO_MEDIA_ROOTS`, `TEO_OUTPUT_ROOTS`, `TEO_TOKEN`, `TEO_WEB_DIR`.
+
+### Routes
+
+The command layer ported one for one — same names, same inputs, same outputs.
+Sixty-two commands became routes under `/api`, grouped exactly as `commands.rs`
+groups them. Paths use axum 0.8 syntax (`{id}`, not `:id`); the URLs a client
+calls are unchanged by that.
+
+Four deliberate deviations from the task list's table, none of them a redesign:
+
+| Table said | Built | Why |
+| --- | --- | --- |
+| `POST /api/shoots/:id/pause` | `POST /api/processing/pause` | Pausing is process-wide in the core, exactly as `pause_processing` is. A per-shoot URL would be a lie. |
+| `POST /api/shoots/:id/scan` | — | There is no separate scan command: `resume` re-enqueues the scan and the queue is idempotent. A second route doing the same thing invites drift. |
+| `GET /api/jobs/summary` | built, but new | No desktop command matches it — the sidebar reads per-shoot progress. It aggregates `list_summaries`, adding no new database code. |
+| — | `/api/groups/*` | The manual grouping commands (§34) postdate the table and need routes too. |
+
+`reveal_in_folder` and `open_path` have no server equivalent by nature: they open
+a file manager on the machine running the code, which for a NAS is not the
+machine the person is sitting at.
+
+### Media
+
+`/media/{id}/{thumb,full,stream}` replaces `teomedia://`. The lookup, the
+HEIC/raw render and the `Range` arithmetic moved into `teo_app_core::media`, so
+the protocol handler and the HTTP routes share one implementation rather than
+drifting apart. `stream` answers `206` with `Content-Range` for a ranged request
+and `200` otherwise, and ids remain the only thing either front door accepts —
+no route takes a path.
+
+### Events
+
+`GET /api/events` is Server-Sent Events over a `tokio::sync::broadcast` channel;
+`SseProgressSink` is the core sink implementation. Event names and payloads are
+untouched, so Phase 3 can switch transport without touching a handler. A lagging
+subscriber drops the gap rather than stalling a worker: every payload is a
+snapshot, not a delta.
+
+### Filesystem browser
+
+`/api/fs/roots` and `/api/fs/list` replace the native folder picker. Every
+incoming path is canonicalised — resolving `..` and symlinks — and confirmed to
+sit inside a configured root before anything is read. A parent link is only
+offered while it stays inside a root, so the picker cannot walk out one level at
+a time. Listings give subdirectory names and media counts, one level deep: no
+file names, no sizes, no way to enumerate a share.
+
+Canonicalising on Windows yields `\\?\C:\…`; `config::tidy` strips that before
+a path reaches a caller, because it leaks into export reports and error messages
+and some tools reject it.
+
+### Export destinations
+
+`validate_destination` now checks identity as well as path: a container commonly
+mounts one share twice — `/media` read-only, `/output` writable — and those
+canonicalise differently while being the same directory. Comparing `(dev, ino)`
+on Unix catches it for the destination and every ancestor of it. Windows has no
+stable file index, so the path check stands alone there, as it always has on the
+desktop.
+
+On top of that the server confines destinations to `TEO_OUTPUT_ROOTS` (falling
+back to the media roots). With neither configured — a loopback server behind the
+desktop app, where a native picker chose the folder — any path is allowed and the
+engine's own guard is the only check, which is exactly the desktop's position.
+
+### Auth
+
+One shared bearer token over every `/api/*` and `/media/*` route, compared in
+constant time, taken from `TEO_TOKEN` or generated into `<data>/token` (`0600`
+on Unix; Windows has no mode bits, so the directory is the thing to lock down).
+`POST /api/auth/session` trades the token for an `HttpOnly`, `SameSite=Strict`
+cookie, because `<img>` and `<video>` cannot send headers and media has to load
+without signing every URL.
+
+### Verified
+
+Driven with `curl` against a running server, a temporary data directory and
+three real photos:
+
+- no token → `401`; wrong token → `401`; correct token → `200`
+- `C:\Windows` and a `..` escape → `403`, from both the browser and shoot creation
+- shoot created → `scanning` → `analysing` → `complete`, 11 faces over 3 photos
+- 37 SSE events arrived while it ran: 32 `teo://progress`, 4 `teo://shoot-changed`, 1 `teo://notice`
+- `/media/{id}/thumb` → `200 image/jpeg`, 27,666 bytes, valid JPEG magic
+- group two files → export → `2/2 completed`, folders and `_sorting-report.txt`
+  on disk, source folder unchanged
+- destination inside the source → `403`
+- cookie session → media loads with no `Authorization` header; wrong token → `401`
+- `GET /` served the built React bundle
+
 ## Decisions worth keeping
 
 - **The sink is on the state, not threaded through every call.** It is available
@@ -108,9 +207,12 @@ packaged desktop app launching and driving a real shoot.
   diff to the command layer down to the emit sites.
 - **`serde_json::Value` at the boundary.** The trait cannot be generic and stay
   object-safe. Payload structs remain typed; only the last step is dynamic.
-- **`teomedia://` stays in the desktop shell.** Phase 2 adds HTTP media routes
-  rather than moving the protocol handler, because the two resolve ids the same
-  way but differ entirely in transport.
+- **`teomedia://` stays in the desktop shell**, but its body moved. The Tauri
+  file is now an adapter over `teo_app_core::media`; the HTTP routes are a
+  second adapter. Two transports, one implementation of "id in, bytes out".
+- **Handlers wrap database work in `blocking`.** The core is synchronous by
+  design — pooled SQLite, rayon, std threads — so a handler that called it
+  directly would hold an async runtime thread for the duration of a scan.
 
 ## Open questions
 
