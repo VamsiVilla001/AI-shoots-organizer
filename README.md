@@ -67,6 +67,22 @@ If a shoot is analysing slowly, check that you are running a **release** build
 (`npm run build`) — `npm run dev` compiles for debugging and is several times
 slower.
 
+## Shipping it to other people
+
+Two installers come out of a tagged release — a `.dmg` for Apple Silicon Macs
+and an `-setup.exe` for Windows — built by
+[`.github/workflows/release.yml`](.github/workflows/release.yml):
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+To build the Mac app on the Mac itself: `bash scripts/build-macos.sh`. Note
+that `cargo build --release` is *not* a production build — only the Tauri CLI
+sets the `custom-protocol` feature that switches the app off the dev server.
+Signing, notarisation, bundling the face models and what the recipient needs
+installed are all in [docs/deployment.md](docs/deployment.md).
+
 ## Verifying the code
 
 ```bash

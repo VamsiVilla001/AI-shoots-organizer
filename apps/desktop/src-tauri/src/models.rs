@@ -3,9 +3,11 @@
 //! The application is not bound to one model. Any ONNX detector and any ONNX
 //! embedder dropped into the models folder can be selected; the pipeline only
 //! knows the [`FaceDetector`](teo_face_detection::FaceDetector) and
-//! [`FaceEmbedder`](teo_face_recognition::FaceEmbedder) traits. Models are not
-//! bundled — they are fetched by `scripts/fetch-models.ps1` — so this module
-//! also has to describe *absence* clearly enough for the UI to explain it.
+//! [`FaceEmbedder`](teo_face_recognition::FaceEmbedder) traits. In a
+//! development build the models are fetched by `scripts/fetch-models.*`, so
+//! this module has to describe *absence* clearly enough for the UI to explain
+//! it; a packaged build may instead ship them as bundle resources, which
+//! [`seed_from_bundle`] installs on first launch.
 
 use std::path::{Path, PathBuf};
 
@@ -48,6 +50,45 @@ pub fn classify(file_name: &str) -> ModelRole {
     } else {
         ModelRole::Unknown
     }
+}
+
+/// Copies bundled models into the app data folder, skipping any that are
+/// already there, and returns how many were copied.
+///
+/// A packaged build can ship the ONNX files as bundle resources so an installed
+/// app works without the person who installed it running a fetch script. The
+/// rest of the application only ever reads models from the app data folder, so
+/// this is the one place that knows the bundle can hold them. A build without
+/// bundled models — every development build — finds nothing and does nothing.
+pub fn seed_from_bundle(source: &Path, target: &Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(source) else {
+        return 0;
+    };
+
+    let mut copied = 0usize;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("onnx")) {
+            continue;
+        }
+        let destination = target.join(entry.file_name());
+        if destination.exists() {
+            continue;
+        }
+        // A model the user has swapped out is never overwritten, and a failed
+        // copy is a warning: the app still runs, and the Settings screen says
+        // what is missing.
+        match std::fs::copy(&path, &destination) {
+            Ok(bytes) => {
+                tracing::info!(model = %entry.file_name().to_string_lossy(), bytes, "installed a bundled model");
+                copied += 1;
+            }
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "could not install a bundled model");
+            }
+        }
+    }
+    copied
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -158,6 +199,34 @@ impl ModelRegistry {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn bundled_models_are_installed_once_and_never_overwrite_a_swap() {
+        let root = std::env::temp_dir().join(format!("teo-seed-{}", std::process::id()));
+        let bundle = root.join("bundle");
+        let app_data = root.join("models");
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(&bundle).unwrap();
+        std::fs::create_dir_all(&app_data).unwrap();
+
+        std::fs::write(bundle.join("det_10g.onnx"), b"detector").unwrap();
+        std::fs::write(bundle.join("w600k_r50.onnx"), b"embedder").unwrap();
+        std::fs::write(bundle.join("notes.txt"), b"not a model").unwrap();
+
+        assert_eq!(seed_from_bundle(&bundle, &app_data), 2, "only the .onnx files are installed");
+        assert!(app_data.join("det_10g.onnx").is_file());
+        assert!(!app_data.join("notes.txt").exists());
+
+        // The user swapped a model out; a later launch must leave theirs alone.
+        std::fs::write(app_data.join("det_10g.onnx"), b"the user's own detector").unwrap();
+        assert_eq!(seed_from_bundle(&bundle, &app_data), 0);
+        assert_eq!(std::fs::read(app_data.join("det_10g.onnx")).unwrap(), b"the user's own detector");
+
+        // No bundled models — every development build — is not an error.
+        assert_eq!(seed_from_bundle(&root.join("missing"), &app_data), 0);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     use super::*;
 
     #[test]

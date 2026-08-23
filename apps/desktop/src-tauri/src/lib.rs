@@ -39,6 +39,17 @@ pub fn run() {
             init_logging(&paths);
             tracing::info!(version = env!("CARGO_PKG_VERSION"), data = %paths.root.display(), "starting");
 
+            // A packaged build ships the ONNX models as bundle resources, so an
+            // installed app is usable without whoever installed it running a
+            // fetch script. Development builds have no such resources and skip
+            // this silently.
+            if let Ok(resources) = app.path().resource_dir() {
+                let installed = models::seed_from_bundle(&resources.join("models"), &paths.models);
+                if installed > 0 {
+                    tracing::info!(installed, "installed bundled models into the app data folder");
+                }
+            }
+
             let db = Database::open(paths.database_file())
                 .map_err(|e| format!("could not open the database: {e}"))?;
             let settings = AppSettings::load(&db)

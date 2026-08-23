@@ -14,6 +14,7 @@
     "web:build": "npm run build -w @teo/desktop",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "lint": "npm run lint --workspaces --if-present",
+    "package:win": "node scripts/stage-directml.mjs && npm run tauri:build -w @teo/desktop -- --config src-tauri/tauri.models.conf.json --config src-tauri/tauri.windows.conf.json",
     "rs:check": "cargo check --workspace --all-targets",
     "rs:test": "cargo test --workspace",
     "rs:fmt": "cargo fmt --all",

@@ -1,0 +1,122 @@
+# Builds the installers people actually download.
+#
+# A macOS app cannot be produced from a Windows machine — no Apple toolchain,
+# no codesign — so the Mac build happens here, on an Apple Silicon runner
+# (`macos-14`), which is the same architecture as a Mac Studio.
+#
+# Push a tag to publish:  git tag v0.1.0 && git push origin v0.1.0
+# Or run it by hand from the Actions tab (Run workflow) to get artefacts
+# without creating a release.
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      # Every platform that can build is worth having, even if another fails.
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-14
+            label: macOS (Apple Silicon)
+            rust-target: aarch64-apple-darwin
+            tauri-args: --target aarch64-apple-darwin
+          - platform: windows-latest
+            label: Windows x64
+            rust-target: x86_64-pc-windows-msvc
+            tauri-args: ''
+
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-target }}
+
+      # The ONNX Runtime download and the whole workspace are the slow parts.
+      - uses: swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.rust-target }}
+
+      - run: npm ci
+
+      # Fetched, not committed (~280 MB). With the models present the build
+      # bundles them via tauri.models.conf.json, so an installed app can
+      # recognise faces without the person who installed it running a script.
+      - name: Fetch face models (macOS)
+        if: runner.os == 'macOS'
+        run: bash scripts/fetch-models.sh
+
+      - name: Fetch face models (Windows)
+        if: runner.os == 'Windows'
+        run: powershell -ExecutionPolicy Bypass -File scripts/fetch-models.ps1
+
+      # ONNX Runtime downloads the DirectML redistributable during the first
+      # build; staging it afterwards lets the installer ship it, which is the
+      # difference between GPU and CPU inference on an installed copy.
+      - name: Stage the DirectML redistributable (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          cargo build --release -p teo-face-detection
+          node scripts/stage-directml.mjs
+
+      - name: Build and publish
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Signing and notarisation. Without these the macOS build is
+          # unsigned: it still runs, but Gatekeeper makes the first launch
+          # awkward (see docs/deployment.md). Add the secrets and this starts
+          # producing installers anyone can open normally.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          projectPath: apps/desktop
+          tagName: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+          releaseName: Esports AI Media Organiser ${{ github.ref_name }}
+          releaseBody: |
+            Install notes and first-run steps: docs/deployment.md
+
+            - **Mac Studio / Apple Silicon:** the `.dmg`
+            - **Windows:** the `-setup.exe`
+
+            FFmpeg is needed for videos, HEIC and camera raw; JPEG and PNG
+            shoots work without it.
+          releaseDraft: true
+          prerelease: false
+          includeUpdaterJson: false
+          # The models overlay bundles what the fetch step downloaded; the
+          # Windows overlay adds the DirectML redistributable so installed
+          # copies keep GPU acceleration instead of falling back to CPU.
+          args: ${{ matrix.tauri-args }} --config src-tauri/tauri.models.conf.json ${{ runner.os == 'Windows' && '--config src-tauri/tauri.windows.conf.json' || '' }}
+
+      # Handy when the run was started by hand rather than by a tag: the
+      # installers are downloadable from the run summary.
+      - name: Upload installers as artefacts
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: installers-${{ matrix.rust-target }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            target/release/bundle/dmg/*.dmg
+            target/${{ matrix.rust-target }}/release/bundle/dmg/*.dmg
+            target/release/bundle/nsis/*-setup.exe

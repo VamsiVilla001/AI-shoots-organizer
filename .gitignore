@@ -16,6 +16,9 @@ apps/desktop/src-tauri/gen/
 !/models/README.md
 !/models/manifest.json
 
+# Staged for the installer by scripts/stage-directml.mjs
+/dist-resources/
+
 # Local data / scratch
 *.db
 *.db-wal
