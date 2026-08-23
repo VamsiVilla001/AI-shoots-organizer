@@ -354,6 +354,8 @@ pub fn reset_analysis(db: &Database, shoot_id: i64) -> Result<()> {
             "DELETE FROM albums WHERE shoot_id = ?1",
             teo_database::rusqlite::params![shoot_id],
         )?;
+        // `media_groups` is deliberately left alone: the editor's own sorting is
+        // not an AI result and must survive a re-analysis.
         media_repo::reset_analysis(conn, shoot_id)?;
         Ok(())
     })?;

@@ -25,6 +25,11 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("migration_002_person_count.sql"),
     },
     Migration {
+        version: 3,
+        name: "manual_groups",
+        sql: include_str!("schema_003_groups.sql"),
+    },
+    Migration {
         version: 4,
         name: "media_quality",
         sql: include_str!("migration_004_media_quality.sql"),
@@ -71,6 +76,32 @@ mod tests {
         assert_eq!(current_version(&conn).unwrap(), target_version());
     }
 
+    /// The upgrade path real installations take: a database created before
+    /// these migrations existed must gain everything they add, in order,
+    /// without losing a row.
+    #[test]
+    fn a_version_one_database_upgrades_in_place() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(include_str!("schema.sql")).unwrap();
+        conn.pragma_update(None, "user_version", 1).unwrap();
+        conn.execute(
+            "INSERT INTO shoots (id, name, source_path, created_at, updated_at)
+             VALUES (1, 'BGMS Finals', 'D:\\raw', 'now', 'now')",
+            [],
+        )
+        .unwrap();
+
+        run(&mut conn).unwrap();
+
+        assert_eq!(current_version(&conn).unwrap(), target_version());
+        let shoots: i64 = conn.query_row("SELECT COUNT(*) FROM shoots", [], |r| r.get(0)).unwrap();
+        assert_eq!(shoots, 1, "existing rows survive the upgrade");
+        let groups: i64 = conn
+            .query_row("SELECT COUNT(*) FROM media_groups", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(groups, 0, "the new tables exist and start empty");
+    }
+
     #[test]
     fn foreign_keys_cascade_from_shoots() {
         let db = Database::open_in_memory().unwrap();
@@ -93,10 +124,11 @@ mod tests {
     }
 
     #[test]
-    fn upgrades_pre_release_version_three_databases() {
+    fn upgrades_manual_group_version_three_databases() {
         let mut conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(include_str!("schema.sql")).unwrap();
         conn.execute_batch(include_str!("migration_002_person_count.sql")).unwrap();
+        conn.execute_batch(include_str!("schema_003_groups.sql")).unwrap();
         conn.pragma_update(None, "user_version", 3).unwrap();
 
         run(&mut conn).unwrap();

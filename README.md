@@ -1,22 +1,23 @@
 # Esports AI Media Organiser
 
-A local-first desktop application that sorts esports photo/video shoots by
-player. Import a shoot folder, let on-device face recognition find and group
-every player, name each person once, review the uncertain matches, and export
-the original files into player-wise folders.
+A local-first desktop application that sorts esports photo/video shoots into
+per-person folders. Point it at a raw footage folder, let on-device face
+recognition propose the grouping, name and correct the groups by hand, then
+export the originals into a folder per group — on a NAS share or any other
+destination.
 
 **Current stable release:** 1.0.0
 
 **Active development branch:** 1.2.0
 
-> Reduce hours of manual player-image sorting into a short AI-assisted review
-> workflow.
+> Reduce hours of manual footage sorting into a short review pass: name a group
+> once in the app and every file you put in it lands in a folder of that name.
 
 **Platforms:** Windows 10/11 · macOS (Apple Silicon)
 **Stack:** Tauri 2 · React + TypeScript · Rust · ONNX Runtime · FFmpeg · SQLite
 
-Everything runs locally. No cloud APIs, no uploads; original media is never
-modified, moved or renamed.
+Everything runs locally. No cloud APIs, no uploads; the source folder is only
+ever read — every export copies originals into a new destination.
 
 ## Repository layout
 
@@ -29,7 +30,7 @@ crates/
   face-recognition/      Landmark alignment, ArcFace embeddings
   clustering/            Player matching + unknown-face clustering
   video-analysis/        Scene detection and frame sampling over FFmpeg
-  export-engine/         Player-wise folder export (copy, never move)
+  export-engine/         Group-wise folder export (copy, never move)
 packages/shared-types/   TypeScript mirrors of every IPC type
 models/                  ONNX models (fetched, not committed)
 scripts/                 fetch-models, icon generation
@@ -95,8 +96,18 @@ npm run typecheck      # TypeScript
    … `10+ persons` — so solo portraits and full team shots are one click apart.
 6. **Review** — accept/reject suggestions, bulk-assign, merge/split, mark
    false detections; corrections feed the library and improve the next shoot.
-7. **Export** — originals are *copied* into `Player/Photos|Videos` folders
-   with collision-safe names; the source folder is never written to.
+7. **Sort** — the editor's own layer: create a named group per person (or per
+   anything — "Team B-roll", "Day 2 Interviews"), drag or bulk-assign files
+   into it, and see at a glance what is still unsorted. One click seeds the
+   groups from the AI players so you correct instead of sorting from scratch,
+   and manual grouping survives a re-analysis untouched.
+8. **Export** — originals are *copied* into one folder per group
+   (`Group/Photos|Videos`) with collision-safe names, plus a report of what
+   went where; the source folder is never written to. Exporting the AI albums
+   directly is still one toggle away.
+
+Face recognition is optional to the sorting flow: with no models installed the
+shoot still scans, and every group can be filled by hand.
 
 Processing is a resumable SQLite-backed job queue — quitting mid-import loses
 nothing. See the [current full application documentation](docs/current-application.md)

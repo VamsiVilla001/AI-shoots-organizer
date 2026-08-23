@@ -11,7 +11,9 @@ use serde::Serialize;
 use tauri::{AppHandle, State};
 
 use teo_database::models::*;
-use teo_database::repo::{albums, clusters, exports, faces, jobs, logs, media as media_repo, people, shoots, video};
+use teo_database::repo::{
+    albums, clusters, exports, faces, groups, jobs, logs, media as media_repo, people, shoots, video,
+};
 use teo_export_engine::ExportOptions;
 
 use crate::events;
@@ -501,6 +503,248 @@ pub fn regenerate_albums(app: AppHandle, state: State<'_, Arc<AppState>>, shoot_
     })?;
     events::shoot_changed(&app, shoot_id, "albums");
     Ok(created)
+}
+
+// ---------------------------------------------------------------------------
+// Groups — the editor's own sorting (§34)
+// ---------------------------------------------------------------------------
+
+/// The counters the sorting screen shows above the grid: how much of the shoot
+/// has been filed, and how much is still waiting.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupStats {
+    pub media_total: i64,
+    pub grouped: i64,
+    pub ungrouped: i64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeedResult {
+    pub groups: usize,
+    pub files: usize,
+}
+
+#[tauri::command]
+pub fn list_groups(state: State<'_, Arc<AppState>>, shoot_id: i64) -> Result<Vec<Group>> {
+    let conn = state.db.conn()?;
+    Ok(groups::list(&conn, shoot_id)?)
+}
+
+#[tauri::command]
+pub fn group_stats(state: State<'_, Arc<AppState>>, shoot_id: i64) -> Result<GroupStats> {
+    let conn = state.db.conn()?;
+    let media_total = media_repo::count_for_shoot(&conn, shoot_id)?;
+    let ungrouped = groups::ungrouped_count(&conn, shoot_id)?;
+    Ok(GroupStats { media_total, grouped: media_total - ungrouped, ungrouped })
+}
+
+/// Which groups hold which files, for the chips drawn on each thumbnail.
+#[tauri::command]
+pub fn group_links(state: State<'_, Arc<AppState>>, shoot_id: i64) -> Result<Vec<MediaGroupLink>> {
+    let conn = state.db.conn()?;
+    Ok(groups::links(&conn, shoot_id)?)
+}
+
+/// Creates the group the editor just named. The name is what the export folder
+/// will be called, which is why it is validated here rather than at export
+/// time — a bad name should fail while the person who typed it is looking.
+#[tauri::command]
+pub fn create_group(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    shoot_id: i64,
+    name: String,
+) -> Result<Group> {
+    let conn = state.db.conn()?;
+    let group = groups::get_or_create(&conn, shoot_id, &name, None)?;
+    logs::record_quiet(&conn, logs::EVENT_GROUP_CREATED, Some(shoot_id), None, None, Some(&group.name));
+    events::shoot_changed(&app, shoot_id, "groups");
+    Ok(group)
+}
+
+#[tauri::command]
+pub fn rename_group(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    group_id: i64,
+    name: String,
+) -> Result<Group> {
+    let conn = state.db.conn()?;
+    groups::rename(&conn, group_id, &name)?;
+    let group = groups::get_by_id(&conn, group_id)?.ok_or_else(|| err("that group no longer exists"))?;
+    logs::record_quiet(
+        &conn,
+        logs::EVENT_GROUP_RENAMED,
+        Some(group.shoot_id),
+        None,
+        None,
+        Some(&group.name),
+    );
+    events::shoot_changed(&app, group.shoot_id, "groups");
+    Ok(group)
+}
+
+/// Sets the on-disk folder name and the note. A blank folder name goes back to
+/// using the group's own name.
+#[tauri::command]
+pub fn update_group(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    group_id: i64,
+    folder_name: Option<String>,
+    notes: Option<String>,
+) -> Result<Group> {
+    let conn = state.db.conn()?;
+    groups::update(&conn, group_id, folder_name.as_deref(), notes.as_deref())?;
+    let group = groups::get_by_id(&conn, group_id)?.ok_or_else(|| err("that group no longer exists"))?;
+    events::shoot_changed(&app, group.shoot_id, "groups");
+    Ok(group)
+}
+
+/// Deletes a group. Only the grouping is lost — no file is touched.
+#[tauri::command]
+pub fn delete_group(app: AppHandle, state: State<'_, Arc<AppState>>, group_id: i64) -> Result<()> {
+    let conn = state.db.conn()?;
+    let Some(group) = groups::get_by_id(&conn, group_id)? else { return Ok(()) };
+    groups::delete(&conn, group_id)?;
+    logs::record_quiet(
+        &conn,
+        logs::EVENT_GROUP_DELETED,
+        Some(group.shoot_id),
+        None,
+        None,
+        Some(&group.name),
+    );
+    events::shoot_changed(&app, group.shoot_id, "groups");
+    Ok(())
+}
+
+/// Files the selected media into a group, creating it from `group_name` if the
+/// editor typed a new one.
+///
+/// `move_files` takes them out of every other group in the shoot first — the
+/// fix for something filed under the wrong player. Without it a file can
+/// legitimately belong to several groups, which is what a clip with two players
+/// in it needs.
+#[tauri::command]
+pub fn add_media_to_group(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    shoot_id: i64,
+    group_id: Option<i64>,
+    group_name: Option<String>,
+    media_ids: Vec<i64>,
+    move_files: bool,
+) -> Result<usize> {
+    if media_ids.is_empty() {
+        return Err(err("select some files first"));
+    }
+
+    let (group, added) = state.db.transaction(|conn| {
+        let group = match (group_id, group_name.as_deref()) {
+            (Some(id), _) => groups::get_by_id(conn, id)?
+                .ok_or_else(|| teo_database::DbError::other("that group no longer exists"))?,
+            (None, Some(name)) => groups::get_or_create(conn, shoot_id, name, None)?,
+            (None, None) => {
+                return Err(teo_database::DbError::other("choose a group or type a new name"))
+            }
+        };
+        let added = if move_files {
+            groups::move_media(conn, group.id, &media_ids)?
+        } else {
+            groups::add_media(conn, group.id, &media_ids)?
+        };
+        Ok((group, added))
+    })?;
+
+    let conn = state.db.conn()?;
+    logs::record_quiet(
+        &conn,
+        logs::EVENT_GROUP_ASSIGNMENT,
+        Some(group.shoot_id),
+        None,
+        None,
+        Some(&format!("{} file(s) sorted into {}", media_ids.len(), group.name)),
+    );
+    events::shoot_changed(&app, group.shoot_id, "groups");
+    Ok(added)
+}
+
+#[tauri::command]
+pub fn remove_media_from_group(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    group_id: i64,
+    media_ids: Vec<i64>,
+) -> Result<usize> {
+    let conn = state.db.conn()?;
+    let removed = groups::remove_media(&conn, group_id, &media_ids)?;
+    if let Some(group) = groups::get_by_id(&conn, group_id)? {
+        events::shoot_changed(&app, group.shoot_id, "groups");
+    }
+    Ok(removed)
+}
+
+#[tauri::command]
+pub fn clear_group(app: AppHandle, state: State<'_, Arc<AppState>>, group_id: i64) -> Result<usize> {
+    let conn = state.db.conn()?;
+    let removed = groups::clear(&conn, group_id)?;
+    if let Some(group) = groups::get_by_id(&conn, group_id)? {
+        events::shoot_changed(&app, group.shoot_id, "groups");
+    }
+    Ok(removed)
+}
+
+/// The head start: one group per player the AI identified, pre-filled with that
+/// player's album, so the editor corrects rather than sorts from scratch.
+///
+/// Running it again after naming more faces tops the groups up; it never undoes
+/// a manual edit.
+#[tauri::command]
+pub fn groups_from_ai_albums(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    shoot_id: i64,
+) -> Result<SeedResult> {
+    let (groups_touched, files) =
+        state.db.transaction(|conn| groups::seed_from_player_albums(conn, shoot_id))?;
+
+    let conn = state.db.conn()?;
+    logs::record_quiet(
+        &conn,
+        logs::EVENT_GROUP_ASSIGNMENT,
+        Some(shoot_id),
+        None,
+        None,
+        Some(&format!("{groups_touched} group(s) seeded from AI albums with {files} file(s)")),
+    );
+    events::shoot_changed(&app, shoot_id, "groups");
+    Ok(SeedResult { groups: groups_touched, files })
+}
+
+/// Turns one AI album into an editable group — the "this one is right, I will
+/// fix the rest by hand" path from the Albums screen.
+#[tauri::command]
+pub fn group_from_album(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    album_id: i64,
+    name: Option<String>,
+) -> Result<Group> {
+    let group = state.db.transaction(|conn| {
+        let album = albums::get_by_id(conn, album_id)?
+            .ok_or_else(|| teo_database::DbError::other("that album no longer exists"))?;
+        let label = name.as_deref().map(str::trim).filter(|s| !s.is_empty()).unwrap_or(&album.name);
+        let group = groups::get_or_create(conn, album.shoot_id, label, album.person_ids.first().copied())?;
+        groups::add_media(conn, group.id, &albums::media_ids(conn, album_id, None)?)?;
+        groups::get_by_id(conn, group.id)?
+            .ok_or_else(|| teo_database::DbError::other("that group no longer exists"))
+    })?;
+
+    events::shoot_changed(&app, group.shoot_id, "groups");
+    Ok(group)
 }
 
 // ---------------------------------------------------------------------------

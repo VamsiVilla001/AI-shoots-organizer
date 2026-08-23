@@ -18,14 +18,18 @@ import type {
   Face,
   FaceQuery,
   FaceWithContext,
+  Group,
+  GroupStats,
   Job,
   LogEntry,
   Media,
+  MediaGroupLink,
   MediaQuery,
   ModelStatus,
   Person,
   PersonSummary,
   ProcessingProgress,
+  SeedResult,
   Shoot,
   ShootSummary,
   VideoTimeline,
@@ -109,6 +113,41 @@ export const ignoreCluster = (clusterId: number) => call<void>('ignore_cluster',
 
 export const listAlbums = (shootId: number) => call<Album[]>('list_albums', { shootId })
 export const regenerateAlbums = (shootId: number) => call<number>('regenerate_albums', { shootId })
+
+// --- groups (the editor's own sorting) -------------------------------------
+
+export const listGroups = (shootId: number) => call<Group[]>('list_groups', { shootId })
+export const groupStats = (shootId: number) => call<GroupStats>('group_stats', { shootId })
+export const groupLinks = (shootId: number) => call<MediaGroupLink[]>('group_links', { shootId })
+export const createGroup = (shootId: number, name: string) =>
+  call<Group>('create_group', { shootId, name })
+export const renameGroup = (groupId: number, name: string) =>
+  call<Group>('rename_group', { groupId, name })
+export const updateGroup = (groupId: number, folderName: string | null, notes: string | null) =>
+  call<Group>('update_group', { groupId, folderName, notes })
+export const deleteGroup = (groupId: number) => call<void>('delete_group', { groupId })
+/** `moveFiles` pulls the files out of every other group first. */
+export const addMediaToGroup = (args: {
+  shootId: number
+  groupId?: number | null
+  groupName?: string | null
+  mediaIds: number[]
+  moveFiles?: boolean
+}) =>
+  call<number>('add_media_to_group', {
+    shootId: args.shootId,
+    groupId: args.groupId ?? null,
+    groupName: args.groupName ?? null,
+    mediaIds: args.mediaIds,
+    moveFiles: args.moveFiles ?? false,
+  })
+export const removeMediaFromGroup = (groupId: number, mediaIds: number[]) =>
+  call<number>('remove_media_from_group', { groupId, mediaIds })
+export const clearGroup = (groupId: number) => call<number>('clear_group', { groupId })
+export const groupsFromAiAlbums = (shootId: number) =>
+  call<SeedResult>('groups_from_ai_albums', { shootId })
+export const groupFromAlbum = (albumId: number, name?: string | null) =>
+  call<Group>('group_from_album', { albumId, name: name ?? null })
 
 // --- review ----------------------------------------------------------------
 

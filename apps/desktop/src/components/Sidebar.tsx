@@ -4,6 +4,7 @@ import { useUi, type Screen } from '../store'
 
 const ITEMS: Array<{ id: Screen; label: string; needsShoot: boolean }> = [
   { id: 'shoots', label: 'Shoots', needsShoot: false },
+  { id: 'groups', label: 'Sort into Groups', needsShoot: true },
   { id: 'players', label: 'Players', needsShoot: false },
   { id: 'albums', label: 'AI Albums', needsShoot: true },
   { id: 'review', label: 'Review', needsShoot: true },
@@ -19,6 +20,14 @@ export function Sidebar() {
 
   const shoots = useQuery({ queryKey: ['shoots'], queryFn: api.listShoots })
   const activeShoot = shoots.data?.find((s) => s.id === activeShootId)
+
+  // How much of the open shoot is still unsorted — the number an editor is
+  // working down to zero.
+  const stats = useQuery({
+    queryKey: ['groupStats', activeShootId],
+    queryFn: () => api.groupStats(activeShootId as number),
+    enabled: activeShootId !== null,
+  })
 
   // A little live counter beside "Review" so pending work is visible from
   // anywhere in the app.
@@ -41,6 +50,9 @@ export function Sidebar() {
             <span>{item.label}</span>
             {item.id === 'review' && unknown !== undefined && unknown > 0 && (
               <span className="badge">{unknown}</span>
+            )}
+            {item.id === 'groups' && (stats.data?.ungrouped ?? 0) > 0 && (
+              <span className="badge">{stats.data?.ungrouped}</span>
             )}
           </button>
         ))}

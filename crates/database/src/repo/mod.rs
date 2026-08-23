@@ -7,6 +7,7 @@ pub mod albums;
 pub mod clusters;
 pub mod exports;
 pub mod faces;
+pub mod groups;
 pub mod jobs;
 pub mod logs;
 pub mod media;

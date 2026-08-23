@@ -384,6 +384,9 @@ pub fn query(conn: &Connection, q: &MediaQuery) -> Result<Vec<Media>> {
     if q.album_id.is_some() {
         sql.push_str(" JOIN album_media am ON am.media_id = m.id");
     }
+    if q.group_id.is_some() {
+        sql.push_str(" JOIN media_group_items gi ON gi.media_id = m.id");
+    }
     if q.person_id.is_some() || q.cluster_id.is_some() || q.only_unidentified {
         sql.push_str(" JOIN faces f ON f.media_id = m.id");
     }
@@ -395,6 +398,13 @@ pub fn query(conn: &Connection, q: &MediaQuery) -> Result<Vec<Media>> {
     if let Some(album_id) = q.album_id {
         wheres.push(format!("am.album_id = ?{}", args.len() + 1));
         args.push(Box::new(album_id));
+    }
+    if let Some(group_id) = q.group_id {
+        wheres.push(format!("gi.group_id = ?{}", args.len() + 1));
+        args.push(Box::new(group_id));
+    }
+    if q.ungrouped {
+        wheres.push("NOT EXISTS (SELECT 1 FROM media_group_items x WHERE x.media_id = m.id)".to_string());
     }
     if let Some(person_id) = q.person_id {
         wheres.push(format!(
@@ -535,6 +545,49 @@ mod tests {
         .unwrap();
 
         assert_eq!(get_by_id(&conn, id).unwrap().unwrap().processing_status, "pending");
+    }
+
+    #[test]
+    fn query_filters_by_group_and_backlog() {
+        use crate::repo::groups;
+
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+        let shoot_id = seed(&conn);
+        let all = query(
+            &conn,
+            &MediaQuery {
+                shoot_id: Some(shoot_id),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let group = groups::get_or_create(&conn, shoot_id, "Jonathan", None).unwrap();
+        groups::add_media(&conn, group.id, &[all[0].id]).unwrap();
+
+        let in_group = query(
+            &conn,
+            &MediaQuery {
+                shoot_id: Some(shoot_id),
+                group_id: Some(group.id),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(in_group.len(), 1);
+
+        let backlog = query(
+            &conn,
+            &MediaQuery {
+                shoot_id: Some(shoot_id),
+                ungrouped: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(backlog.len(), all.len() - 1);
+        assert!(!backlog.iter().any(|m| m.id == all[0].id));
     }
 
     #[test]

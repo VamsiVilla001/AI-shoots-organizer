@@ -7,7 +7,7 @@
 import { create } from 'zustand'
 import type { ExportProgressEvent, NoticeEvent, ProgressEvent } from '@teo/shared-types'
 
-export type Screen = 'shoots' | 'players' | 'albums' | 'review' | 'export' | 'settings'
+export type Screen = 'shoots' | 'groups' | 'players' | 'albums' | 'review' | 'export' | 'settings'
 
 export interface Notice extends NoticeEvent {
   id: number
@@ -58,7 +58,8 @@ export const useUi = create<UiState>((set) => ({
 
   openExport: (personIds) => set({ screen: 'export', exportPersonIds: [...personIds] }),
 
-  openShoot: (shootId, screen = 'albums') =>
+  // Opening a shoot lands on sorting: that is the job the app exists for.
+  openShoot: (shootId, screen = 'groups') =>
     set({ activeShootId: shootId, screen, exportPersonIds: null }),
 
   setProgress: (event) =>

@@ -39,29 +39,52 @@ pub enum ExistingFilePolicy {
     Overwrite,
 }
 
+/// Where the output folders come from.
+///
+/// `Groups` is the normal path: the editor named the folders in the app and the
+/// export writes exactly those. `AiAlbums` exports the recognition results
+/// directly, for the case where nothing needs correcting by hand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ExportMode {
+    Groups,
+    AiAlbums,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExportOptions {
-    /// Split each player's folder into `Photos/` and `Videos/` (§11).
+    /// Whether the folders come from the editor's groups or the AI albums.
+    pub mode: ExportMode,
+    /// Restrict a `Groups` export to these groups. `None` exports all of them.
+    pub group_ids: Option<Vec<i64>>,
+    /// Split each folder into `Photos/` and `Videos/` (§11).
     pub split_photos_videos: bool,
-    /// Include the unidentified album as its own folder.
+    /// `AiAlbums` only: include the unidentified album as its own folder.
     pub include_unidentified: bool,
-    /// Restrict the export to these players. `None` exports everyone.
+    /// `AiAlbums` only: restrict the export to these players. `None` exports
+    /// everyone.
     pub person_ids: Option<Vec<i64>>,
     /// Copy access and modification times onto the exported file.
     pub preserve_metadata: bool,
     pub existing: ExistingFilePolicy,
-    /// Also write multi-player albums as their own folders.
+    /// `AiAlbums` only: also write multi-player albums as their own folders.
     pub include_multi_player: bool,
-    /// Also write the group-size albums ("Single", "Two persons", …) as
-    /// folders. Off by default: every file is in both a player album and a
-    /// group-size album, so enabling this writes the whole shoot twice.
+    /// `AiAlbums` only: also write the group-size albums ("Single", "Two
+    /// persons", …) as folders. Off by default: every file is in both a player
+    /// album and a group-size album, so enabling this writes the shoot twice.
     pub include_group_size: bool,
+    /// Write a `_sorting-report.txt` beside the folders listing what went
+    /// where — an editor handing the NAS folder to someone else needs a
+    /// manifest, and it is the only file the export creates itself.
+    pub write_manifest: bool,
 }
 
 impl Default for ExportOptions {
     fn default() -> Self {
         Self {
+            mode: ExportMode::Groups,
+            group_ids: None,
             split_photos_videos: true,
             include_unidentified: true,
             person_ids: None,
@@ -69,6 +92,7 @@ impl Default for ExportOptions {
             existing: ExistingFilePolicy::Skip,
             include_multi_player: false,
             include_group_size: false,
+            write_manifest: true,
         }
     }
 }
@@ -262,7 +286,50 @@ pub fn execute(
         on_progress(progress);
     }
 
+    if options.write_manifest {
+        // Best effort: a manifest that could not be written is worth a log
+        // line, not a failed export of files that already copied fine.
+        if let Err(e) = write_manifest(plan, destination) {
+            tracing::warn!(error = %e, "could not write the sorting report");
+        }
+    }
+
     Ok(progress)
+}
+
+/// The name of the one file an export creates that is not a copy of a source
+/// file. Prefixed with `_` so it sorts above the group folders.
+pub const MANIFEST_FILENAME: &str = "_sorting-report.txt";
+
+/// Writes a plain-text list of every folder and the files in it, with the
+/// source path each one came from. This is what makes an exported NAS folder
+/// self-describing once it leaves the app.
+pub fn write_manifest(plan: &ExportPlan, destination: &Path) -> std::io::Result<()> {
+    use std::fmt::Write as _;
+
+    let mut report = String::new();
+    let _ = writeln!(report, "Esports AI Media Organiser — sorting report");
+    let _ = writeln!(report, "Destination : {}", destination.display());
+    let _ = writeln!(report, "Folders     : {}", plan.folders.len());
+    let _ = writeln!(report, "Files       : {}", plan.items.len());
+    let _ = writeln!(report, "\nOriginals were copied. The source folder was not modified.\n");
+
+    let mut current = String::new();
+    for item in &plan.items {
+        let folder = item
+            .relative
+            .parent()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if folder != current {
+            let _ = writeln!(report, "\n[{folder}]");
+            current = folder;
+        }
+        let name = item.relative.file_name().unwrap_or_default().to_string_lossy();
+        let _ = writeln!(report, "  {name}\t<- {}", item.source.display());
+    }
+
+    std::fs::write(destination.join(MANIFEST_FILENAME), report)
 }
 
 fn next_free_name(target: &Path) -> PathBuf {
@@ -378,6 +445,69 @@ mod tests {
     fn empty_groups_are_dropped() {
         let groups = vec![ExportGroup { name: "Nobody".into(), files: vec![] }];
         assert!(plan(&groups, &ExportOptions::default()).is_empty());
+    }
+
+    #[test]
+    fn the_default_export_is_driven_by_the_editors_groups() {
+        // The product's normal path: whatever the editor named in the app is
+        // what lands on disk. Nothing about `plan` is album-specific.
+        assert_eq!(ExportOptions::default().mode, ExportMode::Groups);
+        let plan = plan(
+            &[ExportGroup {
+                name: "Day 2 — Jonathan".into(),
+                files: vec![file("IMG_0231.JPG", false)],
+            }],
+            &ExportOptions::default(),
+        );
+        let path = plan.items[0].relative.to_string_lossy().replace('\\', "/");
+        assert_eq!(path, "Day 2 — Jonathan/Photos/IMG_0231.JPG");
+    }
+
+    #[test]
+    fn the_manifest_lists_every_folder_and_its_source_paths() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let dest_dir = tempfile::tempdir().unwrap();
+        let source_file = source_dir.path().join("IMG_0231.JPG");
+        std::fs::write(&source_file, b"bytes").unwrap();
+
+        let plan = ExportPlan {
+            items: vec![ExportItem {
+                source: source_file,
+                relative: PathBuf::from("Jonathan").join("Photos").join("IMG_0231.JPG"),
+                size: 5,
+            }],
+            folders: vec!["Jonathan/Photos".into()],
+        };
+
+        execute(&plan, dest_dir.path(), &ExportOptions::default(), || true, |_| {}).unwrap();
+
+        let report = std::fs::read_to_string(dest_dir.path().join(MANIFEST_FILENAME)).unwrap();
+        assert!(report.contains("Jonathan"));
+        assert!(report.contains("IMG_0231.JPG"));
+        assert!(report.contains("was not modified"));
+    }
+
+    #[test]
+    fn the_manifest_can_be_turned_off() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let dest_dir = tempfile::tempdir().unwrap();
+        let source_file = source_dir.path().join("a.jpg");
+        std::fs::write(&source_file, b"x").unwrap();
+
+        let plan = ExportPlan {
+            items: vec![ExportItem {
+                source: source_file,
+                relative: PathBuf::from("Jonathan").join("a.jpg"),
+                size: 1,
+            }],
+            folders: vec!["Jonathan".into()],
+        };
+        let options = ExportOptions {
+            write_manifest: false,
+            ..Default::default()
+        };
+        execute(&plan, dest_dir.path(), &options, || true, |_| {}).unwrap();
+        assert!(!dest_dir.path().join(MANIFEST_FILENAME).exists());
     }
 
     #[test]
