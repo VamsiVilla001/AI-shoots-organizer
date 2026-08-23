@@ -1,8 +1,7 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import App from './App'
-import { startEventBridge } from './eventBridge'
+import { Boot } from './boot'
 import './styles.css'
 
 const queryClient = new QueryClient({
@@ -17,12 +16,10 @@ const queryClient = new QueryClient({
   },
 })
 
-startEventBridge(queryClient).catch((e) => console.error('event bridge failed to start', e))
-
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <QueryClientProvider client={queryClient}>
-      <App />
+      <Boot queryClient={queryClient} />
     </QueryClientProvider>
   </React.StrictMode>,
 )

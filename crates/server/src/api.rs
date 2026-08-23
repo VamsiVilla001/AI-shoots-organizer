@@ -890,6 +890,11 @@ pub async fn delete_group(
 #[serde(rename_all = "camelCase")]
 pub struct GroupMediaBody {
     pub shoot_id: i64,
+    /// An existing group…
+    pub group_id: Option<i64>,
+    /// …or a name to file under, created if it is new. The desktop command
+    /// accepts either, so the route does too.
+    pub group_name: Option<String>,
     pub media_ids: Vec<i64>,
     #[serde(default)]
     pub move_files: bool,
@@ -897,7 +902,6 @@ pub struct GroupMediaBody {
 
 pub async fn add_media_to_group(
     State(state): Ctx,
-    Path(group_id): Path<i64>,
     Json(body): Json<GroupMediaBody>,
 ) -> ApiResult<Json<usize>> {
     if body.media_ids.is_empty() {
@@ -906,8 +910,14 @@ pub async fn add_media_to_group(
     let core = Arc::clone(&state.core);
     let added = blocking(move || {
         let (group, added) = core.db.transaction(|conn| {
-            let group = groups::get_by_id(conn, group_id)?
-                .ok_or_else(|| teo_database::DbError::other("that group no longer exists"))?;
+            let group = match (body.group_id, body.group_name.as_deref()) {
+                (Some(id), _) => groups::get_by_id(conn, id)?
+                    .ok_or_else(|| teo_database::DbError::other("that group no longer exists"))?,
+                (None, Some(name)) => groups::get_or_create(conn, body.shoot_id, name, None)?,
+                (None, None) => {
+                    return Err(teo_database::DbError::other("choose a group or type a new name"))
+                }
+            };
             let added = if body.move_files {
                 groups::move_media(conn, group.id, &body.media_ids)?
             } else {

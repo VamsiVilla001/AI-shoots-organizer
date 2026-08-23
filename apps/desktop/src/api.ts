@@ -1,12 +1,13 @@
 /**
- * Typed wrappers over every Tauri command.
+ * Typed wrappers over every backend command.
  *
- * The UI never calls `invoke` directly — going through this module keeps the
+ * The UI never calls a transport directly — going through this module keeps the
  * command names and payload shapes in one place, next to the types they must
- * match in `commands.rs`.
+ * match in `commands.rs`. Which transport carries them (Tauri IPC or HTTP) is
+ * decided once at boot and invisible here.
  */
 
-import { invoke } from '@tauri-apps/api/core'
+import { transport } from './transport'
 import type {
   Album,
   AppInfo,
@@ -18,6 +19,8 @@ import type {
   Face,
   FaceQuery,
   FaceWithContext,
+  FsListing,
+  FsRoot,
   Group,
   GroupStats,
   Job,
@@ -35,17 +38,9 @@ import type {
   VideoTimeline,
 } from '@teo/shared-types'
 
-/** Backend errors arrive as `{ message }`; normalise to a throwable Error. */
-async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
-  try {
-    return await invoke<T>(command, args)
-  } catch (raw) {
-    const message =
-      typeof raw === 'object' && raw !== null && 'message' in raw
-        ? String((raw as { message: unknown }).message)
-        : String(raw)
-    throw new Error(message)
-  }
+/** Both transports reject with a plain `Error` carrying the backend's message. */
+function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  return transport().call<T>(command, args)
 }
 
 // --- application -----------------------------------------------------------
@@ -173,6 +168,14 @@ export const startExport = (shootId: number, destination: string, options: Expor
   call<number>('start_export', { shootId, destination, options })
 export const cancelExport = (shootId: number) => call<void>('cancel_export', { shootId })
 export const listExports = (shootId: number) => call<ExportRecord[]>('list_exports', { shootId })
+
+// --- filesystem browsing (server edition only) -----------------------------
+//
+// A desktop build opens the native folder dialog instead, so these are only
+// reachable through the HTTP transport — see `PathPicker`.
+
+export const fsRoots = () => call<FsRoot[]>('fs_roots')
+export const fsList = (path: string) => call<FsListing>('fs_list', { path })
 
 // --- logs and privacy ------------------------------------------------------
 

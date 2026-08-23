@@ -9,10 +9,10 @@
 
 import { useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { open } from '@tauri-apps/plugin-dialog'
 import type { ExportOptions, ExportPreview } from '@teo/shared-types'
 import * as api from '../api'
 import { folderNameFor } from '../folders'
+import { PathPicker } from '../components/PathPicker'
 import { formatBytes, formatCount } from '../media'
 import { useUi } from '../store'
 
@@ -68,10 +68,6 @@ function ExportBody({ shootId }: { shootId: number }) {
     if (exportProgress?.finished) setRunning(false)
   }, [exportProgress])
 
-  const pickDestination = async () => {
-    const picked = await open({ directory: true, multiple: false, title: 'Choose the export folder' })
-    if (typeof picked === 'string') setDestination(picked)
-  }
 
   const start = async () => {
     setRunning(true)
@@ -100,15 +96,13 @@ function ExportBody({ shootId }: { shootId: number }) {
       <div className="settings-grid">
         <div className="card">
           <h2>Destination</h2>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <input
-              style={{ flex: 1 }}
-              value={destination}
-              onChange={(e) => setDestination(e.target.value)}
-              placeholder="\\NAS\Edit\BGMS_Finals_Sorted"
-            />
-            <button onClick={pickDestination}>Browse…</button>
-          </div>
+          <PathPicker
+            value={destination}
+            onChange={setDestination}
+            title="Choose the export folder"
+            placeholder="\\NAS\Edit\BGMS_Finals_Sorted"
+            writableOnly
+          />
           <div className="hint">
             A local folder or a NAS share. One folder is created per group; the shoot's source
             folder is only read from.

@@ -456,6 +456,53 @@ export interface ExportPreview {
 }
 
 // ---------------------------------------------------------------------------
+// Server edition: filesystem browsing and auth
+// ---------------------------------------------------------------------------
+//
+// These have no Tauri command behind them. A desktop build opens the native
+// folder dialog instead; a browser cannot, so the server exposes a jailed
+// browser over the folders it is configured to allow.
+
+/** One configured root, as `GET /api/fs/roots` returns it. */
+export interface FsRoot {
+  path: string
+  name: string
+  writable: boolean
+  /** False when the share is configured but not currently mounted. */
+  available: boolean
+}
+
+export interface FsEntry {
+  path: string
+  name: string
+  /** Media files directly inside, not counting subdirectories. */
+  mediaCount: number
+  hasSubfolders: boolean
+}
+
+export interface FsListing {
+  path: string
+  /** Null at a root: there is nowhere further up that is still allowed. */
+  parent: string | null
+  directories: FsEntry[]
+  mediaCount: number
+}
+
+/** Body of `POST /api/auth/session`, which trades a token for a cookie. */
+export interface SessionRequest {
+  token: string
+}
+
+/** `GET /api/jobs/summary` — the queue at a glance, across every shoot. */
+export interface JobsSummary {
+  shoots: number
+  queued: number
+  running: number
+  failed: number
+  paused: boolean
+}
+
+// ---------------------------------------------------------------------------
 // Events
 // ---------------------------------------------------------------------------
 

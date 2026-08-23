@@ -1,17 +1,29 @@
 /**
- * URLs for the teomedia:// protocol, plus a few formatting helpers.
+ * Media URLs, plus a few formatting helpers.
+ *
+ * The shape differs by transport — `teomedia://thumb/7` in the desktop window,
+ * `/media/7/thumb` over HTTP — so the transport builds them and callers just ask
+ * for "the thumbnail of this id".
  */
 
-let base = 'http://teomedia.localhost'
+import { transport, transportReady } from './transport'
 
 /** Called once at startup with `AppInfo.mediaUrlBase`. */
 export function setMediaBase(urlBase: string) {
-  base = urlBase
+  if (transportReady()) transport().setMediaBase(urlBase)
 }
 
-export const thumbUrl = (mediaId: number) => `${base}/thumb/${mediaId}`
-export const fullUrl = (mediaId: number) => `${base}/full/${mediaId}`
-export const videoUrl = (mediaId: number) => `${base}/video/${mediaId}`
+/**
+ * An empty string before the transport exists, which only happens if a tile
+ * renders during boot; the browser leaves such an image blank rather than
+ * throwing, and the next render fills it in.
+ */
+const mediaUrl = (mediaId: number, kind: 'thumb' | 'full' | 'video') =>
+  transportReady() ? transport().mediaUrl(mediaId, kind) : ''
+
+export const thumbUrl = (mediaId: number) => mediaUrl(mediaId, 'thumb')
+export const fullUrl = (mediaId: number) => mediaUrl(mediaId, 'full')
+export const videoUrl = (mediaId: number) => mediaUrl(mediaId, 'video')
 
 export function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) return '—'

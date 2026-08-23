@@ -5,11 +5,11 @@
 
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { open } from '@tauri-apps/plugin-dialog'
 import type { ShootSummary } from '@teo/shared-types'
 import * as api from '../api'
 import { formatCount, formatDate } from '../media'
 import { Modal } from '../components/Modal'
+import { PathPicker } from '../components/PathPicker'
 import { useUi } from '../store'
 
 export function ShootsScreen() {
@@ -161,15 +161,12 @@ function NewShootModal({ onClose }: { onClose: () => void }) {
   const openShoot = useUi((s) => s.openShoot)
   const queryClient = useQueryClient()
 
-  const pickFolder = async () => {
-    const picked = await open({ directory: true, multiple: false, title: 'Choose the shoot folder' })
-    if (typeof picked === 'string') {
-      setFolder(picked)
-      if (!name.trim()) {
-        // Suggest the folder name; "BGMS_Final_Shoot" → "BGMS Final Shoot".
-        const stem = picked.replaceAll('\\', '/').split('/').filter(Boolean).pop() ?? ''
-        setName(stem.replaceAll(/[_-]+/g, ' ').trim())
-      }
+  const chooseFolder = (picked: string) => {
+    setFolder(picked)
+    if (!name.trim()) {
+      // Suggest the folder name; "BGMS_Final_Shoot" becomes "BGMS Final Shoot".
+      const stem = picked.replaceAll('\\', '/').split('/').filter(Boolean).pop() ?? ''
+      setName(stem.replaceAll(/[_-]+/g, ' ').trim())
     }
   }
 
@@ -191,15 +188,12 @@ function NewShootModal({ onClose }: { onClose: () => void }) {
     <Modal title="New Shoot" onClose={onClose}>
       <label className="field">
         <span>Source folder</span>
-        <div style={{ display: 'flex', gap: 8 }}>
-          <input
-            style={{ flex: 1 }}
-            value={folder}
-            onChange={(e) => setFolder(e.target.value)}
-            placeholder="D:\BGMS_Final_Shoot"
-          />
-          <button onClick={pickFolder}>Browse…</button>
-        </div>
+        <PathPicker
+          value={folder}
+          onChange={chooseFolder}
+          title="Choose the shoot folder"
+          placeholder="D:\BGMS_Final_Shoot"
+        />
       </label>
       <label className="field">
         <span>Shoot name</span>

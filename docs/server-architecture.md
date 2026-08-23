@@ -14,7 +14,7 @@ source for the final product documentation.
 | 0 — groundwork | done |
 | 1 — extract the Tauri-free core | done |
 | 2 — HTTP server | done |
-| 3 — one front end, two transports | not started |
+| 3 — one front end, two transports | done |
 | 4 — desktop shell becomes a client | not started |
 | 5 — NAS container | not started |
 | 6 — remote GPU worker | not started |
@@ -199,6 +199,71 @@ three real photos:
 - destination inside the source → `403`
 - cookie session → media loads with no `Authorization` header; wrong token → `401`
 - `GET /` served the built React bundle
+
+## Phase 3 — one front end, two transports
+
+The same React bundle now runs inside the Tauri window and in a browser talking
+to `teo-server`. Four files used to import `@tauri-apps` directly; one does now,
+and that one is a transport implementation.
+
+```text
+   screens · components · api.ts · media.ts · eventBridge.ts
+                            │
+                    transport() — chosen once at boot
+                    ┌───────┴────────┐
+            TauriTransport      HttpTransport
+            invoke / listen     fetch / EventSource
+            native dialog       /api/fs/* browser
+```
+
+### The seam
+
+`Transport` is five methods: `call`, `listen`, `mediaUrl`, `setMediaBase`, and an
+optional `pickFolder`. Command *names* stay the contract — `api.ts` asks for
+`list_shoots` and knows nothing about URLs — so `transport/routes.ts` is the
+only file aware the API is HTTP at all. It mirrors the route list in
+`crates/server/src/lib.rs` so the two can be diffed by eye.
+
+Three details that mattered:
+
+- **`nullOn404`.** A few commands return `T | null` on the desktop where the
+  server answers `404` (`get_shoot`, `get_media`). The route table marks them
+  rather than making every caller handle both.
+- **Media URLs differ in shape**, not just in prefix: `teomedia://thumb/7`
+  against `/media/7/stream`. `media.ts` asks the transport for "the thumbnail of
+  this id" instead of concatenating a base.
+- **`pickFolder` is optional by design.** Its absence is how `PathPicker` knows
+  to open the server's jailed browser instead — a capability check, not a
+  platform check.
+
+### Desktop-only commands
+
+`reveal_in_folder` and `open_path` throw `UnsupportedByTransport` in a browser,
+with a message naming what cannot happen. They open a file manager on the
+machine running the code, which for a NAS is not where the person is sitting.
+
+### Connecting
+
+A browser build tries a saved connection silently and only shows the connection
+screen when there is none or it fails — with the previous values kept and a
+message that separates "token refused" from "nothing answered", because the fix
+differs. `POST /api/auth/session` runs first so the cookie is in place before any
+`<img>` or `EventSource` needs it.
+
+### Verified under both transports
+
+Driven through a real browser against a running server: connection screen →
+connected → **created a shoot using the jailed folder browser** (which showed
+only the configured roots and `Day2` with its 3 media) → watched it reach
+`Processing complete`, 3/3 scanned, 9 faces, with the panel updating from SSE →
+sorted two files into a group → exported to `out/`, three files in two folders
+plus the report, source folder unchanged. A reload reconnected silently from the
+saved connection. The export picker offered only the writable root.
+
+Then the packaged desktop build: `hasTauri` true, `mediaUrlBase`
+`http://teomedia.localhost`, thumbnails loading over the protocol handler, the
+existing 253-file shoot intact, and a backend event arriving through
+`TauriProgressSink` as `{"reason":"albums","shootId":1}`.
 
 ## Decisions worth keeping
 

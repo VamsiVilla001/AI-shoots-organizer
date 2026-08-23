@@ -118,10 +118,8 @@ fn protected() -> Router<Arc<ServerState>> {
         .route("/api/groups/from-ai-albums", post(api::groups_from_ai_albums))
         .route("/api/groups/from-album", post(api::group_from_album))
         .route("/api/groups/{id}", patch(api::update_group).delete(api::delete_group))
-        .route(
-            "/api/groups/{id}/media",
-            post(api::add_media_to_group).delete(api::remove_media_from_group),
-        )
+        .route("/api/groups/media", post(api::add_media_to_group))
+        .route("/api/groups/{id}/media", axum::routing::delete(api::remove_media_from_group))
         .route("/api/groups/{id}/clear", post(api::clear_group))
         // review
         .route("/api/faces", get(api::list_faces))
