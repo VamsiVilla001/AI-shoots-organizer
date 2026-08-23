@@ -9,14 +9,19 @@ use teo_database::Database;
 use teo_media_core::ThumbnailCache;
 
 use crate::paths::AppPaths;
+use crate::progress::ProgressSink;
 use crate::settings::AppSettings;
 
 pub struct AppState {
     pub db: Database,
     pub paths: AppPaths,
     pub thumbnails: ThumbnailCache,
-    /// Base URL the webview uses to fetch media through our custom protocol.
+    /// Base URL a front end uses to fetch media: the custom protocol in the
+    /// desktop app, an HTTP path prefix when served over the network.
     pub media_url_base: String,
+
+    /// Where pushed events go. The core never knows what is on the other end.
+    sink: Arc<dyn ProgressSink>,
 
     settings: RwLock<AppSettings>,
     /// Bumped whenever settings change. Workers watch this and rebuild their
@@ -32,19 +37,37 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(db: Database, paths: AppPaths, settings: AppSettings, media_url_base: String) -> Self {
+    pub fn new(
+        db: Database,
+        paths: AppPaths,
+        settings: AppSettings,
+        media_url_base: String,
+        sink: Arc<dyn ProgressSink>,
+    ) -> Self {
         let thumbnails = ThumbnailCache::new(&paths.thumbnails);
         Self {
             db,
             thumbnails,
             paths,
             media_url_base,
+            sink,
             settings: RwLock::new(settings),
             settings_version: AtomicU64::new(1),
             cancellations: Mutex::new(HashMap::new()),
             paused: AtomicBool::new(false),
             shutdown: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// The event destination for anything running against this state.
+    pub fn sink(&self) -> &dyn ProgressSink {
+        self.sink.as_ref()
+    }
+
+    /// A cloneable handle, for work that outlives the borrow — a spawned
+    /// export thread, say.
+    pub fn sink_handle(&self) -> Arc<dyn ProgressSink> {
+        Arc::clone(&self.sink)
     }
 
     pub fn settings(&self) -> AppSettings {
@@ -126,6 +149,7 @@ mod tests {
             paths,
             AppSettings::default(),
             "teomedia://localhost".into(),
+            crate::progress::null_sink(),
         )
     }
 

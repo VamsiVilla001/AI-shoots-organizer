@@ -7,7 +7,6 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tauri::AppHandle;
 use teo_database::models::{Job, JobKind, JobState, ProcessingStatus};
 use teo_database::repo::{jobs, logs, media as media_repo};
 
@@ -34,7 +33,7 @@ pub struct WorkerPool {
 
 impl WorkerPool {
     /// Starts `worker_threads` workers plus one progress monitor.
-    pub fn start(app: AppHandle, state: Arc<AppState>) -> Self {
+    pub fn start(state: Arc<AppState>) -> Self {
         // Recover anything a previous run left mid-flight.
         match state.db.conn().and_then(|conn| jobs::requeue_stale(&conn)) {
             Ok(n) if n > 0 => tracing::info!(jobs = n, "recovered interrupted jobs from the previous session"),
@@ -46,23 +45,21 @@ impl WorkerPool {
         let mut handles = Vec::with_capacity(worker_count + 1);
 
         for index in 0..worker_count {
-            let app = app.clone();
             let state = Arc::clone(&state);
             let has_io_worker = worker_count > 1;
             handles.push(
                 std::thread::Builder::new()
                     .name(format!("teo-worker-{index}"))
-                    .spawn(move || worker_loop(index, has_io_worker, app, state))
+                    .spawn(move || worker_loop(index, has_io_worker, state))
                     .expect("failed to spawn worker thread"),
             );
         }
 
-        let monitor_app = app.clone();
         let monitor_state = Arc::clone(&state);
         handles.push(
             std::thread::Builder::new()
                 .name("teo-monitor".into())
-                .spawn(move || monitor_loop(monitor_app, monitor_state))
+                .spawn(move || monitor_loop(monitor_state))
                 .expect("failed to spawn monitor thread"),
         );
 
@@ -77,7 +74,7 @@ impl WorkerPool {
     }
 }
 
-fn worker_loop(index: usize, has_io_worker: bool, app: AppHandle, state: Arc<AppState>) {
+fn worker_loop(index: usize, has_io_worker: bool, state: Arc<AppState>) {
     tracing::debug!(worker = index, "worker started");
 
     // Built on first use: a session that only ever browses an existing shoot
@@ -146,11 +143,11 @@ fn worker_loop(index: usize, has_io_worker: bool, app: AppHandle, state: Arc<App
             tools_version = state.settings_version();
         }
 
-        let outcome = run_job(&app, &state, &job, &mut engine, &mut engine_version, ffmpeg.as_ref());
+        let outcome = run_job(&state, &job, &mut engine, &mut engine_version, ffmpeg.as_ref());
         if matches!(JobKind::parse(&job.kind), Some(JobKind::AnalysePhoto | JobKind::AnalyseVideo)) {
             engine_last_used = Some(Instant::now());
         }
-        finish_job(&app, &state, &job, outcome);
+        finish_job(&state, &job, outcome);
     }
 
     tracing::debug!(worker = index, "worker stopped");
@@ -190,7 +187,6 @@ fn should_announce_blockage() -> bool {
 }
 
 fn run_job(
-    app: &AppHandle,
     state: &Arc<AppState>,
     job: &Job,
     engine: &mut Option<Engine>,
@@ -205,11 +201,11 @@ fn run_job(
     match kind {
         JobKind::Scan => {
             let cancel = state.cancellation(job.shoot_id);
-            let app = app.clone();
+            let sink = state.sink_handle();
             let shoot_id = job.shoot_id;
             match stages::scan_shoot(&state.db, shoot_id, &settings, Some(cancel), move |count| {
                 events::emit(
-                    &app,
+                    sink.as_ref(),
                     events::NOTICE,
                     events::Notice {
                         level: "info".into(),
@@ -279,7 +275,7 @@ fn run_job(
 
             match result {
                 Ok(()) => {
-                    events::shoot_changed(app, job.shoot_id, kind.as_str());
+                    events::shoot_changed(state.sink(), job.shoot_id, kind.as_str());
                     JobOutcome::Done
                 }
                 Err(e) => JobOutcome::Failed(e.to_string()),
@@ -356,7 +352,7 @@ fn analysis_outstanding(state: &Arc<AppState>, shoot_id: i64) -> bool {
     outstanding > 0
 }
 
-fn finish_job(app: &AppHandle, state: &Arc<AppState>, job: &Job, outcome: JobOutcome) {
+fn finish_job(state: &Arc<AppState>, job: &Job, outcome: JobOutcome) {
     let Ok(conn) = state.db.conn() else { return };
 
     match outcome {
@@ -374,7 +370,7 @@ fn finish_job(app: &AppHandle, state: &Arc<AppState>, job: &Job, outcome: JobOut
             // place, the next poll picks it up with no user action needed.
             tracing::warn!(job = job.id, kind = %job.kind, reason = %reason, "processing is blocked");
             if should_announce_blockage() {
-                events::notice(app, "warn", format!("Processing paused: {reason}"));
+                events::notice(state.sink(), "warn", format!("Processing paused: {reason}"));
             }
             std::thread::sleep(BLOCKED_BACKOFF);
             requeue_without_attempt(&conn, job.id);
@@ -401,7 +397,7 @@ fn finish_job(app: &AppHandle, state: &Arc<AppState>, job: &Job, outcome: JobOut
                     Some(&error),
                 );
                 events::emit(
-                    app,
+                    state.sink(),
                     events::JOB_FAILED,
                     events::JobFailed {
                         shoot_id: job.shoot_id,
@@ -424,7 +420,7 @@ fn requeue_without_attempt(conn: &teo_database::rusqlite::Connection, job_id: i6
 }
 
 /// Pushes progress for every shoot that currently has work in the queue.
-fn monitor_loop(app: AppHandle, state: Arc<AppState>) {
+fn monitor_loop(state: Arc<AppState>) {
     let mut last_emit = Instant::now() - PROGRESS_INTERVAL;
     // Remembers which shoots were active last tick so a final "finished"
     // update is always delivered, even though the queue is empty by then.
@@ -456,7 +452,7 @@ fn monitor_loop(app: AppHandle, state: Arc<AppState>) {
         for shoot_id in to_report {
             if let Ok(progress) = jobs::progress(&conn, shoot_id) {
                 events::emit(
-                    &app,
+                    state.sink(),
                     events::PROGRESS,
                     events::ProgressEvent { progress, paused: state.is_paused() },
                 );

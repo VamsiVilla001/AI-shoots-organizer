@@ -1,12 +1,14 @@
-//! Events pushed from the backend to the UI.
+//! Events pushed out of the core.
 //!
 //! Progress is *pushed* rather than polled so the media grid and the progress
 //! panel stay live during a long import without the frontend hammering the
-//! database (§18).
+//! database (§18). The names and payload shapes are the contract the front end
+//! listens on, whichever transport carries them — see [`crate::ProgressSink`].
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter};
 use teo_database::models::ProcessingProgress;
+
+use crate::progress::ProgressSink;
 
 pub const PROGRESS: &str = "teo://progress";
 pub const SHOOT_CHANGED: &str = "teo://shoot-changed";
@@ -60,18 +62,19 @@ pub struct Notice {
     pub message: String,
 }
 
-/// Emits an event, logging rather than propagating a failure — a UI that has
-/// gone away must never abort background work.
-pub fn emit<T: Serialize + Clone>(app: &AppHandle, event: &str, payload: T) {
-    if let Err(e) = app.emit(event, payload) {
-        tracing::debug!(event, error = %e, "could not emit event");
+/// Emits an event, logging rather than propagating a failure — a front end that
+/// has gone away must never abort background work.
+pub fn emit<T: Serialize>(sink: &dyn ProgressSink, event: &str, payload: T) {
+    match serde_json::to_value(payload) {
+        Ok(value) => sink.emit(event, value),
+        Err(e) => tracing::debug!(event, error = %e, "could not serialise an event payload"),
     }
 }
 
-pub fn notice(app: &AppHandle, level: &str, message: impl Into<String>) {
-    emit(app, NOTICE, Notice { level: level.to_string(), message: message.into() });
+pub fn notice(sink: &dyn ProgressSink, level: &str, message: impl Into<String>) {
+    emit(sink, NOTICE, Notice { level: level.to_string(), message: message.into() });
 }
 
-pub fn shoot_changed(app: &AppHandle, shoot_id: i64, reason: &str) {
-    emit(app, SHOOT_CHANGED, ShootChanged { shoot_id, reason: reason.to_string() });
+pub fn shoot_changed(sink: &dyn ProgressSink, shoot_id: i64, reason: &str) {
+    emit(sink, SHOOT_CHANGED, ShootChanged { shoot_id, reason: reason.to_string() });
 }

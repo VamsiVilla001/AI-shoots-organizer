@@ -119,7 +119,6 @@ pub fn get_shoot(state: State<'_, Arc<AppState>>, shoot_id: i64) -> Result<Optio
 /// Creates a shoot and immediately queues the scan.
 #[tauri::command]
 pub fn create_shoot(
-    app: AppHandle,
     state: State<'_, Arc<AppState>>,
     name: String,
     source_path: String,
@@ -141,7 +140,7 @@ pub fn create_shoot(
     };
 
     state.resume_shoot(shoot.id);
-    events::shoot_changed(&app, shoot.id, "created");
+    events::shoot_changed(state.sink(), shoot.id, "created");
     Ok(shoot)
 }
 
@@ -157,13 +156,13 @@ pub fn rename_shoot(state: State<'_, Arc<AppState>>, shoot_id: i64, name: String
 
 /// Removes the shoot's index. The user's media is not touched (§21).
 #[tauri::command]
-pub fn delete_shoot_index(app: AppHandle, state: State<'_, Arc<AppState>>, shoot_id: i64) -> Result<()> {
+pub fn delete_shoot_index(state: State<'_, Arc<AppState>>, shoot_id: i64) -> Result<()> {
     state.cancel_shoot(shoot_id);
     let conn = state.db.conn()?;
     jobs::cancel_for_shoot(&conn, shoot_id)?;
     shoots::delete_index(&conn, shoot_id)?;
     logs::record_quiet(&conn, logs::EVENT_SHOOT_DELETED, Some(shoot_id), None, None, None);
-    events::shoot_changed(&app, shoot_id, "deleted");
+    events::shoot_changed(state.sink(), shoot_id, "deleted");
     Ok(())
 }
 
@@ -171,7 +170,7 @@ pub fn delete_shoot_index(app: AppHandle, state: State<'_, Arc<AppState>>, shoot
 /// settings, player profiles, logs and installed models. Original media
 /// folders are never modified.
 #[tauri::command]
-pub fn clear_scanned_data(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<usize> {
+pub fn clear_scanned_data(state: State<'_, Arc<AppState>>) -> Result<usize> {
     state.set_paused(true);
 
     let cleared = (|| {
@@ -194,14 +193,14 @@ pub fn clear_scanned_data(app: AppHandle, state: State<'_, Arc<AppState>>) -> Re
         Err(error) => tracing::warn!(%error, "scan indexes were cleared but some thumbnails could not be removed"),
     }
 
-    events::emit(&app, events::LIBRARY_CHANGED, ());
+    events::emit(state.sink(), events::LIBRARY_CHANGED, ());
     Ok(removed)
 }
 
 /// Re-scans the folder and queues anything unfinished — the "Resume
 /// Processing" action.
 #[tauri::command]
-pub fn resume_processing(app: AppHandle, state: State<'_, Arc<AppState>>, shoot_id: i64) -> Result<usize> {
+pub fn resume_processing(state: State<'_, Arc<AppState>>, shoot_id: i64) -> Result<usize> {
     state.resume_shoot(shoot_id);
     state.set_paused(false);
 
@@ -211,7 +210,7 @@ pub fn resume_processing(app: AppHandle, state: State<'_, Arc<AppState>>, shoot_
     drop(conn);
 
     let queued = stages::queue_pending_work(&state.db, shoot_id)?;
-    events::shoot_changed(&app, shoot_id, "resumed");
+    events::shoot_changed(state.sink(), shoot_id, "resumed");
     Ok(queued)
 }
 
@@ -222,23 +221,23 @@ pub fn pause_processing(state: State<'_, Arc<AppState>>, paused: bool) -> Result
 }
 
 #[tauri::command]
-pub fn cancel_processing(app: AppHandle, state: State<'_, Arc<AppState>>, shoot_id: i64) -> Result<usize> {
+pub fn cancel_processing(state: State<'_, Arc<AppState>>, shoot_id: i64) -> Result<usize> {
     state.cancel_shoot(shoot_id);
     let conn = state.db.conn()?;
     let cancelled = jobs::cancel_for_shoot(&conn, shoot_id)?;
     shoots::set_status(&conn, shoot_id, ShootStatus::Paused)?;
-    events::shoot_changed(&app, shoot_id, "cancelled");
+    events::shoot_changed(state.sink(), shoot_id, "cancelled");
     Ok(cancelled)
 }
 
 /// Throws away all AI results for the shoot and starts the analysis again.
 /// Used after changing a model or a threshold.
 #[tauri::command]
-pub fn reanalyse_shoot(app: AppHandle, state: State<'_, Arc<AppState>>, shoot_id: i64) -> Result<usize> {
+pub fn reanalyse_shoot(state: State<'_, Arc<AppState>>, shoot_id: i64) -> Result<usize> {
     stages::reset_analysis(&state.db, shoot_id)?;
     state.resume_shoot(shoot_id);
     let queued = stages::queue_pending_work(&state.db, shoot_id)?;
-    events::shoot_changed(&app, shoot_id, "reanalysing");
+    events::shoot_changed(state.sink(), shoot_id, "reanalysing");
     Ok(queued)
 }
 
@@ -305,7 +304,6 @@ pub fn list_people(state: State<'_, Arc<AppState>>, shoot_id: Option<i64>) -> Re
 
 #[tauri::command]
 pub fn create_person(
-    app: AppHandle,
     state: State<'_, Arc<AppState>>,
     name: String,
     team: Option<String>,
@@ -313,13 +311,12 @@ pub fn create_person(
     let conn = state.db.conn()?;
     let person = people::get_or_create(&conn, &name, team.as_deref())?;
     logs::record_quiet(&conn, logs::EVENT_PLAYER_CREATED, None, None, Some(person.id), Some(&person.name));
-    events::emit(&app, events::LIBRARY_CHANGED, ());
+    events::emit(state.sink(), events::LIBRARY_CHANGED, ());
     Ok(person)
 }
 
 #[tauri::command]
 pub fn rename_person(
-    app: AppHandle,
     state: State<'_, Arc<AppState>>,
     person_id: i64,
     name: String,
@@ -327,7 +324,7 @@ pub fn rename_person(
     let conn = state.db.conn()?;
     people::rename(&conn, person_id, &name)?;
     logs::record_quiet(&conn, logs::EVENT_PLAYER_RENAMED, None, None, Some(person_id), Some(&name));
-    events::emit(&app, events::LIBRARY_CHANGED, ());
+    events::emit(state.sink(), events::LIBRARY_CHANGED, ());
     Ok(())
 }
 
@@ -345,7 +342,6 @@ pub fn update_person(
 /// Folds one player into another (§10, "Merge two people").
 #[tauri::command]
 pub fn merge_people(
-    app: AppHandle,
     state: State<'_, Arc<AppState>>,
     target_id: i64,
     source_id: i64,
@@ -360,26 +356,26 @@ pub fn merge_people(
         Some(target_id),
         Some(&format!("absorbed player {source_id}; {moved} faces now on the target")),
     );
-    events::emit(&app, events::LIBRARY_CHANGED, ());
+    events::emit(state.sink(), events::LIBRARY_CHANGED, ());
     Ok(moved)
 }
 
 #[tauri::command]
-pub fn delete_person(app: AppHandle, state: State<'_, Arc<AppState>>, person_id: i64) -> Result<()> {
+pub fn delete_person(state: State<'_, Arc<AppState>>, person_id: i64) -> Result<()> {
     let conn = state.db.conn()?;
     people::delete(&conn, person_id)?;
     logs::record_quiet(&conn, logs::EVENT_PLAYER_DELETED, None, None, Some(person_id), None);
-    events::emit(&app, events::LIBRARY_CHANGED, ());
+    events::emit(state.sink(), events::LIBRARY_CHANGED, ());
     Ok(())
 }
 
 /// Drops a player's biometric data but keeps the profile (§22, §24).
 #[tauri::command]
-pub fn clear_person_recognition(app: AppHandle, state: State<'_, Arc<AppState>>, person_id: i64) -> Result<()> {
+pub fn clear_person_recognition(state: State<'_, Arc<AppState>>, person_id: i64) -> Result<()> {
     let conn = state.db.conn()?;
     people::clear_recognition_data(&conn, person_id)?;
     logs::record_quiet(&conn, logs::EVENT_RECOGNITION_DATA_CLEARED, None, None, Some(person_id), None);
-    events::emit(&app, events::LIBRARY_CHANGED, ());
+    events::emit(state.sink(), events::LIBRARY_CHANGED, ());
     Ok(())
 }
 
@@ -401,7 +397,6 @@ pub fn list_clusters(
 /// it to the library (§7).
 #[tauri::command]
 pub fn name_cluster(
-    app: AppHandle,
     state: State<'_, Arc<AppState>>,
     cluster_id: i64,
     name: String,
@@ -421,13 +416,12 @@ pub fn name_cluster(
         Ok(person)
     })?;
 
-    events::emit(&app, events::LIBRARY_CHANGED, ());
+    events::emit(state.sink(), events::LIBRARY_CHANGED, ());
     Ok(person)
 }
 
 #[tauri::command]
 pub fn merge_clusters(
-    app: AppHandle,
     state: State<'_, Arc<AppState>>,
     target_id: i64,
     source_id: i64,
@@ -444,14 +438,13 @@ pub fn merge_clusters(
         );
         Ok(())
     })?;
-    events::emit(&app, events::LIBRARY_CHANGED, ());
+    events::emit(state.sink(), events::LIBRARY_CHANGED, ());
     Ok(())
 }
 
 /// Pulls faces out of a cluster into a new one (§10, "Split incorrect cluster").
 #[tauri::command]
 pub fn split_cluster(
-    app: AppHandle,
     state: State<'_, Arc<AppState>>,
     cluster_id: i64,
     face_ids: Vec<i64>,
@@ -475,7 +468,7 @@ pub fn split_cluster(
         Ok(new_id)
     })?;
 
-    events::emit(&app, events::LIBRARY_CHANGED, ());
+    events::emit(state.sink(), events::LIBRARY_CHANGED, ());
     Ok(new_id)
 }
 
@@ -496,9 +489,9 @@ pub fn list_albums(state: State<'_, Arc<AppState>>, shoot_id: i64) -> Result<Vec
 }
 
 #[tauri::command]
-pub fn regenerate_albums(app: AppHandle, state: State<'_, Arc<AppState>>, shoot_id: i64) -> Result<usize> {
+pub fn regenerate_albums(state: State<'_, Arc<AppState>>, shoot_id: i64) -> Result<usize> {
     let created = state.db.transaction(|conn| albums::regenerate(conn, shoot_id))?;
-    events::shoot_changed(&app, shoot_id, "albums");
+    events::shoot_changed(state.sink(), shoot_id, "albums");
     Ok(created)
 }
 
@@ -549,7 +542,6 @@ pub fn group_links(state: State<'_, Arc<AppState>>, shoot_id: i64) -> Result<Vec
 /// time — a bad name should fail while the person who typed it is looking.
 #[tauri::command]
 pub fn create_group(
-    app: AppHandle,
     state: State<'_, Arc<AppState>>,
     shoot_id: i64,
     name: String,
@@ -557,13 +549,12 @@ pub fn create_group(
     let conn = state.db.conn()?;
     let group = groups::get_or_create(&conn, shoot_id, &name, None)?;
     logs::record_quiet(&conn, logs::EVENT_GROUP_CREATED, Some(shoot_id), None, None, Some(&group.name));
-    events::shoot_changed(&app, shoot_id, "groups");
+    events::shoot_changed(state.sink(), shoot_id, "groups");
     Ok(group)
 }
 
 #[tauri::command]
 pub fn rename_group(
-    app: AppHandle,
     state: State<'_, Arc<AppState>>,
     group_id: i64,
     name: String,
@@ -579,7 +570,7 @@ pub fn rename_group(
         None,
         Some(&group.name),
     );
-    events::shoot_changed(&app, group.shoot_id, "groups");
+    events::shoot_changed(state.sink(), group.shoot_id, "groups");
     Ok(group)
 }
 
@@ -587,7 +578,6 @@ pub fn rename_group(
 /// using the group's own name.
 #[tauri::command]
 pub fn update_group(
-    app: AppHandle,
     state: State<'_, Arc<AppState>>,
     group_id: i64,
     folder_name: Option<String>,
@@ -596,13 +586,13 @@ pub fn update_group(
     let conn = state.db.conn()?;
     groups::update(&conn, group_id, folder_name.as_deref(), notes.as_deref())?;
     let group = groups::get_by_id(&conn, group_id)?.ok_or_else(|| err("that group no longer exists"))?;
-    events::shoot_changed(&app, group.shoot_id, "groups");
+    events::shoot_changed(state.sink(), group.shoot_id, "groups");
     Ok(group)
 }
 
 /// Deletes a group. Only the grouping is lost — no file is touched.
 #[tauri::command]
-pub fn delete_group(app: AppHandle, state: State<'_, Arc<AppState>>, group_id: i64) -> Result<()> {
+pub fn delete_group(state: State<'_, Arc<AppState>>, group_id: i64) -> Result<()> {
     let conn = state.db.conn()?;
     let Some(group) = groups::get_by_id(&conn, group_id)? else { return Ok(()) };
     groups::delete(&conn, group_id)?;
@@ -614,7 +604,7 @@ pub fn delete_group(app: AppHandle, state: State<'_, Arc<AppState>>, group_id: i
         None,
         Some(&group.name),
     );
-    events::shoot_changed(&app, group.shoot_id, "groups");
+    events::shoot_changed(state.sink(), group.shoot_id, "groups");
     Ok(())
 }
 
@@ -627,7 +617,6 @@ pub fn delete_group(app: AppHandle, state: State<'_, Arc<AppState>>, group_id: i
 /// in it needs.
 #[tauri::command]
 pub fn add_media_to_group(
-    app: AppHandle,
     state: State<'_, Arc<AppState>>,
     shoot_id: i64,
     group_id: Option<i64>,
@@ -665,13 +654,12 @@ pub fn add_media_to_group(
         None,
         Some(&format!("{} file(s) sorted into {}", media_ids.len(), group.name)),
     );
-    events::shoot_changed(&app, group.shoot_id, "groups");
+    events::shoot_changed(state.sink(), group.shoot_id, "groups");
     Ok(added)
 }
 
 #[tauri::command]
 pub fn remove_media_from_group(
-    app: AppHandle,
     state: State<'_, Arc<AppState>>,
     group_id: i64,
     media_ids: Vec<i64>,
@@ -679,17 +667,17 @@ pub fn remove_media_from_group(
     let conn = state.db.conn()?;
     let removed = groups::remove_media(&conn, group_id, &media_ids)?;
     if let Some(group) = groups::get_by_id(&conn, group_id)? {
-        events::shoot_changed(&app, group.shoot_id, "groups");
+        events::shoot_changed(state.sink(), group.shoot_id, "groups");
     }
     Ok(removed)
 }
 
 #[tauri::command]
-pub fn clear_group(app: AppHandle, state: State<'_, Arc<AppState>>, group_id: i64) -> Result<usize> {
+pub fn clear_group(state: State<'_, Arc<AppState>>, group_id: i64) -> Result<usize> {
     let conn = state.db.conn()?;
     let removed = groups::clear(&conn, group_id)?;
     if let Some(group) = groups::get_by_id(&conn, group_id)? {
-        events::shoot_changed(&app, group.shoot_id, "groups");
+        events::shoot_changed(state.sink(), group.shoot_id, "groups");
     }
     Ok(removed)
 }
@@ -701,7 +689,6 @@ pub fn clear_group(app: AppHandle, state: State<'_, Arc<AppState>>, group_id: i6
 /// a manual edit.
 #[tauri::command]
 pub fn groups_from_ai_albums(
-    app: AppHandle,
     state: State<'_, Arc<AppState>>,
     shoot_id: i64,
 ) -> Result<SeedResult> {
@@ -717,7 +704,7 @@ pub fn groups_from_ai_albums(
         None,
         Some(&format!("{groups_touched} group(s) seeded from AI albums with {files} file(s)")),
     );
-    events::shoot_changed(&app, shoot_id, "groups");
+    events::shoot_changed(state.sink(), shoot_id, "groups");
     Ok(SeedResult { groups: groups_touched, files })
 }
 
@@ -725,7 +712,6 @@ pub fn groups_from_ai_albums(
 /// fix the rest by hand" path from the Albums screen.
 #[tauri::command]
 pub fn group_from_album(
-    app: AppHandle,
     state: State<'_, Arc<AppState>>,
     album_id: i64,
     name: Option<String>,
@@ -740,7 +726,7 @@ pub fn group_from_album(
             .ok_or_else(|| teo_database::DbError::other("that group no longer exists"))
     })?;
 
-    events::shoot_changed(&app, group.shoot_id, "groups");
+    events::shoot_changed(state.sink(), group.shoot_id, "groups");
     Ok(group)
 }
 
@@ -756,7 +742,7 @@ pub fn list_faces(state: State<'_, Arc<AppState>>, query: FaceQuery) -> Result<V
 
 /// Accepts the AI's suggestion for these faces.
 #[tauri::command]
-pub fn confirm_faces(app: AppHandle, state: State<'_, Arc<AppState>>, face_ids: Vec<i64>) -> Result<usize> {
+pub fn confirm_faces(state: State<'_, Arc<AppState>>, face_ids: Vec<i64>) -> Result<usize> {
     let updated = state.db.transaction(|conn| {
         let n = faces::confirm_many(conn, &face_ids)?;
         logs::record_quiet(
@@ -769,13 +755,13 @@ pub fn confirm_faces(app: AppHandle, state: State<'_, Arc<AppState>>, face_ids: 
         );
         Ok(n)
     })?;
-    events::emit(&app, events::LIBRARY_CHANGED, ());
+    events::emit(state.sink(), events::LIBRARY_CHANGED, ());
     Ok(updated)
 }
 
 /// "Wrong person" — sends the faces back to the unknown pool.
 #[tauri::command]
-pub fn reject_faces(app: AppHandle, state: State<'_, Arc<AppState>>, face_ids: Vec<i64>) -> Result<usize> {
+pub fn reject_faces(state: State<'_, Arc<AppState>>, face_ids: Vec<i64>) -> Result<usize> {
     let updated = state.db.transaction(|conn| {
         let n = faces::reject_many(conn, &face_ids)?;
         logs::record_quiet(
@@ -788,7 +774,7 @@ pub fn reject_faces(app: AppHandle, state: State<'_, Arc<AppState>>, face_ids: V
         );
         Ok(n)
     })?;
-    events::emit(&app, events::LIBRARY_CHANGED, ());
+    events::emit(state.sink(), events::LIBRARY_CHANGED, ());
     Ok(updated)
 }
 
@@ -797,7 +783,6 @@ pub fn reject_faces(app: AppHandle, state: State<'_, Arc<AppState>>, face_ids: V
 /// recognition (§6).
 #[tauri::command]
 pub fn assign_faces(
-    app: AppHandle,
     state: State<'_, Arc<AppState>>,
     face_ids: Vec<i64>,
     person_id: Option<i64>,
@@ -825,7 +810,7 @@ pub fn assign_faces(
         Ok(n)
     })?;
 
-    events::emit(&app, events::LIBRARY_CHANGED, ());
+    events::emit(state.sink(), events::LIBRARY_CHANGED, ());
     Ok(updated)
 }
 
@@ -884,14 +869,12 @@ pub fn preview_export(
 
 #[tauri::command]
 pub fn start_export(
-    app: AppHandle,
     state: State<'_, Arc<AppState>>,
     shoot_id: i64,
     destination: String,
     options: ExportOptions,
 ) -> Result<i64> {
     Ok(crate::export::start(
-        app,
         Arc::clone(&state),
         shoot_id,
         PathBuf::from(destination),
@@ -923,7 +906,7 @@ pub fn recent_logs(state: State<'_, Arc<AppState>>, shoot_id: Option<i64>, limit
 
 /// Deletes every embedding while leaving detections and albums intact.
 #[tauri::command]
-pub fn clear_all_embeddings(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<usize> {
+pub fn clear_all_embeddings(state: State<'_, Arc<AppState>>) -> Result<usize> {
     let cleared = state.db.transaction(faces::clear_all_embeddings)?;
     let conn = state.db.conn()?;
     logs::record_quiet(
@@ -934,13 +917,13 @@ pub fn clear_all_embeddings(app: AppHandle, state: State<'_, Arc<AppState>>) -> 
         None,
         Some(&format!("{cleared} embedding(s) deleted")),
     );
-    events::notice(&app, "success", format!("Deleted {cleared} face embeddings."));
+    events::notice(state.sink(), "success", format!("Deleted {cleared} face embeddings."));
     Ok(cleared)
 }
 
 /// The full reset: every face, cluster and player profile in the database.
 #[tauri::command]
-pub fn clear_all_recognition_data(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<()> {
+pub fn clear_all_recognition_data(state: State<'_, Arc<AppState>>) -> Result<()> {
     state.db.transaction(|conn| {
         conn.execute("DELETE FROM video_detections", [])?;
         conn.execute("DELETE FROM faces", [])?;
@@ -953,7 +936,7 @@ pub fn clear_all_recognition_data(app: AppHandle, state: State<'_, Arc<AppState>
 
     let conn = state.db.conn()?;
     logs::record_quiet(&conn, logs::EVENT_RECOGNITION_DATA_CLEARED, None, None, None, Some("all"));
-    events::notice(&app, "success", "All recognition data has been deleted.");
+    events::notice(state.sink(), "success", "All recognition data has been deleted.");
     Ok(())
 }
 

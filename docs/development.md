@@ -6,12 +6,16 @@
 React UI  ──invoke──▶  Tauri commands (commands.rs)   ── thin: validate, query, return
    ▲                        │
    │ events                 ▼
-   └──────────────  SQLite (teo-database)  ◀── jobs table = the queue
-                            ▲
-        worker threads (worker.rs) ── claim job → run stage → write results
-                            │
-      ┌─────────────────────┼──────────────────────┐
-      ▼                     ▼                      ▼
+   │                 teo-app-core  ── state · settings · worker · pipeline
+   │                       │          stages · export · models · paths
+   └── ProgressSink ───────┤
+                           ▼
+                    SQLite (teo-database)  ◀── jobs table = the queue
+                           ▲
+        worker threads (app-core/worker.rs) ── claim job → run stage → write results
+                           │
+      ┌────────────────────┼──────────────────────┐
+      ▼                    ▼                      ▼
  teo-media-core      face-detection +        teo-clustering
  (scan/thumbs)       face-recognition        (match + cluster)
                      (ONNX Runtime)
@@ -19,6 +23,12 @@ React UI  ──invoke──▶  Tauri commands (commands.rs)   ── thin: val
 
 Key decisions, and where to look:
 
+- **The core knows nothing about its front door** (`crates/app-core`). It takes
+  an `AppPaths` instead of asking a path resolver, and pushes events into a
+  `ProgressSink` instead of emitting to a webview — `TauriProgressSink` in the
+  desktop shell, `NullProgressSink`/`RecordingProgressSink` in tests. That seam
+  is what lets a headless build reuse the pipeline rather than copy it; see
+  [server-architecture.md](server-architecture.md).
 - **Everything derived is rebuildable.** Albums, clusters and suggestions can
   be regenerated from `faces` at any time; human decisions (`assignment =
   'confirmed'`, named clusters) are never overwritten by a re-run. See
@@ -73,7 +83,7 @@ change the other in the same commit.
 
 ## Testing
 
-- `cargo test --workspace` — 180+ unit tests, all hermetic (in-memory SQLite,
+- `cargo test --workspace` — 200+ unit tests, all hermetic (in-memory SQLite,
   temp dirs; no models or network needed).
 - AI correctness is pinned by math-level tests: SCRFD anchor decode,
   similarity-transform alignment, cosine/kNN, cluster determinism (seeded

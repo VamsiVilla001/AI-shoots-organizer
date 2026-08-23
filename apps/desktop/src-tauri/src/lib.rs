@@ -1,24 +1,23 @@
 //! Esports AI Media Organiser — application wiring.
 
 pub mod commands;
-pub mod events;
-pub mod export;
-pub mod models;
-pub mod paths;
-pub mod pipeline;
 pub mod protocol;
-pub mod settings;
-pub mod stages;
-pub mod state;
-pub mod worker;
+pub mod sink;
+
+// The application core lives in `teo-app-core` so a headless build can use it.
+// Re-exporting under the old names keeps `crate::state`, `crate::events` and
+// friends valid for the command layer, which is otherwise untouched.
+pub use teo_app_core::{events, export, models, paths, pipeline, settings, stages, state, worker};
 
 use std::sync::Arc;
 
 use tauri::Manager;
+use teo_app_core::ProgressSink;
 use teo_database::Database;
 
 use crate::paths::AppPaths;
 use crate::settings::AppSettings;
+use crate::sink::TauriProgressSink;
 use crate::state::AppState;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -56,12 +55,13 @@ pub fn run() {
                 .unwrap_or_default()
                 .sanitised();
 
-            let state = Arc::new(AppState::new(db, paths, settings, protocol::url_base()));
+            let sink: Arc<dyn ProgressSink> = Arc::new(TauriProgressSink::new(app.handle().clone()));
+            let state = Arc::new(AppState::new(db, paths, settings, protocol::url_base(), sink));
             app.manage(Arc::clone(&state));
 
             // Workers start immediately so an import interrupted by a previous
             // quit resumes without the user having to ask (§18).
-            let pool = worker::WorkerPool::start(app.handle().clone(), Arc::clone(&state));
+            let pool = worker::WorkerPool::start(Arc::clone(&state));
             app.manage(Mutex::new(Some(pool)));
 
             Ok(())

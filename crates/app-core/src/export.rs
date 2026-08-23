@@ -4,7 +4,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use tauri::AppHandle;
 use teo_database::models::{AlbumType, ExportStatus};
 use teo_database::repo::{albums, exports, groups as groups_repo, logs, media as media_repo, shoots};
 use teo_export_engine::{ExportGroup, ExportMode, ExportOptions, ExportPlan, SourceFile};
@@ -145,7 +144,6 @@ pub fn preview(
 /// Starts an export on a background thread and returns its record id
 /// immediately. Progress arrives as `teo://export-progress` events.
 pub fn start(
-    app: AppHandle,
     state: Arc<AppState>,
     shoot_id: i64,
     destination: PathBuf,
@@ -175,14 +173,13 @@ pub fn start(
 
     std::thread::Builder::new()
         .name("teo-export".into())
-        .spawn(move || run(app, state, export_id, shoot_id, destination, plan, options))
+        .spawn(move || run(state, export_id, shoot_id, destination, plan, options))
         .map_err(|e| ExportRunError::Other(format!("could not start the export thread: {e}")))?;
 
     Ok(export_id)
 }
 
 fn run(
-    app: AppHandle,
     state: Arc<AppState>,
     export_id: i64,
     shoot_id: i64,
@@ -196,7 +193,7 @@ fn run(
     // earlier run so it does not stop immediately.
     cancel.store(false, std::sync::atomic::Ordering::Relaxed);
 
-    let progress_app = app.clone();
+    let progress_sink = state.sink_handle();
     let progress_state = Arc::clone(&state);
     let result = teo_export_engine::execute(
         &plan,
@@ -213,7 +210,7 @@ fn run(
                 );
             }
             events::emit(
-                &progress_app,
+                progress_sink.as_ref(),
                 events::EXPORT_PROGRESS,
                 events::ExportProgressEvent {
                     export_id,
@@ -252,7 +249,7 @@ fn run(
     let bytes = result.as_ref().map(|p| p.bytes_done).unwrap_or(0);
 
     events::emit(
-        &app,
+        state.sink(),
         events::EXPORT_PROGRESS,
         events::ExportProgressEvent {
             export_id,
@@ -267,10 +264,12 @@ fn run(
     );
 
     match error {
-        Some(message) => events::notice(&app, "error", format!("Export failed: {message}")),
-        None if status == ExportStatus::Cancelled => events::notice(&app, "warn", "Export cancelled."),
+        Some(message) => events::notice(state.sink(), "error", format!("Export failed: {message}")),
+        None if status == ExportStatus::Cancelled => {
+            events::notice(state.sink(), "warn", "Export cancelled.")
+        }
         None => events::notice(
-            &app,
+            state.sink(),
             "success",
             format!("Exported {done} file(s) to {}", destination.display()),
         ),
