@@ -744,3 +744,157 @@ h2 {
 ::-webkit-scrollbar-track {
   background: transparent;
 }
+
+/* ---- sorting into groups -------------------------------------------- */
+
+.sort-stats {
+  display: flex;
+  gap: 22px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+}
+
+.sort-stats strong {
+  color: var(--text);
+  font-size: 17px;
+  margin-right: 6px;
+}
+
+.sort-stats .pending strong {
+  color: var(--warn);
+}
+
+/* The panel is fixed-width so the grid keeps a predictable column count while
+   files are dragged onto it. */
+.sort-layout {
+  display: grid;
+  grid-template-columns: 280px 1fr;
+  gap: 18px;
+  align-items: start;
+}
+
+@media (max-width: 1100px) {
+  .sort-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+.group-panel {
+  position: sticky;
+  top: 0;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: calc(100vh - 130px);
+  overflow-y: auto;
+}
+
+.group-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.group-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+}
+
+.group-row:hover {
+  border-color: #39405c;
+  background: var(--bg-hover);
+}
+
+.group-row.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+/* A drag is hovering this group: make the target unmistakable, because a
+   mis-drop means files filed under the wrong person. */
+.group-row.drop-target {
+  border-color: var(--teal);
+  background: rgba(0, 209, 178, 0.12);
+  border-style: dashed;
+}
+
+.group-row.static {
+  justify-content: space-between;
+  background: none;
+  border-style: dashed;
+}
+
+.group-row .grow {
+  flex: 1;
+  min-width: 0;
+}
+
+.group-row .name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.group-row .sub {
+  color: var(--text-dim);
+  font-size: 11.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sort-main {
+  min-width: 0;
+}
+
+/* Chips on a thumbnail, naming the groups the file is already in. */
+.media-tile .group-chips {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  max-width: calc(100% - 12px);
+}
+
+.media-tile .group-chips .chip {
+  background: rgba(124, 92, 255, 0.85);
+  color: #fff;
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 99px;
+  max-width: 110px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.folder-preview {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  max-height: 190px;
+  overflow-y: auto;
+  color: var(--text-dim);
+}

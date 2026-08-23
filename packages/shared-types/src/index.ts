@@ -186,6 +186,49 @@ export interface Album {
   generatedAt: string
 }
 
+/**
+ * A folder the editor named in the app and filled themselves.
+ *
+ * The counterpart to `Album`: an album is derived from face assignments and
+ * rebuilt on demand, a group is whatever a person decided it is and survives
+ * re-analysis untouched. `folderName` (when set) is what the export writes
+ * instead of `name`.
+ */
+export interface Group {
+  id: number
+  shootId: number
+  name: string
+  folderName: string | null
+  notes: string | null
+  personId: number | null
+  sortOrder: number
+  mediaCount: number
+  photoCount: number
+  videoCount: number
+  coverMediaId: number | null
+  createdAt: string
+  updatedAt: string
+}
+
+/** One membership row: which group holds which file. */
+export interface MediaGroupLink {
+  mediaId: number
+  groupId: number
+}
+
+/** How much of a shoot has been sorted. */
+export interface GroupStats {
+  mediaTotal: number
+  grouped: number
+  ungrouped: number
+}
+
+/** What seeding groups from the AI albums did. */
+export interface SeedResult {
+  groups: number
+  files: number
+}
+
 export interface VideoDetection {
   id: number
   mediaId: number
@@ -267,9 +310,13 @@ export interface MediaQuery {
   personId?: number | null
   clusterId?: number | null
   albumId?: number | null
+  /** Only files the editor put in this group. */
+  groupId?: number | null
   mediaType?: MediaType | null
   search?: string | null
   onlyUnidentified?: boolean
+  /** Only files that are not in any group yet — the sorting backlog. */
+  ungrouped?: boolean
   limit?: number | null
   offset?: number | null
 }
@@ -368,13 +415,24 @@ export interface AppInfo {
 
 export type ExistingFilePolicy = 'skip' | 'rename' | 'overwrite'
 
+/** Whether the exported folders come from the editor's groups or the AI albums. */
+export type ExportMode = 'groups' | 'aiAlbums'
+
 export interface ExportOptions {
+  mode: ExportMode
+  /** `groups` mode: which groups to write. `null` writes all of them. */
+  groupIds: number[] | null
   splitPhotosVideos: boolean
+  /** `aiAlbums` mode only. */
   includeUnidentified: boolean
+  /** `aiAlbums` mode only. */
   personIds: number[] | null
   preserveMetadata: boolean
   existing: ExistingFilePolicy
+  /** `aiAlbums` mode only. */
   includeMultiPlayer: boolean
+  /** Write `_sorting-report.txt` beside the folders. */
+  writeManifest: boolean
 }
 
 export interface ExportPreview {

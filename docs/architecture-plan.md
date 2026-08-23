@@ -1270,3 +1270,87 @@ This architecture keeps the application:
 - GPU accelerated
 - Easy to package
 - Focused specifically on esports player media sorting
+
+---
+
+# 34. Manual Grouping (Editor-Named Folders)
+
+Face recognition proposes; the editor decides. AI albums are derived state —
+`albums::regenerate` drops and rebuilds them from face assignments — so they
+cannot hold a human decision. Manual **groups** are that missing layer, and
+they are what the export writes by default.
+
+## The job this removes
+
+An editor cutting one player's reel opens a raw shoot folder, works out which
+files belong to whom, and copies them into per-person folders by hand. That
+copying is the hours being spent. Here they name a group once in the app and
+every file they file into it lands in a folder of that name on the NAS.
+
+## Rules
+
+- **The source folder is read-only.** A group is a set of pointers into the
+  media index. Creating, emptying or deleting one changes nothing on disk.
+- **The name is the folder.** A group's name becomes one folder in the export
+  destination, sanitised for the strictest target filesystem
+  (`sanitise_component`). A group may carry a `folder_name` override for when
+  the on-disk name should differ from the label being worked with
+  (`01_Jonathan` for a folder that has to sort first, say).
+- **A file may belong to several groups.** A clip with two players in it is
+  legitimately both players' footage, so membership is many-to-many and the
+  file is copied into each folder. "Move here" exists for the other case —
+  something filed under the wrong person — and takes the file out of every
+  other group in the shoot.
+- **Manual work outranks AI work.** Re-analysing a shoot, clearing embeddings
+  or regenerating albums never touches `media_groups`.
+- **Groups are per shoot.** Files from another shoot cannot be added, so an
+  export can never silently mix two source folders.
+
+## Screens
+
+*Sort into Groups* is where a shoot opens. A fixed panel lists the groups with
+their file counts and the folder each will produce, plus two standing views —
+*Not sorted yet* (the backlog an editor works to zero) and *All files*. The
+grid to its right is selection-first: click to pick, shift-click for a range,
+drag a selection onto a group, or use the selection bar to add to an existing
+group or type a new name. Thumbnails carry a chip per group they already sit
+in, so a mis-file is visible without opening anything.
+
+*Build groups from AI players* seeds one group per identified player,
+pre-filled with that player's album, so the editor corrects rather than sorts
+from scratch. It is re-runnable: naming more faces and running it again tops
+the groups up and never undoes a manual edit. A single album can also be
+promoted from the AI Albums screen.
+
+## Export
+
+The Export screen writes either the editor's groups (the default) or the AI
+albums directly. Group mode takes a group selection; the preview lists the
+exact folders before anything is written, and a `_sorting-report.txt` in the
+destination records which source file went where.
+
+```text
+\\NAS\Edit\BGMS_Finals_Sorted/
+│
+├── _sorting-report.txt
+├── Jonathan/
+│   ├── Photos/
+│   └── Videos/
+├── Mavi_ Day 2/
+│   └── Videos/
+└── Team B-roll/
+    └── Photos/
+```
+
+## Storage
+
+```sql
+media_groups       (id, shoot_id, name, folder_name, notes, person_id,
+                    sort_order, media_count, photo_count, video_count,
+                    cover_media_id, created_at, updated_at)
+media_group_items  (group_id, media_id, added_at)
+```
+
+Counts are denormalised, as `albums` does it, because the sorting screen
+renders them on every interaction. `UNIQUE (shoot_id, name)` with a
+`NOCASE` collation stops two groups from fighting over one folder.

@@ -110,6 +110,19 @@ pub fn run() {
             // albums
             commands::list_albums,
             commands::regenerate_albums,
+            // groups (the editor's own sorting)
+            commands::list_groups,
+            commands::group_stats,
+            commands::group_links,
+            commands::create_group,
+            commands::rename_group,
+            commands::update_group,
+            commands::delete_group,
+            commands::add_media_to_group,
+            commands::remove_media_from_group,
+            commands::clear_group,
+            commands::groups_from_ai_albums,
+            commands::group_from_album,
             // review
             commands::list_faces,
             commands::confirm_faces,

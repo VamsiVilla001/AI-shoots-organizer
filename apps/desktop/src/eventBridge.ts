@@ -28,6 +28,8 @@ export async function startEventBridge(queryClient: QueryClient): Promise<() => 
         queryClient.invalidateQueries({ queryKey: ['clusters'] })
         queryClient.invalidateQueries({ queryKey: ['people'] })
         queryClient.invalidateQueries({ queryKey: ['faces'] })
+        // A finished scan changes how much is left to sort.
+        queryClient.invalidateQueries({ queryKey: ['groupStats'] })
       } else {
         // During processing only the cheap headline numbers refresh.
         queryClient.invalidateQueries({ queryKey: ['shoots'] })
@@ -39,6 +41,9 @@ export async function startEventBridge(queryClient: QueryClient): Promise<() => 
       queryClient.invalidateQueries({ queryKey: ['media', payload.shootId] })
       queryClient.invalidateQueries({ queryKey: ['albums', payload.shootId] })
       queryClient.invalidateQueries({ queryKey: ['clusters', payload.shootId] })
+      queryClient.invalidateQueries({ queryKey: ['groups', payload.shootId] })
+      queryClient.invalidateQueries({ queryKey: ['groupStats', payload.shootId] })
+      queryClient.invalidateQueries({ queryKey: ['groupLinks', payload.shootId] })
       queryClient.invalidateQueries({ queryKey: ['faces'] })
     }),
 

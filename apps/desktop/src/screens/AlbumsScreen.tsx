@@ -128,6 +128,27 @@ function Section(props: { title: string; children: React.ReactNode }) {
 }
 
 function AlbumCard({ album, onOpen }: { album: Album; onOpen: () => void }) {
+  const queryClient = useQueryClient()
+  const pushNotice = useUi((s) => s.pushNotice)
+  const navigate = useUi((s) => s.navigate)
+
+  // An album is regenerated from faces and cannot be edited by hand; turning it
+  // into a group is how its contents become the editor's to correct and export.
+  const toGroup = useMutation({
+    mutationFn: () => api.groupFromAlbum(album.id),
+    onSuccess: async (group) => {
+      await queryClient.invalidateQueries({ queryKey: ['groups', album.shootId] })
+      await queryClient.invalidateQueries({ queryKey: ['groupStats', album.shootId] })
+      await queryClient.invalidateQueries({ queryKey: ['groupLinks', album.shootId] })
+      pushNotice({
+        level: 'success',
+        message: `Group “${group.name}” now holds ${formatCount(group.mediaCount)} file(s). Correct it on the Sort screen.`,
+      })
+      navigate('groups')
+    },
+    onError: (e) => pushNotice({ level: 'error', message: String(e instanceof Error ? e.message : e) }),
+  })
+
   return (
     <div className="card shoot-card" onClick={onOpen}>
       {album.coverMediaId != null && (
@@ -143,6 +164,11 @@ function AlbumCard({ album, onOpen }: { album: Album; onOpen: () => void }) {
         <span>
           {formatCount(album.photoCount)} photos · {formatCount(album.videoCount)} videos
         </span>
+      </div>
+      <div style={{ marginTop: 10 }} onClick={(e) => e.stopPropagation()}>
+        <button className="small" disabled={toGroup.isPending} onClick={() => toGroup.mutate()}>
+          {toGroup.isPending ? 'Adding…' : 'Make this a group'}
+        </button>
       </div>
     </div>
   )

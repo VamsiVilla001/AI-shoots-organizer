@@ -13,11 +13,18 @@ struct Migration {
     sql: &'static str,
 }
 
-const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "baseline",
-    sql: include_str!("schema.sql"),
-}];
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "baseline",
+        sql: include_str!("schema.sql"),
+    },
+    Migration {
+        version: 2,
+        name: "manual_groups",
+        sql: include_str!("schema_002_groups.sql"),
+    },
+];
 
 /// The schema version this build expects.
 pub fn target_version() -> i32 {
@@ -57,6 +64,31 @@ mod tests {
         // Running again must be a no-op rather than an error.
         run(&mut conn).unwrap();
         assert_eq!(current_version(&conn).unwrap(), target_version());
+    }
+
+    /// The upgrade path real installations take: a database created before
+    /// manual grouping existed must gain the new tables without losing a row.
+    #[test]
+    fn a_version_one_database_upgrades_in_place() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(include_str!("schema.sql")).unwrap();
+        conn.pragma_update(None, "user_version", 1).unwrap();
+        conn.execute(
+            "INSERT INTO shoots (id, name, source_path, created_at, updated_at)
+             VALUES (1, 'BGMS Finals', 'D:\\raw', 'now', 'now')",
+            [],
+        )
+        .unwrap();
+
+        run(&mut conn).unwrap();
+
+        assert_eq!(current_version(&conn).unwrap(), target_version());
+        let shoots: i64 = conn.query_row("SELECT COUNT(*) FROM shoots", [], |r| r.get(0)).unwrap();
+        assert_eq!(shoots, 1, "existing rows survive the upgrade");
+        let groups: i64 = conn
+            .query_row("SELECT COUNT(*) FROM media_groups", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(groups, 0, "the new tables exist and start empty");
     }
 
     #[test]

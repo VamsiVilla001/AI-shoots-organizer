@@ -23,6 +23,12 @@ Key decisions, and where to look:
   be regenerated from `faces` at any time; human decisions (`assignment =
   'confirmed'`, named clusters) are never overwritten by a re-run. See
   `crates/database/src/repo/albums.rs::regenerate` and `stages.rs`.
+- **Manual groups are not derived** (`repo/groups.rs`, §34). `media_groups` is
+  the editor's own sorting and the default source of export folders, so nothing
+  in the AI path may rewrite it: `stages::reset_analysis`,
+  `clear_all_recognition_data` and `albums::regenerate` all leave it alone.
+  Group names become folder names, which is why they are validated on the way
+  in rather than at export time.
 - **The queue lives in SQLite** (`repo/jobs.rs`). `claim_next` is a single
   `UPDATE … RETURNING`, so concurrent workers cannot double-claim. On startup
   `requeue_stale` recovers anything a crash left `running`.
@@ -83,4 +89,12 @@ All are user-configurable in Settings and clamped in
 ## Schema changes
 
 Append a new migration to `crates/database/src/migrations.rs` — never edit an
-existing one; installed databases have already run it.
+existing one; installed databases have already run it. Migration 2
+(`schema_002_groups.sql`) is the worked example: it adds tables and touches
+nothing that migration 1 created.
+
+## Folder-name previews
+
+`apps/desktop/src/folders.ts` mirrors `export-engine/src/naming.rs` so the UI
+can show the exact folder a group will produce before the export runs. The Rust
+side is the authority; if the two disagree, fix the TypeScript.

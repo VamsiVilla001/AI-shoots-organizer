@@ -22,6 +22,10 @@ pub const EVENT_CLUSTER_MERGED: &str = "cluster_merged";
 pub const EVENT_CLUSTER_SPLIT: &str = "cluster_split";
 pub const EVENT_PLAYER_ASSIGNMENT: &str = "player_assignment";
 pub const EVENT_MANUAL_CORRECTION: &str = "manual_correction";
+pub const EVENT_GROUP_CREATED: &str = "group_created";
+pub const EVENT_GROUP_RENAMED: &str = "group_renamed";
+pub const EVENT_GROUP_DELETED: &str = "group_deleted";
+pub const EVENT_GROUP_ASSIGNMENT: &str = "group_assignment";
 pub const EVENT_EXPORT: &str = "export";
 pub const EVENT_RECOGNITION_DATA_CLEARED: &str = "recognition_data_cleared";
 

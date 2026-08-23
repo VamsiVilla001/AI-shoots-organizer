@@ -323,6 +323,50 @@ pub struct Album {
     pub generated_at: String,
 }
 
+/// A folder an editor named in the app and filled themselves (§34).
+///
+/// The counterpart to [`Album`]: an album is derived from face assignments and
+/// rebuilt on demand, a group is whatever a person decided it is and survives
+/// re-analysis untouched.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Group {
+    pub id: i64,
+    pub shoot_id: i64,
+    pub name: String,
+    /// Overrides `name` as the folder name on export when set.
+    pub folder_name: Option<String>,
+    pub notes: Option<String>,
+    /// The player this group was seeded from, when it came from an AI album.
+    pub person_id: Option<i64>,
+    pub sort_order: i64,
+    pub media_count: i64,
+    pub photo_count: i64,
+    pub video_count: i64,
+    pub cover_media_id: Option<i64>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl Group {
+    /// The name the export folder is built from, before sanitising.
+    pub fn export_name(&self) -> &str {
+        self.folder_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&self.name)
+    }
+}
+
+/// One membership row, flattened for the grid: which groups hold which file.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaGroupLink {
+    pub media_id: i64,
+    pub group_id: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VideoDetection {
@@ -417,10 +461,14 @@ pub struct MediaQuery {
     pub person_id: Option<i64>,
     pub cluster_id: Option<i64>,
     pub album_id: Option<i64>,
+    /// Only files the editor put in this manual group.
+    pub group_id: Option<i64>,
     pub media_type: Option<String>,
     pub search: Option<String>,
     /// Only media with at least one face nobody has identified yet.
     pub only_unidentified: bool,
+    /// Only files that are not in any group yet — the sorting backlog.
+    pub ungrouped: bool,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
 }

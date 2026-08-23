@@ -7,6 +7,7 @@ import { Sidebar } from './components/Sidebar'
 import { Notices } from './components/Notices'
 import { MediaViewer } from './components/MediaViewer'
 import { ShootsScreen } from './screens/ShootsScreen'
+import { GroupsScreen } from './screens/GroupsScreen'
 import { PlayersScreen } from './screens/PlayersScreen'
 import { AlbumsScreen } from './screens/AlbumsScreen'
 import { ReviewScreen } from './screens/ReviewScreen'
@@ -28,6 +29,7 @@ export default function App() {
       <Sidebar />
       <main className="workspace">
         {screen === 'shoots' && <ShootsScreen />}
+        {screen === 'groups' && <GroupsScreen />}
         {screen === 'players' && <PlayersScreen />}
         {screen === 'albums' && <AlbumsScreen />}
         {screen === 'review' && <ReviewScreen />}
