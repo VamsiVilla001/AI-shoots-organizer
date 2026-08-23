@@ -200,15 +200,61 @@ pub fn plan(groups: &[ExportGroup], options: &ExportOptions) -> ExportPlan {
 
 /// Rejects destinations that would write into the shoot's own folder, which
 /// would both pollute the source and make a re-scan pick up the copies.
+///
+/// Two checks, because a path comparison is not enough on a server:
+///
+/// 1. **By path**, after canonicalising, so `..` and symlinks cannot dress up
+///    a destination as being somewhere else.
+/// 2. **By file identity**, because a container commonly mounts the same share
+///    twice — `/media` read-only and `/output` writable — and those are
+///    different paths that canonicalise differently while being the same
+///    directory. Comparing the device and inode catches that; it is the only
+///    way to see through a bind mount.
+///
+/// The identity check is Unix-only: `std::os::windows` exposes a file index
+/// only behind an unstable feature. On Windows the path check stands alone,
+/// which is what the desktop app has always relied on.
 pub fn validate_destination(destination: &Path, source_roots: &[PathBuf]) -> Result<()> {
-    let destination = normalise(destination);
+    let canonical_destination = normalise(destination);
+
     for root in source_roots {
-        let root = normalise(root);
-        if destination == root || destination.starts_with(&root) {
+        let canonical_root = normalise(root);
+        if canonical_destination == canonical_root || canonical_destination.starts_with(&canonical_root) {
             return Err(ExportError::DestinationInsideSource);
         }
+
+        // The destination itself, or any ancestor of it, being the same
+        // directory as the source means the copies would land in the source
+        // through another mount point.
+        let mut candidate = Some(canonical_destination.as_path());
+        while let Some(path) = candidate {
+            if is_same_directory(path, &canonical_root) {
+                return Err(ExportError::DestinationInsideSource);
+            }
+            candidate = path.parent();
+        }
     }
+
     Ok(())
+}
+
+/// Whether two paths name the same directory on disk, regardless of how they
+/// were reached.
+#[cfg(unix)]
+fn is_same_directory(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    let (Ok(a), Ok(b)) = (std::fs::metadata(a), std::fs::metadata(b)) else {
+        return false;
+    };
+    a.is_dir() && b.is_dir() && a.dev() == b.dev() && a.ino() == b.ino()
+}
+
+#[cfg(not(unix))]
+fn is_same_directory(a: &Path, b: &Path) -> bool {
+    // No stable file identity here, so this collapses to the path check the
+    // caller has already made.
+    a == b
 }
 
 fn normalise(path: &Path) -> PathBuf {
@@ -508,6 +554,39 @@ mod tests {
         };
         execute(&plan, dest_dir.path(), &options, || true, |_| {}).unwrap();
         assert!(!dest_dir.path().join(MANIFEST_FILENAME).exists());
+    }
+
+    #[test]
+    fn a_second_mount_of_the_source_is_still_the_source() {
+        // What a NAS container does: the same directory presented twice, once
+        // as the read-only source and once as the writable destination. The two
+        // paths differ and canonicalise differently, so only file identity can
+        // tell they are one directory.
+        let share = tempfile::tempdir().unwrap();
+        let source = share.path().join("shoot");
+        std::fs::create_dir_all(&source).unwrap();
+
+        // A symlink is the portable stand-in for a bind mount here: a real bind
+        // mount needs root, and both produce a second path to one directory.
+        let second_view = share.path().join("output");
+        #[cfg(unix)]
+        let linked = std::os::unix::fs::symlink(&source, &second_view).is_ok();
+        #[cfg(windows)]
+        let linked = std::os::windows::fs::symlink_dir(&source, &second_view).is_ok();
+
+        if !linked {
+            return; // Windows without the privilege; the path check still applies.
+        }
+
+        assert!(
+            validate_destination(&second_view, std::slice::from_ref(&source)).is_err(),
+            "a second path to the source folder must be refused"
+        );
+
+        // And a genuinely separate folder on the same share is still fine.
+        let elsewhere = share.path().join("sorted");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        assert!(validate_destination(&elsewhere, std::slice::from_ref(&source)).is_ok());
     }
 
     #[test]
