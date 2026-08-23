@@ -102,6 +102,7 @@ fn build_from_albums(db: &teo_database::Database, shoot_id: i64, options: &Expor
             },
             t if t == AlbumType::MultiPlayer.as_str() => options.include_multi_player,
             t if t == AlbumType::Unidentified.as_str() => options.include_unidentified,
+            t if t == AlbumType::GroupSize.as_str() => options.include_group_size,
             // Team albums duplicate their members' files; exporting them by
             // default would multiply the output size for little benefit.
             _ => false,
@@ -577,6 +578,27 @@ mod tests {
 
         let plan = preview(&db, shoot_id, destination.path(), &ExportOptions::default()).unwrap();
         assert!(plan.is_empty(), "no groups means nothing to write");
+    }
+
+    #[test]
+    fn group_size_folders_are_opt_in() {
+        let scratch = Scratch::new("groupsize");
+        let (db, shoot_id) = seed(scratch.path());
+
+        // Off by default: enabling it would silently write every file twice,
+        // since each file is in both a player album and a size album.
+        let default_groups = build_groups(&db, shoot_id, &album_options()).unwrap();
+        assert!(!default_groups.iter().any(|g| g.name == "Single"));
+
+        let opted_in = ExportOptions { include_group_size: true, ..album_options() };
+        let groups = build_groups(&db, shoot_id, &opted_in).unwrap();
+        assert!(
+            groups.iter().any(|g| g.name == "Single"),
+            "expected a Single folder, got {:?}",
+            groups.iter().map(|g| &g.name).collect::<Vec<_>>()
+        );
+        // The player folders are still there — the two axes coexist.
+        assert!(groups.iter().any(|g| g.name == "Jonathan"));
     }
 
     #[test]

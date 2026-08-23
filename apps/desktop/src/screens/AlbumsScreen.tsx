@@ -5,9 +5,9 @@
 
 import { useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import type { Album, ClusterSummary, MediaType } from '@teo/shared-types'
+import { GROUP_SIZE_CAP, type Album, type ClusterSummary, type MediaType } from '@teo/shared-types'
 import * as api from '../api'
-import { formatCount, thumbUrl } from '../media'
+import { formatConfidence, formatCount, groupSizeName, thumbUrl } from '../media'
 import { MediaGrid } from '../components/MediaGrid'
 import { ProgressPanel } from '../components/ProgressPanel'
 import { Modal } from '../components/Modal'
@@ -20,6 +20,8 @@ export function AlbumsScreen() {
 }
 
 function AlbumsBody({ shootId }: { shootId: number }) {
+  const [groupingChoice, setGroupingChoice] = useState<'face' | 'size'>('face')
+  const [appliedGrouping, setAppliedGrouping] = useState<'face' | 'size'>('face')
   const [openAlbum, setOpenAlbum] = useState<Album | null>(null)
   const [typeFilter, setTypeFilter] = useState<MediaType | 'all'>('all')
   const [namingCluster, setNamingCluster] = useState<ClusterSummary | null>(null)
@@ -31,6 +33,17 @@ function AlbumsBody({ shootId }: { shootId: number }) {
     queryFn: () => api.listClusters(shootId, false),
   })
 
+  const queryClient = useQueryClient()
+  const pushNotice = useUi((s) => s.pushNotice)
+  const regenerate = useMutation({
+    mutationFn: () => api.regenerateAlbums(shootId),
+    onSuccess: (count) => {
+      queryClient.invalidateQueries({ queryKey: ['albums', shootId] })
+      pushNotice({ level: 'success', message: `Rebuilt ${count} album(s).` })
+    },
+    onError: (e) => pushNotice({ level: 'error', message: String(e) }),
+  })
+
   const grouped = useMemo(() => {
     const all = albums.data ?? []
     return {
@@ -38,6 +51,8 @@ function AlbumsBody({ shootId }: { shootId: number }) {
       multi: all.filter((a) => a.albumType === 'multiPlayer'),
       teams: all.filter((a) => a.albumType === 'team'),
       unidentified: all.filter((a) => a.albumType === 'unidentified'),
+      // Already ordered by size from the backend; sortOrder holds the bucket.
+      groupSize: all.filter((a) => a.albumType === 'groupSize'),
     }
   }, [albums.data])
 
@@ -56,60 +71,105 @@ function AlbumsBody({ shootId }: { shootId: number }) {
     <>
       <div className="workspace-header">
         <h1>{shoot.data?.name ?? 'AI Albums'}</h1>
+        <div className="actions">
+          <button onClick={() => regenerate.mutate()} disabled={regenerate.isPending}>
+            {regenerate.isPending ? 'Rebuilding…' : 'Regenerate albums'}
+          </button>
+        </div>
       </div>
 
       <ProgressPanel shootId={shootId} />
 
-      <Section title="Players">
-        {grouped.players.length === 0 && (
-          <div className="hint">
-            Player albums appear once faces are recognised or clusters are named.
-          </div>
-        )}
-        <div className="card-grid">
-          {grouped.players.map((album) => (
-            <AlbumCard key={album.id} album={album} onOpen={() => setOpenAlbum(album)} />
-          ))}
-        </div>
-      </Section>
+      <div className="filter-bar grouping-bar">
+        <label>
+          <span className="hint">Group media by</span>
+          <select
+            value={groupingChoice}
+            onChange={(event) => setGroupingChoice(event.target.value as 'face' | 'size')}
+          >
+            <option value="face">Face / person</option>
+            <option value="size">Number of persons</option>
+          </select>
+        </label>
+        <button
+          className="small primary"
+          disabled={groupingChoice === appliedGrouping}
+          onClick={() => setAppliedGrouping(groupingChoice)}
+        >
+          Apply grouping
+        </button>
+        <span className="hint">
+          {appliedGrouping === 'face'
+            ? 'Showing InsightFace-recognised people and unknown face groups.'
+            : 'Showing files by how many people are visible, regardless of identity.'}
+        </span>
+      </div>
 
-      {grouped.multi.length > 0 && (
-        <Section title="Multiple Players">
+      {appliedGrouping === 'face' ? (
+        <>
+          <Section title="Players">
+            {grouped.players.length === 0 && (
+              <div className="hint">
+                Player albums appear once faces are recognised or clusters are named.
+              </div>
+            )}
+            <div className="card-grid">
+              {grouped.players.map((album) => (
+                <AlbumCard key={album.id} album={album} onOpen={() => setOpenAlbum(album)} />
+              ))}
+            </div>
+          </Section>
+
+          {grouped.multi.length > 0 && (
+            <Section title="Multiple Players">
+              <div className="card-grid">
+                {grouped.multi.map((album) => (
+                  <AlbumCard key={album.id} album={album} onOpen={() => setOpenAlbum(album)} />
+                ))}
+              </div>
+            </Section>
+          )}
+
+          {grouped.teams.length > 0 && (
+            <Section title="Teams">
+              <div className="card-grid">
+                {grouped.teams.map((album) => (
+                  <AlbumCard key={album.id} album={album} onOpen={() => setOpenAlbum(album)} />
+                ))}
+              </div>
+            </Section>
+          )}
+
+          <Section title="Needs Review">
+            {(clusters.data?.length ?? 0) === 0 && grouped.unidentified.length === 0 && (
+              <div className="hint">Nothing waiting — every detected face is identified.</div>
+            )}
+            <div className="card-grid">
+              {clusters.data?.map((cluster) => (
+                <ClusterCard
+                  key={cluster.id}
+                  cluster={cluster}
+                  onName={() => setNamingCluster(cluster)}
+                />
+              ))}
+              {grouped.unidentified.map((album) => (
+                <AlbumCard key={album.id} album={album} onOpen={() => setOpenAlbum(album)} />
+              ))}
+            </div>
+          </Section>
+        </>
+      ) : (
+        <Section title="By number of persons">
+          <div className="hint" style={{ marginBottom: 10 }}>
+            Each file appears once, based on the number of distinct people visible in it.
+          </div>
           <div className="card-grid">
-            {grouped.multi.map((album) => (
+            {grouped.groupSize.map((album) => (
               <AlbumCard key={album.id} album={album} onOpen={() => setOpenAlbum(album)} />
             ))}
           </div>
         </Section>
       )}
-
-      {grouped.teams.length > 0 && (
-        <Section title="Teams">
-          <div className="card-grid">
-            {grouped.teams.map((album) => (
-              <AlbumCard key={album.id} album={album} onOpen={() => setOpenAlbum(album)} />
-            ))}
-          </div>
-        </Section>
-      )}
-
-      <Section title="Needs Review">
-        {(clusters.data?.length ?? 0) === 0 && grouped.unidentified.length === 0 && (
-          <div className="hint">Nothing waiting — every detected face is identified.</div>
-        )}
-        <div className="card-grid">
-          {clusters.data?.map((cluster) => (
-            <ClusterCard
-              key={cluster.id}
-              cluster={cluster}
-              onName={() => setNamingCluster(cluster)}
-            />
-          ))}
-          {grouped.unidentified.map((album) => (
-            <AlbumCard key={album.id} album={album} onOpen={() => setOpenAlbum(album)} />
-          ))}
-        </div>
-      </Section>
 
       {namingCluster && (
         <NameClusterModal cluster={namingCluster} onClose={() => setNamingCluster(null)} />
@@ -266,16 +326,48 @@ function AlbumDetail(props: {
   onBack: () => void
 }) {
   const { album, typeFilter } = props
+  // Narrowing an existing album by group size is the useful cross-filter:
+  // "Jonathan's solo shots". Redundant inside a size album, so hidden there.
+  const [sizeFilter, setSizeFilter] = useState<number | null>(null)
+  const showSizeFilter = album.albumType !== 'groupSize'
+  const personId = album.albumType === 'player' ? (album.personIds[0] ?? null) : null
+
   const media = useQuery({
-    queryKey: ['media', album.shootId, 'album', album.id, typeFilter],
+    queryKey: ['media', album.shootId, 'album', album.id, typeFilter, sizeFilter],
     queryFn: () =>
       api.listMedia({
         shootId: album.shootId,
         albumId: album.id,
         mediaType: typeFilter === 'all' ? null : typeFilter,
+        groupSize: sizeFilter,
         limit: 2000,
       }),
   })
+
+  const matchedFaces = useQuery({
+    queryKey: ['faces', album.shootId, 'person-confidence', personId],
+    queryFn: () => api.listFaces({ shootId: album.shootId, personId, limit: 5000 }),
+    enabled: personId !== null,
+  })
+
+  const confidenceLabels = useMemo(() => {
+    const labels = new Map<number, string>()
+    if (personId === null) return labels
+
+    const bestByMedia = new Map<number, number | null>()
+    for (const face of matchedFaces.data ?? []) {
+      const current = bestByMedia.get(face.mediaId)
+      if (face.recognitionConfidence !== null && (current == null || face.recognitionConfidence > current)) {
+        bestByMedia.set(face.mediaId, face.recognitionConfidence)
+      } else if (!bestByMedia.has(face.mediaId)) {
+        bestByMedia.set(face.mediaId, null)
+      }
+    }
+    for (const [mediaId, confidence] of bestByMedia) {
+      labels.set(mediaId, confidence === null ? 'Reference' : `Match ${formatConfidence(confidence)}`)
+    }
+    return labels
+  }, [matchedFaces.data, personId])
 
   return (
     <>
@@ -299,8 +391,36 @@ function AlbumDetail(props: {
                 : `Videos (${formatCount(album.videoCount)})`}
           </button>
         ))}
+
+        {showSizeFilter && (
+          <label className="checkbox-row" style={{ marginLeft: 'auto' }}>
+            <span className="hint">Group size</span>
+            <select
+              value={sizeFilter ?? ''}
+              onChange={(e) => setSizeFilter(e.target.value === '' ? null : Number(e.target.value))}
+            >
+              <option value="">Any</option>
+              {Array.from({ length: GROUP_SIZE_CAP + 1 }, (_, size) => (
+                <option key={size} value={size}>
+                  {groupSizeName(size)}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
       </div>
-      <MediaGrid media={media.data ?? []} />
+      {sizeFilter !== null && media.data?.length === 0 && (
+        <div className="hint" style={{ marginBottom: 10 }}>
+          Nothing in this album has {groupSizeName(sizeFilter).toLowerCase()} in it.
+        </div>
+      )}
+      {personId !== null && (
+        <div className="hint" style={{ marginBottom: 10 }}>
+          Match confidence comes from the InsightFace ArcFace similarity score. “Reference” means
+          you named that face manually, so no AI confidence is invented.
+        </div>
+      )}
+      <MediaGrid media={media.data ?? []} cornerLabels={confidenceLabels} />
     </>
   )
 }

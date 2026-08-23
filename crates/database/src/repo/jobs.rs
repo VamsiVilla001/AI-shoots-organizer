@@ -93,6 +93,44 @@ pub fn claim_next(conn: &Connection, shoot_id: Option<i64>) -> Result<Option<Job
     Ok(job)
 }
 
+/// Claims only work that does not construct or run an AI engine. Additional
+/// workers use this lane so scanning and thumbnails retain I/O concurrency
+/// while a single worker owns the memory-hungry GPU sessions.
+pub fn claim_next_io(conn: &Connection) -> Result<Option<Job>> {
+    let job = conn
+        .prepare(
+            "UPDATE jobs SET state = 'running', started_at = ?1, attempts = attempts + 1
+              WHERE id = (
+                  SELECT id FROM jobs
+                   WHERE state = 'queued' AND kind IN ('scan', 'thumbnail')
+                   ORDER BY priority ASC, id ASC LIMIT 1
+              )
+          RETURNING *",
+        )?
+        .query_row(params![now()], map)
+        .optional()?;
+    Ok(job)
+}
+
+/// Claims AI and shoot-wide processing while leaving scans and thumbnails to
+/// the I/O worker. Keeping the lanes independent lets GPU inference overlap
+/// image indexing instead of waiting behind the entire thumbnail queue.
+pub fn claim_next_compute(conn: &Connection) -> Result<Option<Job>> {
+    let job = conn
+        .prepare(
+            "UPDATE jobs SET state = 'running', started_at = ?1, attempts = attempts + 1
+              WHERE id = (
+                  SELECT id FROM jobs
+                   WHERE state = 'queued' AND kind NOT IN ('scan', 'thumbnail')
+                   ORDER BY priority ASC, id ASC LIMIT 1
+              )
+          RETURNING *",
+        )?
+        .query_row(params![now()], map)
+        .optional()?;
+    Ok(job)
+}
+
 pub fn complete(conn: &Connection, id: i64) -> Result<()> {
     conn.execute(
         "UPDATE jobs SET state = 'done', finished_at = ?2, error = NULL WHERE id = ?1",
@@ -257,6 +295,32 @@ mod tests {
         let second = claim_next(&conn, None).unwrap().unwrap();
         assert_ne!(second.id, first.id, "a running job cannot be claimed twice");
         assert!(claim_next(&conn, None).unwrap().is_none());
+    }
+
+    #[test]
+    fn io_claims_leave_ai_jobs_for_the_engine_worker() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+        let shoot = shoots::create(&conn, "S", "C:\\s").unwrap();
+
+        let analyse = enqueue(&conn, shoot.id, JobKind::AnalysePhoto, None, 10, None).unwrap();
+        let thumbnail = enqueue(&conn, shoot.id, JobKind::Thumbnail, None, 50, None).unwrap();
+
+        assert_eq!(claim_next_io(&conn).unwrap().unwrap().id, thumbnail);
+        assert_eq!(claim_next(&conn, None).unwrap().unwrap().id, analyse);
+    }
+
+    #[test]
+    fn compute_claims_leave_io_jobs_for_the_helper_worker() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+        let shoot = shoots::create(&conn, "S", "C:\\s").unwrap();
+
+        let thumbnail = enqueue(&conn, shoot.id, JobKind::Thumbnail, None, 10, None).unwrap();
+        let analyse = enqueue(&conn, shoot.id, JobKind::AnalysePhoto, None, 50, None).unwrap();
+
+        assert_eq!(claim_next_compute(&conn).unwrap().unwrap().id, analyse);
+        assert_eq!(claim_next(&conn, None).unwrap().unwrap().id, thumbnail);
     }
 
     #[test]

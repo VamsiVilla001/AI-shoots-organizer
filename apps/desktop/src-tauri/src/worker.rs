@@ -19,6 +19,11 @@ use crate::state::AppState;
 /// How long a worker waits before looking for work again when the queue is empty.
 const IDLE_POLL: Duration = Duration::from_millis(300);
 
+/// Native ONNX sessions hold hundreds of megabytes of model and GPU state.
+/// Release them after the AI queue goes quiet instead of retaining one pair
+/// per worker for the rest of the application's lifetime.
+const ENGINE_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// How often the monitor pushes progress to the UI. Fast enough to feel live,
 /// slow enough not to flood the IPC channel on a large import.
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(500);
@@ -43,10 +48,11 @@ impl WorkerPool {
         for index in 0..worker_count {
             let app = app.clone();
             let state = Arc::clone(&state);
+            let has_io_worker = worker_count > 1;
             handles.push(
                 std::thread::Builder::new()
                     .name(format!("teo-worker-{index}"))
-                    .spawn(move || worker_loop(index, app, state))
+                    .spawn(move || worker_loop(index, has_io_worker, app, state))
                     .expect("failed to spawn worker thread"),
             );
         }
@@ -71,12 +77,13 @@ impl WorkerPool {
     }
 }
 
-fn worker_loop(index: usize, app: AppHandle, state: Arc<AppState>) {
+fn worker_loop(index: usize, has_io_worker: bool, app: AppHandle, state: Arc<AppState>) {
     tracing::debug!(worker = index, "worker started");
 
     // Built on first use: a session that only ever browses an existing shoot
     // should not pay to load two ONNX models.
     let mut engine: Option<Engine> = None;
+    let mut engine_last_used: Option<Instant> = None;
     let mut engine_version: u64 = 0;
     // FFmpeg is resolved per worker so thumbnail jobs never need the engine —
     // indexing works with no models installed.
@@ -89,7 +96,18 @@ fn worker_loop(index: usize, app: AppHandle, state: Arc<AppState>) {
             continue;
         }
 
-        let claimed = match state.db.conn().and_then(|conn| jobs::claim_next(&conn, None)) {
+        // Worker zero owns AI and finishing stages. Extra workers stay on the
+        // lightweight I/O lane so only one detector/embedder pair occupies
+        // RAM and GPU memory, while thumbnails can still run in parallel.
+        let claimed = match state.db.conn().and_then(|conn| {
+            if !has_io_worker {
+                jobs::claim_next(&conn, None)
+            } else if index == 0 {
+                jobs::claim_next_compute(&conn)
+            } else {
+                jobs::claim_next_io(&conn)
+            }
+        }) {
             Ok(job) => job,
             Err(e) => {
                 tracing::error!(worker = index, error = %e, "could not claim a job");
@@ -99,6 +117,11 @@ fn worker_loop(index: usize, app: AppHandle, state: Arc<AppState>) {
         };
 
         let Some(job) = claimed else {
+            if engine.is_some() && engine_last_used.is_some_and(|used| used.elapsed() >= ENGINE_IDLE_TIMEOUT) {
+                tracing::info!(worker = index, "unloading idle face models");
+                engine = None;
+                engine_last_used = None;
+            }
             std::thread::sleep(IDLE_POLL);
             continue;
         };
@@ -117,12 +140,16 @@ fn worker_loop(index: usize, app: AppHandle, state: Arc<AppState>) {
             if engine.is_some() {
                 tracing::info!(worker = index, "settings changed; reloading models");
                 engine = None;
+                engine_last_used = None;
             }
             ffmpeg = crate::pipeline::discover_ffmpeg(&state.settings());
             tools_version = state.settings_version();
         }
 
         let outcome = run_job(&app, &state, &job, &mut engine, &mut engine_version, ffmpeg.as_ref());
+        if matches!(JobKind::parse(&job.kind), Some(JobKind::AnalysePhoto | JobKind::AnalyseVideo)) {
+            engine_last_used = Some(Instant::now());
+        }
         finish_job(&app, &state, &job, outcome);
     }
 

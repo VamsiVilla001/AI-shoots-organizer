@@ -15,12 +15,43 @@ import { useUi } from '../store'
 export function ShootsScreen() {
   const [creating, setCreating] = useState(false)
   const shoots = useQuery({ queryKey: ['shoots'], queryFn: api.listShoots })
+  const queryClient = useQueryClient()
+  const pushNotice = useUi((state) => state.pushNotice)
+  const resetWorkspace = useUi((state) => state.resetWorkspace)
+  const clearScanned = useMutation({
+    mutationFn: api.clearScannedData,
+    onSuccess: (removed) => {
+      queryClient.clear()
+      resetWorkspace()
+      queryClient.invalidateQueries({ queryKey: ['shoots'] })
+      pushNotice({
+        level: 'success',
+        message: `Cleared ${removed} scanned shoot${removed === 1 ? '' : 's'} and thumbnail cache.`,
+      })
+    },
+    onError: (error) => pushNotice({ level: 'error', message: String(error) }),
+  })
 
   return (
     <>
       <div className="workspace-header">
         <h1>Recent Shoots</h1>
         <div className="actions">
+          <button
+            className="danger"
+            disabled={clearScanned.isPending}
+            onClick={() => {
+              if (
+                window.confirm(
+                  'Clear all scanned data?\n\nThis removes old shoot indexes, per-shoot analysis and generated thumbnails. Your original photos/videos, settings, player profiles and AI models are not touched.',
+                )
+              ) {
+                clearScanned.mutate()
+              }
+            }}
+          >
+            {clearScanned.isPending ? 'Clearing…' : 'Clear scanned data'}
+          </button>
           <button className="primary" onClick={() => setCreating(true)}>
             + New Shoot
           </button>

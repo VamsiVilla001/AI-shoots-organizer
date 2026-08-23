@@ -32,6 +32,7 @@ interface UiState {
   dismissNotice: (id: number) => void
   openViewer: (mediaId: number) => void
   closeViewer: () => void
+  resetWorkspace: () => void
 }
 
 let noticeCounter = 0
@@ -69,4 +70,12 @@ export const useUi = create<UiState>((set) => ({
 
   openViewer: (mediaId) => set({ viewerMediaId: mediaId }),
   closeViewer: () => set({ viewerMediaId: null }),
+  resetWorkspace: () =>
+    set({
+      screen: 'shoots',
+      activeShootId: null,
+      progress: {},
+      exportProgress: null,
+      viewerMediaId: null,
+    }),
 }))

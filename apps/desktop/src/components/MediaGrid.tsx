@@ -22,6 +22,8 @@ export function MediaGrid(props: {
   groupsFor?: (mediaId: number) => string[]
   /** A drag started on this tile — the screen turns it into a payload. */
   onDragMedia?: (mediaId: number) => void
+  /** Extra per-tile label, e.g. the album's match confidence. */
+  cornerLabels?: ReadonlyMap<number, string>
   emptyTitle?: string
   emptyHint?: string
 }) {
@@ -74,6 +76,9 @@ export function MediaGrid(props: {
               <div className="placeholder">
                 {item.processingStatus === 'failed' ? 'failed' : 'indexing…'}
               </div>
+            )}
+            {props.cornerLabels?.get(item.id) && (
+              <span className="corner confidence">{props.cornerLabels.get(item.id)}</span>
             )}
             {item.mediaType === 'video' && (
               <span className="corner">▶ {item.duration ? formatTime(item.duration) : 'video'}</span>

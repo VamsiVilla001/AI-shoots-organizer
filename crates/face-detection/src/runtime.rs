@@ -6,11 +6,70 @@
 //! machine without a suitable GPU still works — just slower.
 
 use std::path::Path;
+use std::sync::Once;
 
+use ort::logging::LogLevel;
 use ort::session::{builder::GraphOptimizationLevel, Session};
 use serde::{Deserialize, Serialize};
 
 use crate::{FaceError, Result};
+
+/// ONNX Runtime emits this once **per inference** when a model's declared
+/// output shape disagrees with the batch actually fed to it.
+///
+/// The embedding models in circulation are exported with a hard-coded batch of
+/// 1 in their output metadata (`{1,512}`) while their input stays dynamic. We
+/// deliberately embed every face in a frame as one batch — the single biggest
+/// speed-up on group shots — so the real output is `{N,512}` and ORT complains
+/// every time. The computation is correct; only the model's annotation is
+/// stale. Left alone it emits a line per photo and drowns the log.
+const BENIGN_BATCH_SHAPE_WARNING: &str = "does not match actual shape";
+
+fn is_benign_ort_message(message: &str) -> bool {
+    message.contains(BENIGN_BATCH_SHAPE_WARNING)
+}
+
+/// Routes ONNX Runtime's own logging into `tracing`, minus the per-inference
+/// batch-shape noise.
+///
+/// Replacing the logger rather than silencing the whole `ort` target keeps
+/// genuinely useful diagnostics — GPU provider fallback, allocation failures —
+/// visible.
+fn install_ort_logger() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let committed = ort::init()
+            .with_logger(std::sync::Arc::new(
+                |level: LogLevel, category: &str, _id: &str, location: &str, message: &str| {
+                    if is_benign_ort_message(message) {
+                        static NOTED: Once = Once::new();
+                        NOTED.call_once(|| {
+                            tracing::debug!(
+                                "suppressing ONNX Runtime batch-shape warnings: the model declares a \
+                                 batch of 1 but faces are embedded in batches, which is expected"
+                            );
+                        });
+                        return;
+                    }
+                    match level {
+                        LogLevel::Fatal | LogLevel::Error => {
+                            tracing::error!(target: "ort", category, location, "{message}")
+                        }
+                        LogLevel::Warning => tracing::warn!(target: "ort", category, location, "{message}"),
+                        LogLevel::Info => tracing::debug!(target: "ort", category, location, "{message}"),
+                        LogLevel::Verbose => tracing::trace!(target: "ort", category, location, "{message}"),
+                    }
+                },
+            ))
+            .commit();
+
+        if !committed {
+            // Something built a session before us; ORT keeps its first
+            // environment, so the default logger stays in place.
+            tracing::debug!("ONNX Runtime environment was already configured elsewhere");
+        }
+    });
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -40,10 +99,10 @@ impl Accelerator {
 /// screen shows this so the choice on offer matches reality.
 pub fn available_accelerators() -> Vec<Accelerator> {
     let mut out = vec![Accelerator::Auto, Accelerator::Cpu];
-    if cfg!(all(feature = "directml", target_os = "windows")) {
+    if cfg!(target_os = "windows") {
         out.push(Accelerator::DirectMl);
     }
-    if cfg!(all(feature = "coreml", target_os = "macos")) {
+    if cfg!(target_os = "macos") {
         out.push(Accelerator::CoreMl);
     }
     if cfg!(feature = "cuda") {
@@ -74,6 +133,11 @@ pub fn build_session(model_path: &Path, config: &SessionConfig) -> Result<Sessio
     if !model_path.is_file() {
         return Err(FaceError::ModelMissing(model_path.display().to_string()));
     }
+
+    // Must happen before the first session, which creates ORT's environment.
+    // Every session in the application is built here, so this is the one place
+    // that guarantee holds.
+    install_ort_logger();
 
     let mut builder = Session::builder()
         .map_err(|e| FaceError::Runtime(e.to_string()))?
@@ -120,11 +184,11 @@ fn providers_for(accelerator: Accelerator) -> Vec<ort::ep::ExecutionProviderDisp
         if matches!(accelerator, Accelerator::Auto | Accelerator::Cuda) {
             providers.push(ort::ep::CUDA::default().build());
         }
-        #[cfg(all(feature = "directml", target_os = "windows"))]
+        #[cfg(target_os = "windows")]
         if matches!(accelerator, Accelerator::Auto | Accelerator::DirectMl) {
             providers.push(ort::ep::DirectML::default().build());
         }
-        #[cfg(all(feature = "coreml", target_os = "macos"))]
+        #[cfg(target_os = "macos")]
         if matches!(accelerator, Accelerator::Auto | Accelerator::CoreMl) {
             providers.push(ort::ep::CoreML::default().build());
         }
@@ -152,6 +216,17 @@ mod tests {
         let available = available_accelerators();
         assert!(available.contains(&Accelerator::Auto));
         assert!(available.contains(&Accelerator::Cpu));
+    }
+
+    #[test]
+    fn only_the_batch_shape_warning_is_suppressed() {
+        assert!(is_benign_ort_message(
+            "Expected shape from model of {1,512} does not match actual shape of {4,512} for output 683"
+        ));
+        // Anything else ORT has to say must still reach the log.
+        assert!(!is_benign_ort_message("Failed to create CUDA execution provider"));
+        assert!(!is_benign_ort_message("Some nodes were not assigned to the preferred provider"));
+        assert!(!is_benign_ort_message(""));
     }
 
     #[test]

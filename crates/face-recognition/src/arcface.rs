@@ -21,11 +21,27 @@ use crate::{prepare_face, EmbedError, Embedding, FaceEmbedder, Result};
 const PIXEL_MEAN: f32 = 127.5;
 const PIXEL_SCALE: f32 = 127.5;
 
+/// How many faces to submit at once on the CPU provider.
+///
+/// Measured at ~5% better than one-at-a-time on a 512-d ArcFace model, so it is
+/// worth keeping but nothing to defend at the cost of correctness.
+const CPU_MAX_BATCH: usize = 8;
+
+/// GPU providers run one face at a time.
+///
+/// DirectML requires static shapes. Handed a batch of 8 against a model whose
+/// graph declares a batch of 1 it does not fall back — it fails outright with
+/// `BatchNormalization … The parameter is incorrect`, and every face in the
+/// shoot errors. At batch 1 the same model runs correctly and 7.9x faster than
+/// the CPU provider, so this is a trade worth making.
+const GPU_MAX_BATCH: usize = 1;
+
 pub struct ArcFaceEmbedder {
     session: Session,
     input_name: String,
     dim: usize,
     name: String,
+    max_batch: usize,
 }
 
 impl ArcFaceEmbedder {
@@ -58,7 +74,17 @@ impl ArcFaceEmbedder {
             .unwrap_or("arcface")
             .to_string();
 
-        Ok(Self { session, input_name, dim, name })
+        let max_batch = match session_config.accelerator {
+            teo_face_detection::Accelerator::Cpu => CPU_MAX_BATCH,
+            _ => GPU_MAX_BATCH,
+        };
+
+        Ok(Self { session, input_name, dim, name, max_batch })
+    }
+
+    /// Faces submitted to the model in one call.
+    pub fn max_batch(&self) -> usize {
+        self.max_batch
     }
 
     /// Packs `count` aligned 112×112 crops into one NCHW batch tensor.
@@ -69,13 +95,15 @@ impl ArcFaceEmbedder {
 
         for (n, crop) in crops.iter().enumerate() {
             let base = n * 3 * plane;
-            for y in 0..side.min(crop.height() as usize) {
-                for x in 0..side.min(crop.width() as usize) {
-                    let px = crop.get_pixel(x as u32, y as u32);
+            let image_data = &mut data[base..base + 3 * plane];
+            let (red, remaining) = image_data.split_at_mut(plane);
+            let (green, blue) = remaining.split_at_mut(plane);
+            for (y, pixels) in crop.rows().take(side).enumerate() {
+                for (x, px) in pixels.take(side).enumerate() {
                     let offset = y * side + x;
-                    for c in 0..3 {
-                        data[base + c * plane + offset] = (px[c] as f32 - PIXEL_MEAN) / PIXEL_SCALE;
-                    }
+                    red[offset] = (px[0] as f32 - PIXEL_MEAN) / PIXEL_SCALE;
+                    green[offset] = (px[1] as f32 - PIXEL_MEAN) / PIXEL_SCALE;
+                    blue[offset] = (px[2] as f32 - PIXEL_MEAN) / PIXEL_SCALE;
                 }
             }
         }
@@ -134,29 +162,36 @@ impl FaceEmbedder for ArcFaceEmbedder {
             .ok_or(EmbedError::AlignmentFailed)
     }
 
-    /// Batches every face in a frame into a single inference call, which is
-    /// where most of the speed-up on group shots comes from (§19).
+    /// Embeds every face in a frame, in chunks of at most [`max_batch`].
+    ///
+    /// [`max_batch`]: ArcFaceEmbedder::max_batch
+    ///
+    /// The chunking is not an optimisation — it is what lets the same code run
+    /// on a GPU provider that rejects variable batch sizes. A failure is
+    /// reported per face rather than for the frame, so one bad chunk cannot
+    /// silently drop faces the detector did find.
     fn embed_batch(&mut self, image: &RgbImage, detections: &[Detection]) -> Vec<Result<Embedding>> {
         if detections.is_empty() {
             return Vec::new();
         }
 
         let crops: Vec<RgbImage> = detections.iter().map(|d| prepare_face(image, d)).collect();
-        match self.run(&crops) {
-            Ok(embeddings) if embeddings.len() == detections.len() => {
-                embeddings.into_iter().map(Ok).collect()
+        let mut out: Vec<Result<Embedding>> = Vec::with_capacity(detections.len());
+
+        for chunk in crops.chunks(self.max_batch.max(1)) {
+            match self.run(chunk) {
+                Ok(embeddings) if embeddings.len() == chunk.len() => out.extend(embeddings.into_iter().map(Ok)),
+                Ok(_) => out.extend(
+                    chunk
+                        .iter()
+                        .map(|_| Err(EmbedError::BadOutput("batch returned the wrong number of embeddings".into()))),
+                ),
+                Err(e) => out.extend(chunk.iter().map(|_| Err(EmbedError::Runtime(e.to_string())))),
             }
-            // A batch failure must not silently drop faces: report it per face
-            // so the caller can mark each one and carry on.
-            Ok(_) => detections
-                .iter()
-                .map(|_| Err(EmbedError::BadOutput("batch returned the wrong number of embeddings".into())))
-                .collect(),
-            Err(e) => detections
-                .iter()
-                .map(|_| Err(EmbedError::Runtime(e.to_string())))
-                .collect(),
         }
+
+        debug_assert_eq!(out.len(), detections.len());
+        out
     }
 }
 

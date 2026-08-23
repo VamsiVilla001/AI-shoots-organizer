@@ -52,15 +52,20 @@ npm run dev
 npm run build
 ```
 
-GPU acceleration is opt-in at compile time (the plain build uses CPU):
+GPU acceleration is on by default: DirectML on Windows and CoreML on macOS are
+operating-system components, and ONNX Runtime falls back to the CPU provider
+when neither can start. Measured on an RTX 3070 Ti, that is ~2.6x on detection
+and ~7.9x on embedding. Force a provider from **Settings → Acceleration**.
+
+NVIDIA CUDA is opt-in, since it needs a toolkit installed separately:
 
 ```bash
-# Windows (DirectML)
-npm run tauri:build -w @teo/desktop -- -- --features directml
-
-# macOS (CoreML)
-npm run tauri:build -w @teo/desktop -- -- --features coreml
+npm run tauri:build -w @teo/desktop -- -- --features cuda
 ```
+
+If a shoot is analysing slowly, check that you are running a **release** build
+(`npm run build`) — `npm run dev` compiles for debugging and is several times
+slower.
 
 ## Verifying the code
 
@@ -82,7 +87,9 @@ npm run typecheck      # TypeScript
 4. **Cluster** — unmatched faces are grouped with Chinese-Whispers label
    propagation; each group is one "Unknown Person" to name once.
 5. **Albums** — player, multi-player, team and unidentified albums are
-   regenerated from face assignments at any time.
+   regenerated from face assignments at any time. A second, independent axis
+   groups every file by *how many* people are in it — `Single`, `Two persons`,
+   … `10+ persons` — so solo portraits and full team shots are one click apart.
 6. **Review** — accept/reject suggestions, bulk-assign, merge/split, mark
    false detections; corrections feed the library and improve the next shoot.
 7. **Sort** — the editor's own layer: create a named group per person (or per

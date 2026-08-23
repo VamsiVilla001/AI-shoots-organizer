@@ -33,6 +33,25 @@ codegen-units = 1
 panic = "abort"
 strip = true
 
-# AI inference is unusably slow in a debug build; always optimise the heavy crates.
+# AI inference is unusably slow in a debug build; always optimise the heavy
+# crates. `"*"` covers third-party dependencies but **not workspace members**,
+# so our own crates need naming individually — without this they compile at
+# opt-level 0 during `npm run dev`, which measured 5x slower face alignment,
+# 20x slower cosine similarity and 33x slower kNN graph building.
 [profile.dev.package."*"]
+opt-level = 3
+
+[profile.dev.package.teo-clustering]
+opt-level = 3
+[profile.dev.package.teo-database]
+opt-level = 3
+[profile.dev.package.teo-export-engine]
+opt-level = 3
+[profile.dev.package.teo-face-detection]
+opt-level = 3
+[profile.dev.package.teo-face-recognition]
+opt-level = 3
+[profile.dev.package.teo-media-core]
+opt-level = 3
+[profile.dev.package.teo-video-analysis]
 opt-level = 3

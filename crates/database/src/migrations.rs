@@ -21,8 +21,13 @@ const MIGRATIONS: &[Migration] = &[
     },
     Migration {
         version: 2,
+        name: "person_count",
+        sql: include_str!("migration_002_person_count.sql"),
+    },
+    Migration {
+        version: 3,
         name: "manual_groups",
-        sql: include_str!("schema_002_groups.sql"),
+        sql: include_str!("schema_003_groups.sql"),
     },
 ];
 
@@ -67,7 +72,8 @@ mod tests {
     }
 
     /// The upgrade path real installations take: a database created before
-    /// manual grouping existed must gain the new tables without losing a row.
+    /// these migrations existed must gain everything they add, in order,
+    /// without losing a row.
     #[test]
     fn a_version_one_database_upgrades_in_place() {
         let mut conn = Connection::open_in_memory().unwrap();

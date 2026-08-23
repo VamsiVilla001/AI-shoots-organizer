@@ -70,6 +70,10 @@ pub struct ExportOptions {
     pub existing: ExistingFilePolicy,
     /// `AiAlbums` only: also write multi-player albums as their own folders.
     pub include_multi_player: bool,
+    /// `AiAlbums` only: also write the group-size albums ("Single", "Two
+    /// persons", …) as folders. Off by default: every file is in both a player
+    /// album and a group-size album, so enabling this writes the shoot twice.
+    pub include_group_size: bool,
     /// Write a `_sorting-report.txt` beside the folders listing what went
     /// where — an editor handing the NAS folder to someone else needs a
     /// manifest, and it is the only file the export creates itself.
@@ -87,6 +91,7 @@ impl Default for ExportOptions {
             preserve_metadata: true,
             existing: ExistingFilePolicy::Skip,
             include_multi_player: false,
+            include_group_size: false,
             write_manifest: true,
         }
     }
