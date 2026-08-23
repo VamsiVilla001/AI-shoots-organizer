@@ -105,7 +105,7 @@ jobs:
           # The models overlay bundles what the fetch step downloaded; the
           # Windows overlay adds the DirectML redistributable so installed
           # copies keep GPU acceleration instead of falling back to CPU.
-          args: ${{ matrix.tauri-args }} --config src-tauri/tauri.models.conf.json ${{ runner.os == 'Windows' && '--config src-tauri/tauri.windows.conf.json' || '' }}
+          args: ${{ matrix.tauri-args }} --config src-tauri/tauri.models.conf.json ${{ runner.os == 'Windows' && '--config src-tauri/tauri.directml.conf.json' || '' }}
 
       # Handy when the run was started by hand rather than by a tag: the
       # installers are downloadable from the run summary.

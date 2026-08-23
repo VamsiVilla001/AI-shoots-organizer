@@ -9,7 +9,7 @@
 //
 //   node scripts/stage-directml.mjs        # after at least one release build
 //
-// Then build with `--config src-tauri/tauri.windows.conf.json`, which is what
+// Then build with `--config src-tauri/tauri.directml.conf.json`, which is what
 // `npm run package:win` does.
 import { copyFileSync, existsSync, mkdirSync, readdirSync, realpathSync, statSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'

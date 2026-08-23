@@ -101,6 +101,12 @@ The DLL is staged into `dist-resources/` rather than referenced inside
 `target/`: the bundler cannot read a file cargo is still writing, which fails
 the build with "used by another process".
 
+The overlay is deliberately *not* called `tauri.windows.conf.json`. Tauri
+auto-merges `tauri.<platform>.conf.json` on that platform, so that name would
+pull the resource into every development build as well — including `npm run
+dev`, where copying over the symlinked DLL that a running app has loaded fails
+the build outright.
+
 The NSIS installer is configured `perMachine`, so it asks for administrator
 rights and installs for everyone on the machine. Switch
 `bundle.windows.nsis.installMode` to `currentUser` if handing it to people who
