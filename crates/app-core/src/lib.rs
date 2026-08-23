@@ -22,6 +22,7 @@
 
 pub mod events;
 pub mod export;
+pub mod media;
 pub mod models;
 pub mod paths;
 pub mod pipeline;
