@@ -2,12 +2,14 @@
 resolver = "2"
 members = [
     "apps/desktop/src-tauri",
+    "crates/app-core",
     "crates/clustering",
     "crates/database",
     "crates/export-engine",
     "crates/face-detection",
     "crates/face-recognition",
     "crates/media-core",
+    "crates/server",
     "crates/video-analysis",
 ]
 
@@ -18,12 +20,14 @@ rust-version = "1.82"
 license = "MIT"
 
 [workspace.dependencies]
+teo-app-core = { path = "crates/app-core" }
 teo-clustering = { path = "crates/clustering" }
 teo-database = { path = "crates/database" }
 teo-export-engine = { path = "crates/export-engine" }
 teo-face-detection = { path = "crates/face-detection" }
 teo-face-recognition = { path = "crates/face-recognition" }
 teo-media-core = { path = "crates/media-core" }
+teo-server = { path = "crates/server" }
 teo-video-analysis = { path = "crates/video-analysis" }
 
 [profile.release]
@@ -41,6 +45,8 @@ strip = true
 [profile.dev.package."*"]
 opt-level = 3
 
+[profile.dev.package.teo-app-core]
+opt-level = 3
 [profile.dev.package.teo-clustering]
 opt-level = 3
 [profile.dev.package.teo-database]
@@ -52,6 +58,8 @@ opt-level = 3
 [profile.dev.package.teo-face-recognition]
 opt-level = 3
 [profile.dev.package.teo-media-core]
+opt-level = 3
+[profile.dev.package.teo-server]
 opt-level = 3
 [profile.dev.package.teo-video-analysis]
 opt-level = 3

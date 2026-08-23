@@ -4728,6 +4728,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "teo-app-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "filetime",
+ "image",
+ "num_cpus",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "teo-clustering",
+ "teo-database",
+ "teo-export-engine",
+ "teo-face-detection",
+ "teo-face-recognition",
+ "teo-media-core",
+ "teo-video-analysis",
+ "thiserror 2.0.20",
+ "tracing",
+]
+
+[[package]]
 name = "teo-clustering"
 version = "0.1.0"
 dependencies = [
@@ -4767,6 +4791,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
  "tempfile",
+ "teo-app-core",
  "teo-clustering",
  "teo-database",
  "teo-export-engine",
@@ -4831,6 +4856,20 @@ dependencies = [
  "tracing",
  "walkdir",
  "which",
+]
+
+[[package]]
+name = "teo-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "teo-app-core",
+ "teo-database",
+ "teo-export-engine",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

@@ -1,0 +1,30 @@
+[package]
+name = "teo-app-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Front-door-agnostic application core: state, settings, job workers, analysis pipeline"
+
+[dependencies]
+teo-clustering = { path = "../clustering" }
+teo-database = { path = "../database" }
+teo-export-engine = { path = "../export-engine" }
+teo-face-detection = { path = "../face-detection" }
+teo-face-recognition = { path = "../face-recognition" }
+teo-media-core = { path = "../media-core" }
+teo-video-analysis = { path = "../video-analysis" }
+
+anyhow = "1.0"
+thiserror = "2.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = "0.4"
+image = "0.25"
+num_cpus = "1.17"
+parking_lot = "0.12"
+tracing = "0.1"
+filetime = "0.2"
+
+[dev-dependencies]
+tempfile = "3.27"
