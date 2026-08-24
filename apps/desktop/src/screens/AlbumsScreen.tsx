@@ -26,6 +26,7 @@ function AlbumsBody({ shootId }: { shootId: number }) {
   const [openAlbum, setOpenAlbum] = useState<Album | null>(null)
   const [typeFilter, setTypeFilter] = useState<MediaType | 'all'>('all')
   const [namingCluster, setNamingCluster] = useState<ClusterSummary | null>(null)
+  const [search, setSearch] = useState('')
 
   const shoot = useQuery({ queryKey: ['shoots', shootId], queryFn: () => api.getShoot(shootId) })
   const albums = useQuery({ queryKey: ['albums', shootId], queryFn: () => api.listAlbums(shootId) })
@@ -33,6 +34,9 @@ function AlbumsBody({ shootId }: { shootId: number }) {
     queryKey: ['clusters', shootId],
     queryFn: () => api.listClusters(shootId, false),
   })
+  // Only for the search: an album carries person ids, not the team they play
+  // for, and a shoot is usually easier to remember by team than by roster.
+  const people = useQuery({ queryKey: ['people'], queryFn: () => api.listPeople(null) })
 
   const queryClient = useQueryClient()
   const pushNotice = useUi((s) => s.pushNotice)
@@ -45,17 +49,68 @@ function AlbumsBody({ shootId }: { shootId: number }) {
     onError: (e) => pushNotice({ level: 'error', message: String(e) }),
   })
 
+  const query = search.trim().toLowerCase()
+
+  const teamOf = useMemo(
+    () => new Map((people.data ?? []).map((person) => [person.id, (person.team ?? '').toLowerCase()])),
+    [people.data],
+  )
+
   const grouped = useMemo(() => {
     const all = albums.data ?? []
+    // A player album is named after the person, so their name matches directly.
+    // A team name has to be looked up through the people the album is made of —
+    // that is what makes "Gods Reign" find every player on it, and it works on
+    // a pairing album too, where either player's team should count.
+    const matches = (album: Album) =>
+      query === '' ||
+      album.name.toLowerCase().includes(query) ||
+      album.personIds.some((id) => teamOf.get(id)?.includes(query))
+
+    const ofType = (type: Album['albumType']) => all.filter((a) => a.albumType === type)
     return {
-      players: all.filter((a) => a.albumType === 'player'),
-      multi: all.filter((a) => a.albumType === 'multiPlayer'),
-      teams: all.filter((a) => a.albumType === 'team'),
-      unidentified: all.filter((a) => a.albumType === 'unidentified'),
+      players: ofType('player').filter(matches),
+      multi: ofType('multiPlayer').filter(matches),
+      teams: ofType('team').filter(matches),
+      unidentified: ofType('unidentified').filter(matches),
       // Already ordered by size from the backend; sortOrder holds the bucket.
-      groupSize: all.filter((a) => a.albumType === 'groupSize'),
+      groupSize: ofType('groupSize').filter(matches),
     }
-  }, [albums.data])
+  }, [albums.data, query, teamOf])
+
+  // A cluster is searchable by the label the app gave it ("Unknown Person 7")
+  // and by the player it has been matched to but not yet confirmed as.
+  const visibleClusters = useMemo(() => {
+    const all = clusters.data ?? []
+    if (query === '') return all
+    return all.filter(
+      (cluster) =>
+        cluster.label.toLowerCase().includes(query) ||
+        (cluster.personName ?? '').toLowerCase().includes(query),
+    )
+  }, [clusters.data, query])
+
+  /** What the search is hiding, so a thin screen never looks like an empty one. */
+  const counts = useMemo(() => {
+    const all = albums.data ?? []
+    if (appliedGrouping === 'size') {
+      return {
+        shown: grouped.groupSize.length,
+        total: all.filter((a) => a.albumType === 'groupSize').length,
+        noun: 'albums',
+      }
+    }
+    return {
+      shown:
+        grouped.players.length +
+        grouped.multi.length +
+        grouped.teams.length +
+        grouped.unidentified.length +
+        visibleClusters.length,
+      total: all.filter((a) => a.albumType !== 'groupSize').length + (clusters.data?.length ?? 0),
+      noun: 'albums and review groups',
+    }
+  }, [albums.data, clusters.data, grouped, visibleClusters, appliedGrouping])
 
   if (openAlbum) {
     return (
@@ -80,6 +135,31 @@ function AlbumsBody({ shootId }: { shootId: number }) {
       </div>
 
       <ProgressPanel shootId={shootId} />
+
+      <div className="filter-bar">
+        <input
+          value={search}
+          onChange={(event) => setSearch(event.target.value)}
+          placeholder="Search a player, team or review group…"
+          style={{ minWidth: 280 }}
+          spellCheck={false}
+        />
+        {query !== '' ? (
+          <>
+            <button className="small" onClick={() => setSearch('')}>
+              Clear
+            </button>
+            <span className="hint">
+              {formatCount(counts.shown)} of {formatCount(counts.total)} {counts.noun} match “
+              {search.trim()}”.
+            </span>
+          </>
+        ) : (
+          <span className="hint">
+            {formatCount(counts.total)} {counts.noun} in this shoot.
+          </span>
+        )}
+      </div>
 
       <div className="filter-bar grouping-bar">
         <label>
@@ -106,20 +186,29 @@ function AlbumsBody({ shootId }: { shootId: number }) {
         </span>
       </div>
 
-      {appliedGrouping === 'face' ? (
+      {query !== '' && counts.shown === 0 ? (
+        <div className="empty-state">
+          Nothing here matches “{search.trim()}”. Search a player's name, their team, or a review
+          group like “Unknown Person 3”.
+        </div>
+      ) : appliedGrouping === 'face' ? (
         <>
-          <Section title="Players">
-            {grouped.players.length === 0 && (
-              <div className="hint">
-                Player albums appear once faces are recognised or clusters are named.
+          {/* While searching, a section with no matches is noise rather than
+              information — the count above already says what was filtered out. */}
+          {(grouped.players.length > 0 || query === '') && (
+            <Section title="Players">
+              {grouped.players.length === 0 && (
+                <div className="hint">
+                  Player albums appear once faces are recognised or clusters are named.
+                </div>
+              )}
+              <div className="card-grid">
+                {grouped.players.map((album) => (
+                  <AlbumCard key={album.id} album={album} onOpen={() => setOpenAlbum(album)} />
+                ))}
               </div>
-            )}
-            <div className="card-grid">
-              {grouped.players.map((album) => (
-                <AlbumCard key={album.id} album={album} onOpen={() => setOpenAlbum(album)} />
-              ))}
-            </div>
-          </Section>
+            </Section>
+          )}
 
           {grouped.multi.length > 0 && (
             <Section title="Multiple Players">
@@ -141,23 +230,25 @@ function AlbumsBody({ shootId }: { shootId: number }) {
             </Section>
           )}
 
-          <Section title="Needs Review">
-            {(clusters.data?.length ?? 0) === 0 && grouped.unidentified.length === 0 && (
-              <div className="hint">Nothing waiting — every detected face is identified.</div>
-            )}
-            <div className="card-grid">
-              {clusters.data?.map((cluster) => (
-                <ClusterCard
-                  key={cluster.id}
-                  cluster={cluster}
-                  onName={() => setNamingCluster(cluster)}
-                />
-              ))}
-              {grouped.unidentified.map((album) => (
-                <AlbumCard key={album.id} album={album} onOpen={() => setOpenAlbum(album)} />
-              ))}
-            </div>
-          </Section>
+          {(visibleClusters.length + grouped.unidentified.length > 0 || query === '') && (
+            <Section title="Needs Review">
+              {visibleClusters.length === 0 && grouped.unidentified.length === 0 && (
+                <div className="hint">Nothing waiting — every detected face is identified.</div>
+              )}
+              <div className="card-grid">
+                {visibleClusters.map((cluster) => (
+                  <ClusterCard
+                    key={cluster.id}
+                    cluster={cluster}
+                    onName={() => setNamingCluster(cluster)}
+                  />
+                ))}
+                {grouped.unidentified.map((album) => (
+                  <AlbumCard key={album.id} album={album} onOpen={() => setOpenAlbum(album)} />
+                ))}
+              </div>
+            </Section>
+          )}
         </>
       ) : (
         <Section title="By number of persons">
@@ -298,7 +389,7 @@ function NameClusterModal({ cluster, onClose }: { cluster: ClusterSummary; onClo
         <div className="face-sample-strip">
           {samples.data?.map((face) => (
             <div key={face.id} className="face-sample" title={face.mediaFilename}>
-              <FaceCrop mediaId={face.mediaId} bbox={face.bbox} />
+              <FaceCrop mediaId={face.mediaId} bbox={face.bbox} frameTime={face.frameTime} />
             </div>
           ))}
         </div>
