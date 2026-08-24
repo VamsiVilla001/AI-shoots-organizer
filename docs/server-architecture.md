@@ -5,7 +5,9 @@ behaviour and performance; a NAS-hosted server edition becomes possible without
 forking the codebase.
 
 This is a working document, updated at the end of each phase. It becomes the
-source for the final product documentation.
+source for the final product documentation. For how the work actually went —
+decisions, bugs found, what was verified against real data — see
+[work-log-2026-08.md](work-log-2026-08.md).
 
 ## Status
 

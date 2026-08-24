@@ -107,8 +107,10 @@ Tauri window ──▶ teo-server (127.0.0.1, port 0, per-launch token) ──�
    browser  ──▶ teo-server (0.0.0.0:8420, shared token)          ──▶ teo-app-core
 ```
 
-See [docs/server-architecture.md](docs/server-architecture.md) for the design
-and [docs/deployment.md](docs/deployment.md) for shipping either one.
+See [docs/server-architecture.md](docs/server-architecture.md) for the design,
+[docs/deployment.md](docs/deployment.md) for shipping either one, and
+[docs/work-log-2026-08.md](docs/work-log-2026-08.md) for how it was built and
+what has and has not been verified.
 
 ## How it works
 
