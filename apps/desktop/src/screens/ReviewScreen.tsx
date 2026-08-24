@@ -194,7 +194,7 @@ function FaceCard(props: {
       onDoubleClick={props.onOpen}
       title={`${face.mediaFilename}\nClick to select · double-click to open`}
     >
-      <FaceCrop mediaId={face.mediaId} bbox={face.bbox} />
+      <FaceCrop mediaId={face.mediaId} bbox={face.bbox} frameTime={face.frameTime} />
       <div className="meta">
         <span className="who">
           {face.personName ?? face.clusterLabel ?? 'Unknown'}

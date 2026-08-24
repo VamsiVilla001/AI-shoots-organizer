@@ -18,12 +18,20 @@ export function setMediaBase(urlBase: string) {
  * renders during boot; the browser leaves such an image blank rather than
  * throwing, and the next render fills it in.
  */
-const mediaUrl = (mediaId: number, kind: 'thumb' | 'full' | 'video') =>
-  transportReady() ? transport().mediaUrl(mediaId, kind) : ''
+const mediaUrl = (mediaId: number, kind: 'thumb' | 'full' | 'video' | 'frame', at?: number) =>
+  transportReady() ? transport().mediaUrl(mediaId, kind, at) : ''
 
 export const thumbUrl = (mediaId: number) => mediaUrl(mediaId, 'thumb')
 export const fullUrl = (mediaId: number) => mediaUrl(mediaId, 'full')
 export const videoUrl = (mediaId: number) => mediaUrl(mediaId, 'video')
+
+/**
+ * One frame of a video, rendered on demand.
+ *
+ * A face detected at 42s is not visible on the poster frame, so a crop of it
+ * has to ask for its own second of the clip.
+ */
+export const frameUrl = (mediaId: number, at: number) => mediaUrl(mediaId, 'frame', at)
 
 export function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) return '—'

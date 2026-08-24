@@ -83,7 +83,7 @@ export function NamePeopleModal(props: { mediaId: number; onClose: () => void })
                   onClick={() => setStep({ kind: 'name', face })}
                   title={existing ? `Currently ${existing} — click to change` : 'Click to name'}
                 >
-                  <FaceCrop mediaId={face.mediaId} bbox={face.bbox} />
+                  <FaceCrop mediaId={face.mediaId} bbox={face.bbox} frameTime={face.frameTime} />
                   <span className="who">{existing ?? 'Not named'}</span>
                   {face.recognitionConfidence != null && (
                     <span className="confidence">{formatConfidence(face.recognitionConfidence)}</span>
@@ -184,7 +184,7 @@ function NameOneFace(props: {
   return (
     <>
       <div className="face-choice-single">
-        <FaceCrop mediaId={props.face.mediaId} bbox={props.face.bbox} padding={0.6} />
+        <FaceCrop mediaId={props.face.mediaId} bbox={props.face.bbox} frameTime={props.face.frameTime} padding={0.6} />
       </div>
 
       <label className="field">

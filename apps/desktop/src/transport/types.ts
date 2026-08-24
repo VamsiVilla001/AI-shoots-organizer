@@ -11,7 +11,7 @@
  * in one place and lets the two front doors stay comparable.
  */
 
-export type MediaKind = 'thumb' | 'full' | 'video'
+export type MediaKind = 'thumb' | 'full' | 'video' | 'frame'
 
 export interface Transport {
   readonly kind: 'tauri' | 'http'
@@ -22,8 +22,13 @@ export interface Transport {
   /** Subscribes to a backend event; resolves to an unsubscribe function. */
   listen<T>(event: string, handler: (payload: T) => void): Promise<() => void>
 
-  /** Where the bytes for one media id live, for this transport. */
-  mediaUrl(mediaId: number, kind: MediaKind): string
+  /**
+   * Where the bytes for one media id live, for this transport.
+   *
+   * `at` is the video timestamp a `frame` should be rendered from; every other
+   * kind ignores it.
+   */
+  mediaUrl(mediaId: number, kind: MediaKind, at?: number): string
 
   /** Called once at boot with `AppInfo.mediaUrlBase`. */
   setMediaBase(base: string): void

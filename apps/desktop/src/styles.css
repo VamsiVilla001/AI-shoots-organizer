@@ -383,6 +383,25 @@ h2 {
   font-size: 12px;
 }
 
+/* ---- face crops ----------------------------------------------------- */
+
+/* One face, cut out of the frame it was found in. The component computes the
+   size and offset of the image from the bounding box; every rule that makes
+   those numbers mean anything lives here, so a new container only has to give
+   the crop a size. Leaving the image statically positioned — as the sample
+   strip did — silently ignores the offsets and shows the top-left corner of a
+   hugely magnified frame instead of the face. */
+.crop {
+  position: relative;
+  width: 100%;
+  overflow: hidden;
+  background: var(--bg-hover);
+}
+
+.crop img {
+  position: absolute;
+}
+
 /* ---- face review ---------------------------------------------------- */
 
 .face-grid {
@@ -404,15 +423,7 @@ h2 {
 }
 
 .face-card .crop {
-  position: relative;
   aspect-ratio: 1;
-  overflow: hidden;
-  background: var(--bg-hover);
-}
-
-.face-card .crop img {
-  position: absolute;
-  /* Sized per-face from its bounding box in the component. */
 }
 
 .face-card .meta {
@@ -557,7 +568,9 @@ h2 {
   border: 1px solid var(--border);
   border-radius: 12px;
   padding: 20px;
-  width: min(480px, calc(100vw - 48px));
+  /* Wide enough for four face tiles across: identifying someone is the widest
+     thing a modal here has to do. */
+  width: min(560px, calc(100vw - 48px));
   max-height: calc(100vh - 96px);
   overflow-y: auto;
   display: flex;
@@ -1012,26 +1025,32 @@ h2 {
 /* The faces a naming dialog is actually about. */
 .face-sample-strip {
   display: flex;
-  gap: 6px;
+  gap: 10px;
   flex-wrap: wrap;
 }
 
+/* Big enough to recognise a person from, which is the entire job of this
+   strip — at thumbnail size the answer to "who is this?" is a guess. */
 .face-sample {
-  width: 62px;
-  height: 62px;
-  border-radius: 8px;
+  width: 112px;
+  height: 112px;
+  border-radius: 10px;
   overflow: hidden;
   border: 1px solid var(--border);
   background: var(--bg-hover);
   position: relative;
 }
 
+.face-sample .crop {
+  height: 100%;
+}
+
 /* ---- choosing which person you are naming --------------------------- */
 
 .face-choice-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
-  gap: 8px;
+  grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+  gap: 10px;
 }
 
 .face-choice {
@@ -1055,13 +1074,7 @@ h2 {
 }
 
 .face-choice .crop {
-  position: relative;
   aspect-ratio: 1;
-  overflow: hidden;
-}
-
-.face-choice .crop img {
-  position: absolute;
 }
 
 .face-choice .who {
@@ -1085,8 +1098,8 @@ h2 {
 }
 
 .face-choice-single {
-  width: 140px;
-  height: 140px;
+  width: 200px;
+  height: 200px;
   align-self: center;
   border-radius: 12px;
   overflow: hidden;
@@ -1095,12 +1108,5 @@ h2 {
 }
 
 .face-choice-single .crop {
-  position: relative;
-  width: 100%;
   height: 100%;
-  overflow: hidden;
-}
-
-.face-choice-single .crop img {
-  position: absolute;
 }

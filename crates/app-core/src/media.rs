@@ -22,6 +22,11 @@ pub const FULL_MAX_DIM: u32 = 2048;
 /// Chunk returned for a video range request that does not specify an end.
 pub const VIDEO_CHUNK: u64 = 2 * 1024 * 1024;
 
+/// Longest edge for a rendered video frame. A face crop shows a fraction of it
+/// blown up to fill a tile, so it needs more pixels than a grid thumbnail —
+/// and, being rendered per request, fewer than the full view.
+pub const FRAME_MAX_DIM: u32 = 1280;
+
 #[derive(Debug, thiserror::Error)]
 pub enum MediaError {
     #[error("not indexed")]
@@ -97,6 +102,42 @@ pub fn full_render(settings: &AppSettings, media: &Media) -> Result<Payload, Med
 
     let mut buffer = Vec::new();
     image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buffer, 90)
+        .encode_image(&image)
+        .map_err(|e| MediaError::Io(e.to_string()))?;
+    Ok(Payload { bytes: buffer, mime: "image/jpeg" })
+}
+
+/// Renders the one frame of a video a face was detected in.
+///
+/// Faces in a clip are stored with the timestamp they were found at, while the
+/// cached thumbnail is a poster frame a tenth of the way in. Cropping the poster
+/// to a box from some other second of the clip frames whatever happened to be
+/// there instead of the person — so the crop asks for its own frame.
+pub fn frame(settings: &AppSettings, media: &Media, at: f64) -> Result<Payload, MediaError> {
+    let path = Path::new(&media.path);
+    if !path.is_file() {
+        return Err(MediaError::Missing);
+    }
+
+    let ffmpeg = pipeline::discover_ffmpeg(settings)
+        .ok_or_else(|| MediaError::Unsupported("rendering a video frame needs FFmpeg".into()))?;
+
+    // Seeking past the end returns no frame at all, so land just inside the
+    // clip. A negative timestamp cannot come from a detection, but the value
+    // arrives over HTTP.
+    let at = match media.duration {
+        Some(duration) if duration > 0.0 => at.clamp(0.0, (duration - 0.05).max(0.0)),
+        _ => at.max(0.0),
+    };
+
+    // The same orientation the detector saw, which is what makes the stored
+    // bounding box mean anything on these pixels.
+    let orientation = media.orientation.clamp(1, 8) as u16;
+    let image = teo_media_core::decode::load_video_frame(path, at, orientation, Some(FRAME_MAX_DIM), &ffmpeg)
+        .map_err(|e| MediaError::Unsupported(e.to_string()))?;
+
+    let mut buffer = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buffer, 88)
         .encode_image(&image)
         .map_err(|e| MediaError::Io(e.to_string()))?;
     Ok(Payload { bytes: buffer, mime: "image/jpeg" })
@@ -271,5 +312,10 @@ mod tests {
 
         assert!(matches!(video_slice(&media, None), Err(MediaError::Missing)));
         assert!(matches!(thumbnail(&media), Err(MediaError::NoThumbnail)));
+
+        // A frame of a file that is not there is a missing file, not an FFmpeg
+        // problem — the route decides what to serve instead from this.
+        let settings = AppSettings::default();
+        assert!(matches!(frame(&settings, &media, 12.5), Err(MediaError::Missing)));
     }
 }

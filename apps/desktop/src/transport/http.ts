@@ -171,12 +171,17 @@ export function createHttpTransport(connection: HttpConnection): HttpTransport {
       }
     },
 
-    mediaUrl(mediaId: number, kind: MediaKind) {
+    mediaUrl(mediaId: number, kind: MediaKind, at?: number) {
       // The HTTP shape differs from the protocol's `/<kind>/<id>`: video is
       // served by a ranged handler at a different name.
       const route = kind === 'video' ? 'stream' : kind
-      const query = connection.tokenInUrl ? `?token=${encodeURIComponent(connection.token)}` : ''
-      return url(`/media/${mediaId}/${route}${query}`)
+      const params = new URLSearchParams()
+      // Rounded, so the same face asks for the same URL every render and the
+      // browser cache answers instead of FFmpeg.
+      if (kind === 'frame') params.set('t', (Math.max(0, at ?? 0)).toFixed(2))
+      if (connection.tokenInUrl) params.set('token', connection.token)
+      const query = params.toString()
+      return url(`/media/${mediaId}/${route}${query ? `?${query}` : ''}`)
     },
 
     setMediaBase() {

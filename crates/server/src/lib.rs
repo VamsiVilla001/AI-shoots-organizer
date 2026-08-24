@@ -159,6 +159,7 @@ fn protected() -> Router<Arc<ServerState>> {
         // media bytes
         .route("/media/{id}/thumb", get(mediaroutes::thumbnail))
         .route("/media/{id}/full", get(mediaroutes::full))
+        .route("/media/{id}/frame", get(mediaroutes::frame))
         .route("/media/{id}/stream", get(mediaroutes::stream))
 }
 

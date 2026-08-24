@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use teo_app_core::media;
@@ -26,6 +26,44 @@ pub async fn thumbnail(
     let payload = blocking(move || {
         let item = media::lookup(&core.db, media_id)?;
         Ok(media::thumbnail(&item)?)
+    })
+    .await?;
+
+    Ok((
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, payload.mime), (header::CACHE_CONTROL, CACHE)],
+        payload.bytes,
+    )
+        .into_response())
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct FrameQuery {
+    /// Seconds into the clip. Omitted means the first frame.
+    pub t: Option<f64>,
+}
+
+/// One frame of a video, for cropping a face that was detected part-way in.
+///
+/// Falls back to the cached poster frame if the render fails: a missing FFmpeg
+/// or a file that has moved should leave a tile showing the wrong moment, which
+/// is what it showed before this route existed, rather than a broken image.
+pub async fn frame(
+    State(state): State<Arc<ServerState>>,
+    Path(media_id): Path<i64>,
+    Query(query): Query<FrameQuery>,
+) -> ApiResult<Response> {
+    let core = Arc::clone(&state.core);
+    let at = query.t.unwrap_or(0.0);
+    let payload = blocking(move || {
+        let item = media::lookup(&core.db, media_id)?;
+        match media::frame(&core.settings(), &item, at) {
+            Ok(payload) => Ok(payload),
+            Err(error) => {
+                tracing::debug!(media_id, at, %error, "frame render failed; serving the poster frame");
+                Ok(media::thumbnail(&item)?)
+            }
+        }
     })
     .await?;
 

@@ -102,9 +102,9 @@ export async function createDesktopTransport(): Promise<Transport> {
       }
     },
 
-    mediaUrl(mediaId: number, kind: MediaKind) {
+    mediaUrl(mediaId: number, kind: MediaKind, at?: number) {
       // Read at call time: after a restart this is a different port.
-      return http.mediaUrl(mediaId, kind)
+      return http.mediaUrl(mediaId, kind, at)
     },
 
     setMediaBase() {

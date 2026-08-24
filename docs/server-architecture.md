@@ -135,12 +135,20 @@ machine the person is sitting at.
 
 ### Media
 
-`/media/{id}/{thumb,full,stream}` replaces `teomedia://`. The lookup, the
+`/media/{id}/{thumb,full,frame,stream}` replaces `teomedia://`. The lookup, the
 HEIC/raw render and the `Range` arithmetic moved into `teo_app_core::media`, so
 the protocol handler and the HTTP routes share one implementation rather than
 drifting apart. `stream` answers `206` with `Content-Range` for a ranged request
 and `200` otherwise, and ids remain the only thing either front door accepts —
 no route takes a path.
+
+`frame?t=<seconds>` renders one frame of a video on demand. A face found in a
+clip is stored with the timestamp it was found at, while the cached thumbnail is
+a poster frame a tenth of the way in — so cropping a face box out of the poster
+frames whatever happened to be at those coordinates in a different second. The
+route falls back to the poster frame when the render fails, since a tile showing
+the wrong moment is what it showed before the route existed, and better than a
+broken image.
 
 ### Events
 
