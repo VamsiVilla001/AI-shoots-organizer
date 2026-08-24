@@ -8,6 +8,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { GROUP_SIZE_CAP, type Album, type ClusterSummary, type MediaType } from '@teo/shared-types'
 import * as api from '../api'
 import { formatConfidence, formatCount, groupSizeName, thumbUrl } from '../media'
+import { FaceCrop } from '../components/FaceCrop'
 import { MediaGrid } from '../components/MediaGrid'
 import { ProgressPanel } from '../components/ProgressPanel'
 import { Modal } from '../components/Modal'
@@ -269,6 +270,13 @@ function NameClusterModal({ cluster, onClose }: { cluster: ClusterSummary; onClo
   const pushNotice = useUi((s) => s.pushNotice)
   const people = useQuery({ queryKey: ['people'], queryFn: () => api.listPeople(null) })
 
+  // The faces themselves, not the photos they came from: a cover photo with
+  // four people in it does not say which one this group is.
+  const samples = useQuery({
+    queryKey: ['faces', 'cluster', cluster.id],
+    queryFn: () => api.listFaces({ clusterId: cluster.id, limit: 8 }),
+  })
+
   const nameIt = useMutation({
     mutationFn: () => api.nameCluster(cluster.id, name.trim(), team.trim() || null),
     onSuccess: async (person) => {
@@ -286,6 +294,15 @@ function NameClusterModal({ cluster, onClose }: { cluster: ClusterSummary; onClo
 
   return (
     <Modal title={`Who is ${cluster.label}?`} onClose={onClose}>
+      {(samples.data?.length ?? 0) > 0 && (
+        <div className="face-sample-strip">
+          {samples.data?.map((face) => (
+            <div key={face.id} className="face-sample" title={face.mediaFilename}>
+              <FaceCrop mediaId={face.mediaId} bbox={face.bbox} />
+            </div>
+          ))}
+        </div>
+      )}
       <div className="hint">
         {formatCount(cluster.faceCount)} faces across {formatCount(cluster.mediaCount)} files.
         Naming them adds every face to this player's library, so future shoots recognise them

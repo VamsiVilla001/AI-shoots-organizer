@@ -937,3 +937,91 @@ h2 {
   flex-direction: column;
   gap: 14px;
 }
+
+/* ---- tagging a face in the photo ------------------------------------ */
+
+/* Boxes were decorative; a clickable one has to look clickable and must not
+   swallow the click that closes the viewer. */
+.face-box.taggable {
+  pointer-events: auto;
+  cursor: pointer;
+  transition: border-color 120ms, box-shadow 120ms;
+}
+
+.face-box.taggable:hover {
+  border-color: #fff;
+  box-shadow: 0 0 0 3px rgba(0, 209, 178, 0.35);
+}
+
+/* An unnamed face is the one worth clicking, so it says so in a warmer colour
+   than a face that already has an answer. */
+.face-box.unnamed {
+  border-color: var(--warn);
+  border-style: dashed;
+}
+
+.face-box.unnamed span {
+  background: var(--warn);
+  color: #2a1a00;
+}
+
+.face-box.tagging {
+  border-color: var(--accent);
+  border-style: solid;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.face-tagger {
+  position: absolute;
+  /* Below the box, where the label above it is not. */
+  top: calc(100% + 8px);
+  left: 0;
+  z-index: 80;
+  width: 260px;
+  background: var(--bg-raised);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  cursor: default;
+  box-shadow: 0 10px 34px rgba(0, 0, 0, 0.55);
+}
+
+.face-tagger input {
+  width: 100%;
+}
+
+.face-tagger-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.viewer-prompt {
+  margin: 0 18px 10px;
+  padding: 8px 12px;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  font-size: 13px;
+  align-self: flex-start;
+}
+
+/* The faces a naming dialog is actually about. */
+.face-sample-strip {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.face-sample {
+  width: 62px;
+  height: 62px;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: var(--bg-hover);
+  position: relative;
+}

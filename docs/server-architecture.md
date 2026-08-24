@@ -335,6 +335,33 @@ loopback with a URL token. Then `Stop-Process` on the child: the supervisor
 restarted it on a new port (restart count 1), the transport re-pointed itself,
 and thumbnails came back on the new port with no error screen and no reload.
 
+## Naming a face rather than a file
+
+A photo with five people in it has five answers to "who is this?", so the
+question is asked about a face. In the viewer every detected face is a clickable
+box: unnamed ones are dashed and amber and say *Tap to name*, named ones carry
+the name and the match confidence. Clicking opens a small tagger beside the box
+— type or pick a player, and only that face is assigned.
+
+Two details that matter in use:
+
+- **A multi-person photo says so.** With two or more faces the viewer shows
+  "5 people here, 4 not named yet — click a face to say who it is", which is the
+  prompt the whole feature exists to answer. It hides while a tagger is open.
+- **"Tag & add to group"** sits next to "Tag", because identifying someone is
+  rarely the point on its own: the reason to know it is Jonathan is to get the
+  shot into Jonathan's folder. It files the photo into the group of that name,
+  creating it on first use.
+
+`Wrong person` returns a face to the unknown pool and `Not a face` marks a false
+detection, so a mis-tag is correctable in the same place it was made.
+
+The dialog for naming an unknown group had the same ambiguity from the other
+direction — it showed a cover *photo*, which with four people in it says nothing
+about which one the group is. It now shows a strip of the actual face crops,
+using the existing face query and the CSS-crop component, so what is being named
+is visible before the name is typed.
+
 ## Decisions worth keeping
 
 - **The sink is on the state, not threaded through every call.** It is available

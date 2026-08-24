@@ -2,17 +2,24 @@
  * Full-screen viewer: photos with face bounding boxes drawn over them (§5's
  * bounding-box preview), videos with per-player timestamp chips that seek the
  * player on click (§9).
+ *
+ * The boxes are the answer to "which of these people do you mean?" — click one
+ * and name that face, rather than naming the file and hoping. A photo with
+ * several people says so, and says how many.
  */
 
 import { useEffect, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import * as api from '../api'
-import { formatConfidence, formatTime, fullUrl, videoUrl } from '../media'
+import { FaceTagger } from './FaceTagger'
+import { formatConfidence, formatCount, formatTime, fullUrl, videoUrl } from '../media'
 import { useUi } from '../store'
 
 export function MediaViewer(props: { mediaId: number }) {
   const closeViewer = useUi((s) => s.closeViewer)
   const [showBoxes, setShowBoxes] = useState(true)
+  /** The face being named, if any. */
+  const [taggingId, setTaggingId] = useState<number | null>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
 
   const media = useQuery({
@@ -32,8 +39,17 @@ export function MediaViewer(props: { mediaId: number }) {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') closeViewer()
-      if (e.key === 'b') setShowBoxes((v) => !v)
+      // Escape backs out of tagging first; a second press closes the viewer, so
+      // the key never does two things at once.
+      if (e.key === 'Escape') {
+        setTaggingId((current) => {
+          if (current !== null) return null
+          closeViewer()
+          return null
+        })
+      }
+      // Not while typing a name into the tagger.
+      if (e.key === 'b' && !(e.target instanceof HTMLInputElement)) setShowBoxes((v) => !v)
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
@@ -44,6 +60,9 @@ export function MediaViewer(props: { mediaId: number }) {
 
   const personName = (personId: number | null) =>
     people.data?.find((p) => p.id === personId)?.name ?? null
+
+  const visibleFaces = (faces.data ?? []).filter((f) => f.assignment !== 'ignored')
+  const unnamedCount = visibleFaces.filter((f) => f.personId == null).length
 
   const seekTo = (seconds: number) => {
     const video = videoRef.current
@@ -78,32 +97,54 @@ export function MediaViewer(props: { mediaId: number }) {
         </div>
       </div>
 
+      {item.mediaType === 'photo' && showBoxes && visibleFaces.length > 1 && taggingId === null && (
+        <div className="viewer-prompt">
+          {formatCount(visibleFaces.length)} people here
+          {unnamedCount > 0 && `, ${formatCount(unnamedCount)} not named yet`} — click a face to say
+          who it is.
+        </div>
+      )}
+
       <div className="viewer-stage" onClick={(e) => e.target === e.currentTarget && closeViewer()}>
         <div className="frame">
           {item.mediaType === 'photo' ? (
             <>
               <img src={fullUrl(item.id)} alt={item.filename} />
               {showBoxes &&
-                faces.data
-                  ?.filter((f) => f.assignment !== 'ignored')
-                  .map((face) => (
-                    <div
-                      key={face.id}
-                      className="face-box"
-                      style={{
-                        left: `${face.bbox.x * 100}%`,
-                        top: `${face.bbox.y * 100}%`,
-                        width: `${face.bbox.w * 100}%`,
-                        height: `${face.bbox.h * 100}%`,
-                      }}
-                    >
-                      <span>
-                        {personName(face.personId) ?? 'Unknown'}
-                        {face.recognitionConfidence != null &&
-                          ` ${formatConfidence(face.recognitionConfidence)}`}
-                      </span>
-                    </div>
-                  ))}
+                visibleFaces.map((face) => (
+                  <div
+                    key={face.id}
+                    className={`face-box taggable${taggingId === face.id ? ' tagging' : ''}${
+                      face.personId == null ? ' unnamed' : ''
+                    }`}
+                    style={{
+                      left: `${face.bbox.x * 100}%`,
+                      top: `${face.bbox.y * 100}%`,
+                      width: `${face.bbox.w * 100}%`,
+                      height: `${face.bbox.h * 100}%`,
+                    }}
+                    title={personName(face.personId) ? 'Click to change who this is' : 'Click to name this person'}
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      setTaggingId((current) => (current === face.id ? null : face.id))
+                    }}
+                  >
+                    <span>
+                      {personName(face.personId) ?? 'Tap to name'}
+                      {face.recognitionConfidence != null &&
+                        ` ${formatConfidence(face.recognitionConfidence)}`}
+                    </span>
+                    {taggingId === face.id && (
+                      <FaceTagger
+                        face={face}
+                        currentName={personName(face.personId)}
+                        shootId={item.shootId}
+                        mediaId={item.id}
+                        onClose={() => setTaggingId(null)}
+                      />
+                    )}
+                  </div>
+                ))}
             </>
           ) : (
             <video ref={videoRef} src={videoUrl(item.id)} controls autoPlay />
