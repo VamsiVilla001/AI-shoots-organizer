@@ -134,13 +134,16 @@ cannot elevate.
 
 ## Signing
 
-Unsigned builds work, but the first launch is hostile to the person receiving
-them. This is the difference between "double-click it" and "no, really, it's
-fine, right-click instead".
+Local builds use a complete ad-hoc signature so macOS can validate the bundle,
+its server sidecar and its resources. Ad-hoc signing does not establish a
+trusted developer identity, however, so the first launch is still hostile to
+the person receiving it. This is the difference between "double-click it" and
+"no, really, it's fine, right-click instead".
 
 ### macOS
 
-Without a signature, Gatekeeper blocks the app. The recipient needs one of:
+Without a Developer ID signature and notarisation, Gatekeeper blocks the app.
+The recipient needs one of:
 
 - right-click the app in Applications → **Open** → **Open** again, or
 - `xattr -dr com.apple.quarantine "/Applications/Esports AI Media Organiser.app"`

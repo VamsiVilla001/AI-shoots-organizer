@@ -81,7 +81,9 @@ and an `-setup.exe` for Windows — built by
 git tag v0.1.0 && git push origin v0.1.0
 ```
 
-To build the Mac app on the Mac itself: `bash scripts/build-macos.sh`. Note
+To build the Mac app on the Mac itself: `bash scripts/build-macos.sh`. Local
+builds receive a complete ad-hoc signature when no Developer ID is configured,
+which prevents macOS from treating the bundle as structurally damaged. Note
 that `cargo build --release` is *not* a production build — only the Tauri CLI
 sets the `custom-protocol` feature that switches the app off the dev server.
 Signing, notarisation, bundling the face models and what the recipient needs

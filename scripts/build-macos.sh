@@ -6,9 +6,10 @@
 #
 #   bash scripts/build-macos.sh
 #
-# Signing is picked up from the environment when present — see
-# docs/deployment.md. Without it the build still succeeds and the result is
-# unsigned.
+# Developer ID signing is picked up from the environment when present — see
+# docs/deployment.md. Without it, the build uses a complete ad-hoc signature so
+# macOS can validate every nested binary and bundled resource. Ad-hoc signing
+# is not notarisation, so Gatekeeper still requires a one-time manual override.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -80,11 +81,26 @@ config_args+=(--config src-tauri/tauri.sidecar.conf.json)
 if [[ -n "${APPLE_SIGNING_IDENTITY:-}" ]]; then
   echo "==> Signing as ${APPLE_SIGNING_IDENTITY}"
 else
-  echo "==> Building unsigned (set APPLE_SIGNING_IDENTITY to sign; see docs/deployment.md)"
+  echo "==> Applying a complete ad-hoc signature"
+  config_args+=(--config src-tauri/tauri.adhoc.conf.json)
 fi
 
 echo "==> Building"
-npm run tauri:build -w @teo/desktop -- ${target_args[@]+"${target_args[@]}"} "${config_args[@]}"
+npm run tauri:build -w @teo/desktop -- --ci ${target_args[@]+"${target_args[@]}"} "${config_args[@]}"
+
+bundle_root="target"
+if [[ "${arch}" == "arm64" ]]; then
+  bundle_root="target/aarch64-apple-darwin"
+fi
+
+app_bundle="$(find "${bundle_root}/release/bundle/macos" -maxdepth 1 -name '*.app' -print -quit)"
+dmg_bundle="$(find "${bundle_root}/release/bundle/dmg" -maxdepth 1 -name '*.dmg' -print -quit)"
+[[ -n "${app_bundle}" ]] || fail "the macOS app bundle was not produced"
+[[ -n "${dmg_bundle}" ]] || fail "the macOS DMG was not produced"
+
+echo "==> Verifying bundle signature and disk image"
+codesign --verify --deep --strict --verbose=2 "${app_bundle}"
+hdiutil verify "${dmg_bundle}" >/dev/null
 
 echo
 echo "==> Done. Installers:"
@@ -92,7 +108,7 @@ find target -path '*release/bundle/dmg/*.dmg' -o -path '*release/bundle/macos/*.
 
 cat <<'NOTE'
 
-If the .dmg is unsigned, the first launch on someone else's Mac needs one of:
+If the .dmg is ad-hoc signed, the first launch on someone else's Mac needs one of:
   * right-click the app in Applications and choose Open, then Open again, or
   * xattr -dr com.apple.quarantine "/Applications/Esports AI Media Organiser.app"
 
