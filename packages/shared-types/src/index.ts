@@ -238,6 +238,14 @@ export interface GroupStats {
   ungrouped: number
 }
 
+/** Naming one face assigns its cluster and gathers that person's media. */
+export interface NameFaceResult {
+  person: Person
+  facesNamed: number
+  group: Group
+  filesAdded: number
+}
+
 /** What seeding groups from the AI albums did. */
 export interface SeedResult {
   groups: number

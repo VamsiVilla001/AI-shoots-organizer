@@ -26,6 +26,7 @@ import type {
   MediaGroupLink,
   MediaQuery,
   ModelStatus,
+  NameFaceResult,
   Person,
   PersonSummary,
   ProcessingProgress,
@@ -160,6 +161,9 @@ export const assignFaces = (
   personName: string | null,
 ) => call<number>('assign_faces', { faceIds, personId, personName })
 export const ignoreFaces = (faceIds: number[]) => call<number>('ignore_faces', { faceIds })
+/** Names a face's person and gathers all currently known appearances into their group. */
+export const nameFace = (faceId: number, name: string, team?: string | null) =>
+  call<NameFaceResult>('name_face', { faceId, name, team: team ?? null })
 
 // --- video -----------------------------------------------------------------
 

@@ -832,6 +832,74 @@ pub fn assign_faces(
     Ok(updated)
 }
 
+/// Names the person in one face and gathers every currently known appearance
+/// into an editor-owned group. Keeping the assignment, album refresh, and
+/// grouping in one transaction prevents the UI from observing a half-named
+/// person after a failure.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NameFaceResult {
+    pub person: Person,
+    pub faces_named: usize,
+    pub group: Group,
+    pub files_added: usize,
+}
+
+#[tauri::command]
+pub fn name_face(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    face_id: i64,
+    name: String,
+    team: Option<String>,
+) -> Result<NameFaceResult> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(err("give the person a name"));
+    }
+
+    let result = state.db.transaction(|conn| {
+        let face = faces::get_by_id(conn, face_id)?
+            .ok_or_else(|| teo_database::DbError::other("that face is no longer in the library"))?;
+        let person = people::get_or_create(conn, name, team.as_deref())?;
+
+        // A cluster represents the same unknown person across files. Naming one
+        // member names the cluster; isolated/reviewed faces are assigned alone.
+        let faces_named = match face.cluster_id {
+            Some(cluster_id) => clusters::name_cluster(conn, cluster_id, person.id)?,
+            None => faces::assign_many(conn, &[face.id], person.id)?,
+        };
+
+        logs::record_quiet(
+            conn,
+            logs::EVENT_PLAYER_ASSIGNMENT,
+            Some(face.shoot_id),
+            Some(face.media_id),
+            Some(person.id),
+            Some(&format!("named from photo; {faces_named} face(s) assigned")),
+        );
+
+        albums::regenerate(conn, face.shoot_id)?;
+        let player_album = albums::list(conn, face.shoot_id)?.into_iter().find(|album| {
+            album.album_type == AlbumType::Player.as_str() && album.person_ids.contains(&person.id)
+        });
+
+        let group = groups::get_or_create(conn, face.shoot_id, &person.name, Some(person.id))?;
+        let files_added = match player_album {
+            Some(album) => groups::add_media(conn, group.id, &albums::media_ids(conn, album.id, None)?)?,
+            None => 0,
+        };
+        let group = groups::get_by_id(conn, group.id)?
+            .ok_or_else(|| teo_database::DbError::other("that group no longer exists"))?;
+
+        Ok(NameFaceResult { person, faces_named, group, files_added })
+    })?;
+
+    events::emit(&app, events::LIBRARY_CHANGED, ());
+    events::shoot_changed(&app, result.group.shoot_id, "groups");
+    Ok(result)
+}
+
 /// "Remove false face detection" — keeps the row but takes it out of every
 /// count and album.
 #[tauri::command]

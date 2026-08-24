@@ -130,6 +130,7 @@ pub fn run() {
             commands::reject_faces,
             commands::assign_faces,
             commands::ignore_faces,
+            commands::name_face,
             // video
             commands::video_timelines,
             // export
