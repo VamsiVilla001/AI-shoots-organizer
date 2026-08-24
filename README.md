@@ -18,8 +18,12 @@ ever read — every export copies originals into a new destination.
 ## Repository layout
 
 ```
-apps/desktop/            Tauri app — React frontend (src/) + Rust shell (src-tauri/)
+apps/desktop/            React frontend (src/) + Tauri shell (src-tauri/): a window
+                         and a supervisor for the server it starts on loopback
 crates/
+  app-core/              State, settings, workers, pipeline, stages, export —
+                         everything that does not know what a front door is
+  server/                HTTP front door: routes, SSE, media, filesystem browser
   database/              SQLite schema, migrations, repositories, job queue
   media-core/            Folder scanner, EXIF metadata, decoding, thumbnails
   face-detection/        ONNX Runtime setup, SCRFD detector, NMS
@@ -90,6 +94,21 @@ npm run rs:test        # Rust workspace tests
 npm run rs:clippy      # lints
 npm run typecheck      # TypeScript
 ```
+
+## Two editions, one core
+
+The desktop app and the browser edition run the same code. `teo-app-core` holds
+the application; `teo-server` puts an HTTP front door on it; the desktop shell
+starts a private copy of that server on loopback and points the same React
+bundle at it.
+
+```text
+Tauri window ──▶ teo-server (127.0.0.1, port 0, per-launch token) ──▶ teo-app-core
+   browser  ──▶ teo-server (0.0.0.0:8420, shared token)          ──▶ teo-app-core
+```
+
+See [docs/server-architecture.md](docs/server-architecture.md) for the design
+and [docs/deployment.md](docs/deployment.md) for shipping either one.
 
 ## How it works
 

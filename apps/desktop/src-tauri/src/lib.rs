@@ -1,177 +1,89 @@
-//! Esports AI Media Organiser — application wiring.
+//! Esports AI Media Organiser — the desktop shell.
+//!
+//! The shell is a window, a menu, a lifecycle and a supervisor. Everything the
+//! application actually does lives in `teo-app-core` and is reached through
+//! `teo-server`, which this process starts privately on loopback. One
+//! implementation of every command serves both editions.
+//!
+//! The app data layout is unchanged from 0.1.0 — the server is pointed at the
+//! same `com.teorganiser.desktop` directory — so an upgrade opens the existing
+//! `media.db` and its migrations continue from where they were.
 
 pub mod commands;
-pub mod protocol;
-pub mod sink;
-
-// The application core lives in `teo-app-core` so a headless build can use it.
-// Re-exporting under the old names keeps `crate::state`, `crate::events` and
-// friends valid for the command layer, which is otherwise untouched.
-pub use teo_app_core::{events, export, models, paths, pipeline, settings, stages, state, worker};
+pub mod supervisor;
 
 use std::sync::Arc;
 
 use tauri::Manager;
-use teo_app_core::ProgressSink;
-use teo_database::Database;
 
-use crate::paths::AppPaths;
-use crate::settings::AppSettings;
-use crate::sink::TauriProgressSink;
-use crate::state::AppState;
+use crate::supervisor::Supervisor;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .register_asynchronous_uri_scheme_protocol(protocol::SCHEME, |ctx, request, responder| {
-            protocol::handle(ctx.app_handle(), request, responder);
-        })
         .setup(|app| {
             let data_dir = app
                 .path()
                 .app_data_dir()
                 .map_err(|e| format!("could not resolve the application data directory: {e}"))?;
-            let paths = AppPaths::create(&data_dir)?;
+            std::fs::create_dir_all(&data_dir)
+                .map_err(|e| format!("could not create {}: {e}", data_dir.display()))?;
 
-            init_logging(&paths);
-            tracing::info!(version = env!("CARGO_PKG_VERSION"), data = %paths.root.display(), "starting");
+            init_logging(&data_dir);
+            tracing::info!(
+                version = env!("CARGO_PKG_VERSION"),
+                data = %data_dir.display(),
+                "starting"
+            );
 
-            // A packaged build ships the ONNX models as bundle resources, so an
-            // installed app is usable without whoever installed it running a
-            // fetch script. Development builds have no such resources and skip
-            // this silently.
-            if let Ok(resources) = app.path().resource_dir() {
-                let installed = models::seed_from_bundle(&resources.join("models"), &paths.models);
-                if installed > 0 {
-                    tracing::info!(installed, "installed bundled models into the app data folder");
-                }
-            }
+            // A packaged build keeps the ONNX models in its resources; the
+            // server installs them into the data directory on first run.
+            let resources = app.path().resource_dir().ok();
 
-            let db = Database::open(paths.database_file())
-                .map_err(|e| format!("could not open the database: {e}"))?;
-            let settings = AppSettings::load(&db)
-                .unwrap_or_default()
-                .sanitised();
-
-            let sink: Arc<dyn ProgressSink> = Arc::new(TauriProgressSink::new(app.handle().clone()));
-            let state = Arc::new(AppState::new(db, paths, settings, protocol::url_base(), sink));
-            app.manage(Arc::clone(&state));
-
-            // Workers start immediately so an import interrupted by a previous
-            // quit resumes without the user having to ask (§18).
-            let pool = worker::WorkerPool::start(Arc::clone(&state));
-            app.manage(Mutex::new(Some(pool)));
+            // Blocking here is deliberate: the window has nothing useful to show
+            // until the server is up, and a failure has to reach the UI as a
+            // status rather than as an empty screen.
+            let supervisor = Arc::new(Supervisor::start(data_dir, resources));
+            supervisor.supervise();
+            app.manage(Arc::clone(&supervisor));
 
             Ok(())
         })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { .. } = event {
-                // Tell the workers to stop, then let them finish the job they
-                // are on. Anything still queued is picked up next launch.
-                if let Some(state) = window.app_handle().try_state::<Arc<AppState>>() {
-                    state.begin_shutdown();
-                }
-                if let Some(pool) = window.app_handle().try_state::<Mutex<Option<worker::WorkerPool>>>() {
-                    if let Some(pool) = pool.lock().take() {
-                        pool.join();
-                    }
+                // The child holds the database; leaving it running would keep a
+                // lock on it and a port open after the window is gone.
+                if let Some(supervisor) = window.app_handle().try_state::<Arc<Supervisor>>() {
+                    supervisor.stop();
                 }
             }
         })
         .invoke_handler(tauri::generate_handler![
-            // application
-            commands::app_info,
-            commands::get_settings,
-            commands::update_settings,
-            commands::model_status,
-            // shoots
-            commands::list_shoots,
-            commands::get_shoot,
-            commands::create_shoot,
-            commands::rename_shoot,
-            commands::delete_shoot_index,
-            commands::clear_scanned_data,
-            commands::resume_processing,
-            commands::pause_processing,
-            commands::cancel_processing,
-            commands::reanalyse_shoot,
-            commands::get_progress,
-            commands::list_failed_jobs,
-            // media
-            commands::list_media,
-            commands::get_media,
-            commands::media_faces,
+            commands::server_status,
             commands::reveal_in_folder,
             commands::open_path,
-            // players
-            commands::list_people,
-            commands::create_person,
-            commands::rename_person,
-            commands::update_person,
-            commands::merge_people,
-            commands::delete_person,
-            commands::clear_person_recognition,
-            // clusters
-            commands::list_clusters,
-            commands::name_cluster,
-            commands::merge_clusters,
-            commands::split_cluster,
-            commands::ignore_cluster,
-            // albums
-            commands::list_albums,
-            commands::regenerate_albums,
-            // groups (the editor's own sorting)
-            commands::list_groups,
-            commands::group_stats,
-            commands::group_links,
-            commands::create_group,
-            commands::rename_group,
-            commands::update_group,
-            commands::delete_group,
-            commands::add_media_to_group,
-            commands::remove_media_from_group,
-            commands::clear_group,
-            commands::groups_from_ai_albums,
-            commands::group_from_album,
-            // review
-            commands::list_faces,
-            commands::confirm_faces,
-            commands::reject_faces,
-            commands::assign_faces,
-            commands::ignore_faces,
-            // video
-            commands::video_timelines,
-            // export
-            commands::preview_export,
-            commands::start_export,
-            commands::cancel_export,
-            commands::list_exports,
-            // logs and privacy
-            commands::recent_logs,
-            commands::clear_all_embeddings,
-            commands::clear_all_recognition_data,
-            commands::clear_thumbnail_cache,
-            commands::clear_log,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the application");
 }
 
-use parking_lot::Mutex;
-
 /// Logs to a rolling file in the app data directory, and to the console during
-/// development. Kept lightweight, as §25 asks.
-fn init_logging(paths: &AppPaths) {
+/// development. The server's own output is forwarded into the same file, so one
+/// log tells the whole story.
+fn init_logging(data_dir: &std::path::Path) {
     use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+
+    let logs = data_dir.join("logs");
+    let _ = std::fs::create_dir_all(&logs);
 
     let filter = EnvFilter::try_from_env("TEO_LOG").unwrap_or_else(|_| EnvFilter::new("info,teo=debug"));
 
     let file_layer = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(paths.log_file())
+        .open(logs.join("teo.log"))
         .ok()
         // `MakeWriter` is implemented for the standard-library mutex, not
         // parking_lot's, so this one deliberately differs from the rest of the

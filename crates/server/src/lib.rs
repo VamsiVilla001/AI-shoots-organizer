@@ -29,6 +29,7 @@ use axum::routing::{get, patch, post};
 use axum::Router;
 use teo_app_core::{AppPaths, AppSettings, AppState, ProgressSink, WorkerPool};
 use teo_database::Database;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
 
 pub use config::ServerConfig;
@@ -44,6 +45,16 @@ pub const MEDIA_URL_BASE: &str = "/media";
 pub fn boot(config: ServerConfig) -> anyhow::Result<(Arc<ServerState>, WorkerPool)> {
     let paths = AppPaths::create(&config.data_dir)?;
     let token = auth::resolve_token(config.token.clone(), &config.data_dir)?;
+
+    // A packaged desktop app ships the models as bundle resources and points us
+    // at them; the first run copies them in. Nothing to do for a container,
+    // which fetches them at entrypoint instead.
+    if let Some(source) = &config.seed_models_from {
+        let installed = teo_app_core::models::seed_from_bundle(source, &paths.models);
+        if installed > 0 {
+            tracing::info!(installed, "installed bundled models into the data directory");
+        }
+    }
 
     let db = Database::open(paths.database_file())?;
     let settings = AppSettings::load(&db).unwrap_or_default().sanitised();
@@ -149,6 +160,31 @@ fn protected() -> Router<Arc<ServerState>> {
         .route("/media/{id}/stream", get(mediaroutes::stream))
 }
 
+/// Origins allowed to call the API from a page this server did not serve.
+///
+/// The desktop shell is the reason this exists: its webview is
+/// `tauri.localhost` while the server is `127.0.0.1:<port>`, so every request is
+/// cross-origin. The Vite dev server is here for the same reason. Anything else
+/// has to be named in `TEO_ALLOWED_ORIGINS` — a wildcard is not an option once
+/// credentials are involved, and should not be one anyway.
+fn allowed_origins() -> Vec<axum::http::HeaderValue> {
+    let mut origins = vec![
+        // Tauri's webview origin, per platform.
+        "http://tauri.localhost".to_string(),
+        "https://tauri.localhost".to_string(),
+        "tauri://localhost".to_string(),
+        // `npm run dev`.
+        "http://localhost:1420".to_string(),
+        "http://127.0.0.1:1420".to_string(),
+    ];
+
+    if let Ok(extra) = std::env::var("TEO_ALLOWED_ORIGINS") {
+        origins.extend(extra.split(',').map(str::trim).filter(|s| !s.is_empty()).map(String::from));
+    }
+
+    origins.iter().filter_map(|origin| origin.parse().ok()).collect()
+}
+
 /// The full application: token-checked routes, the session endpoint that hands
 /// out the cookie, and the static bundle underneath.
 pub fn router(state: Arc<ServerState>) -> Router {
@@ -178,7 +214,24 @@ pub fn router(state: Arc<ServerState>) -> Router {
         }
     }
 
-    app.layer(TraceLayer::new_for_http()).with_state(state)
+    // Credentials are on because the browser edition authenticates with a
+    // cookie; that rules out a wildcard origin, which is why the list above is
+    // explicit. Methods and headers are listed rather than `Any` for the same
+    // reason: with credentials, browsers treat `*` literally.
+    let cors = CorsLayer::new()
+        .allow_origin(AllowOrigin::list(allowed_origins()))
+        .allow_credentials(true)
+        .allow_headers([axum::http::header::AUTHORIZATION, axum::http::header::CONTENT_TYPE])
+        .allow_methods([
+            axum::http::Method::GET,
+            axum::http::Method::POST,
+            axum::http::Method::PATCH,
+            axum::http::Method::PUT,
+            axum::http::Method::DELETE,
+            axum::http::Method::OPTIONS,
+        ]);
+
+    app.layer(cors).layer(TraceLayer::new_for_http()).with_state(state)
 }
 
 /// Binds and serves until the process is asked to stop.
@@ -187,6 +240,14 @@ pub async fn serve(state: Arc<ServerState>) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     let local = listener.local_addr()?;
     tracing::info!(address = %local, "listening");
+
+    // A parent that asked for port 0 cannot know the port any other way, and
+    // guessing one to pass in would race with whatever else is on the machine.
+    if let Some(path) = &state.config.port_file {
+        if let Err(e) = std::fs::write(path, local.to_string()) {
+            tracing::error!(path = %path.display(), error = %e, "could not publish the bound address");
+        }
+    }
 
     axum::serve(listener, router(state))
         .with_graceful_shutdown(shutdown_signal())
@@ -202,6 +263,24 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_desktop_webview_origin_is_allowed() {
+        let origins: Vec<String> = allowed_origins()
+            .iter()
+            .map(|value| value.to_str().unwrap_or_default().to_string())
+            .collect();
+
+        // Without these the desktop shell cannot call its own server: the page
+        // is tauri.localhost and the server is 127.0.0.1.
+        assert!(origins.contains(&"http://tauri.localhost".to_string()));
+        assert!(origins.contains(&"tauri://localhost".to_string()));
+        assert!(origins.contains(&"http://localhost:1420".to_string()));
+        assert!(
+            !origins.iter().any(|o| o == "*"),
+            "a wildcard origin is invalid with credentials and wrong regardless"
+        );
+    }
 
     #[test]
     fn the_media_base_is_a_path_not_a_scheme() {
@@ -223,6 +302,8 @@ mod tests {
             output_roots: Vec::new(),
             token: Some("test-token".into()),
             web_dir: None,
+            port_file: None,
+            seed_models_from: None,
         };
         let (state, workers) = boot(config).unwrap();
         let _router = router(Arc::clone(&state));

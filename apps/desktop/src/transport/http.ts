@@ -19,6 +19,17 @@ export interface HttpConnection {
   /** Origin of the server, without a trailing slash. Empty means same-origin. */
   baseUrl: string
   token: string
+  /**
+   * Put the token in media and event URLs rather than relying on the session
+   * cookie.
+   *
+   * The desktop shell needs this: its page is `tauri.localhost` and its server
+   * is `127.0.0.1`, so a `SameSite` cookie is never sent and `EventSource` and
+   * `<img>` cannot set a header. Loopback only, with a token that lasts one
+   * launch — which is why a token in a URL is acceptable there and not used for
+   * the browser edition, where everything is same-origin.
+   */
+  tokenInUrl?: boolean
 }
 
 const STORAGE_KEY = 'teo.connection'
@@ -72,7 +83,10 @@ export function createHttpTransport(connection: HttpConnection): HttpTransport {
     if (source) return
     // `withCredentials` so the session cookie travels when the bundle is served
     // from a different origin than the API during development.
-    source = new EventSource(url('/api/events'), { withCredentials: true })
+    const stream = connection.tokenInUrl
+      ? url(`/api/events?token=${encodeURIComponent(connection.token)}`)
+      : url('/api/events')
+    source = new EventSource(stream, { withCredentials: true })
     source.onerror = () => {
       // The browser reconnects on its own; a log line is enough, and throwing
       // here would take down whatever triggered the subscription.
@@ -99,7 +113,7 @@ export function createHttpTransport(connection: HttpConnection): HttpTransport {
 
   return {
     kind: 'http',
-    connection: { baseUrl: base, token: connection.token },
+    connection: { baseUrl: base, token: connection.token, tokenInUrl: connection.tokenInUrl },
 
     async call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
       const reason = DESKTOP_ONLY[command]
@@ -161,7 +175,8 @@ export function createHttpTransport(connection: HttpConnection): HttpTransport {
       // The HTTP shape differs from the protocol's `/<kind>/<id>`: video is
       // served by a ranged handler at a different name.
       const route = kind === 'video' ? 'stream' : kind
-      return url(`/media/${mediaId}/${route}`)
+      const query = connection.tokenInUrl ? `?token=${encodeURIComponent(connection.token)}` : ''
+      return url(`/media/${mediaId}/${route}${query}`)
     },
 
     setMediaBase() {

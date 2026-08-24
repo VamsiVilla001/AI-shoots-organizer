@@ -6,12 +6,15 @@
  * downstream branches on it again.
  */
 
-import { createTauriTransport } from './tauri'
+import { createDesktopTransport } from './desktop'
 import { createHttpTransport, loadConnection, type HttpConnection, type HttpTransport } from './http'
+import { isTauri as detectTauri } from './native'
 import type { Transport } from './types'
 
 export type { Transport, MediaKind } from './types'
 export { UnsupportedByTransport } from './types'
+export { ENDPOINT_CHANGED, ServerUnavailable } from './desktop'
+export { serverStatus, type ServerStatus } from './native'
 export {
   forgetConnection,
   loadConnection,
@@ -21,7 +24,7 @@ export {
 } from './http'
 
 export function isTauri(): boolean {
-  return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
+  return detectTauri()
 }
 
 let active: Transport | null = null
@@ -41,9 +44,14 @@ export function transportReady(): boolean {
   return active !== null
 }
 
-/** Desktop boot: always available, nothing to configure. */
-export function initTauriTransport(): Transport {
-  active = createTauriTransport()
+/**
+ * Desktop boot: the shell has already started a private server, so this asks
+ * where it is and connects to it. Throws `ServerUnavailable` when the shell
+ * could not start one, which the UI turns into a screen rather than a blank
+ * window.
+ */
+export async function initDesktopTransport(): Promise<Transport> {
+  active = await createDesktopTransport()
   return active
 }
 
@@ -63,6 +71,11 @@ export function resetTransport() {
     ;(active as HttpTransport).close()
   }
   active = null
+}
+
+/** True once a transport exists and is pointed at something. */
+export function activeKind(): 'tauri' | 'http' | null {
+  return active?.kind ?? null
 }
 
 /**

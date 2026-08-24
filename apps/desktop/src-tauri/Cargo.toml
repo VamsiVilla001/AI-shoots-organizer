@@ -18,29 +18,18 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-teo-app-core = { path = "../../../crates/app-core" }
-teo-clustering = { path = "../../../crates/clustering" }
-teo-database = { path = "../../../crates/database" }
-teo-export-engine = { path = "../../../crates/export-engine" }
-teo-face-detection = { path = "../../../crates/face-detection" }
-teo-face-recognition = { path = "../../../crates/face-recognition" }
-teo-media-core = { path = "../../../crates/media-core" }
-teo-video-analysis = { path = "../../../crates/video-analysis" }
-
-# No `protocol-asset`: media is served through the teomedia:// handler, which
-# resolves ids against the database instead of exposing raw filesystem paths.
+# Deliberately none of the AI or database crates: the shell starts `teo-server`
+# and talks to it over loopback, so it links none of the work. That also keeps
+# `cargo build -p teo-desktop` from rebuilding ONNX Runtime.
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 
 anyhow = "1.0"
-thiserror = "2.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-chrono = "0.4"
-image = "0.25"
-num_cpus = "1.17"
 parking_lot = "0.12"
+rand = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
@@ -49,8 +38,9 @@ tempfile = "3.27"
 
 [features]
 default = []
-# Mirrors the AI crates' provider features so the whole app can be built with
-# GPU acceleration in one flag.
-directml = ["teo-face-detection/directml", "teo-face-recognition/directml"]
-coreml = ["teo-face-detection/coreml", "teo-face-recognition/coreml"]
-cuda = ["teo-face-detection/cuda", "teo-face-recognition/cuda"]
+# Acceleration is the server's business now: it links the AI crates, and the
+# providers are enabled by target there. Kept as no-ops so existing build
+# commands do not break.
+directml = []
+coreml = []
+cuda = []

@@ -23,7 +23,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; img-src 'self' data: blob: http://teomedia.localhost teomedia: asset: http://asset.localhost; media-src 'self' blob: http://teomedia.localhost teomedia:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost",
+      "csp": "default-src 'self'; img-src 'self' data: blob: http://127.0.0.1:* http://localhost:*; media-src 'self' blob: http://127.0.0.1:* http://localhost:*; style-src 'self' 'unsafe-inline'; font-src 'self' data:; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:* http://localhost:*",
       "assetProtocol": {
         "enable": false,
         "scope": []

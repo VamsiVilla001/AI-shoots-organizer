@@ -16,7 +16,10 @@ cross-compile shortcut.
 
 ## What ships inside, and what does not
 
-- **The frontend and the Rust binary** — always.
+- **The frontend, the shell binary, and `teo-server`** — always. The desktop app
+  is a client of a private server it starts on loopback, so the installer ships
+  both binaries; without the sidecar the app opens, says the local server did not
+  start, and can do nothing else. `npm run package:win` builds and stages it.
 - **The face models** (~280 MB) — only when the build machine has fetched them
   and the build passes `--config src-tauri/tauri.models.conf.json`. They are
   gitignored, so this is opt-in: a glob matching nothing is a hard build error,
@@ -82,17 +85,23 @@ powershell -ExecutionPolicy Bypass -File scripts/fetch-models.ps1
 npm run package:win
 ```
 
-`package:win` stages `DirectML.dll` and then builds with both config overlays.
+`package:win` builds `teo-server`, stages it and `DirectML.dll`, then builds with
+the config overlays. **Close the app first** — a running copy holds both
+binaries, and the staging step cannot overwrite a file that is in use.
 The installer lands in `target/release/bundle/nsis/` and is ~192 MB: the binary,
 the DirectML redistributable and the two models. Verified contents of a build
 made this way:
 
 ```
-teo-desktop.exe        32.1 MB
-DirectML.dll           18.5 MB
-models/det_10g.onnx    16.9 MB
+teo-desktop.exe          6.0 MB   the shell: a window and a supervisor
+teo-server.exe          27.5 MB   the application itself
+DirectML.dll            18.5 MB
+models/det_10g.onnx     16.9 MB
 models/w600k_r50.onnx  174.4 MB
 ```
+
+The shell shrank from 32 MB to 6 MB when it stopped linking the database and
+ONNX Runtime; that work moved into the server, not away.
 
 `npm run tauri:build -w @teo/desktop` on its own produces a ~32 MB installer
 with none of those extras — fine for someone who will fetch models themselves.

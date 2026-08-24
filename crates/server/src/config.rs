@@ -17,6 +17,13 @@ pub struct ServerConfig {
     pub token: Option<String>,
     /// The built React bundle. Missing is not fatal — the API still serves.
     pub web_dir: Option<PathBuf>,
+    /// Where to write the address actually bound, for a parent process that
+    /// asked for port 0 and needs to know what it got.
+    pub port_file: Option<PathBuf>,
+    /// A directory of ONNX models to install into the data directory on first
+    /// run. The desktop shell points this at its bundle resources so a packaged
+    /// app recognises faces without anyone fetching anything.
+    pub seed_models_from: Option<PathBuf>,
 }
 
 impl Default for ServerConfig {
@@ -28,6 +35,8 @@ impl Default for ServerConfig {
             output_roots: Vec::new(),
             token: None,
             web_dir: None,
+            port_file: None,
+            seed_models_from: None,
         }
     }
 }
@@ -51,6 +60,8 @@ impl ServerConfig {
             output_roots: list("TEO_OUTPUT_ROOTS"),
             token: std::env::var("TEO_TOKEN").ok().filter(|t| !t.trim().is_empty()),
             web_dir: std::env::var("TEO_WEB_DIR").ok().map(PathBuf::from),
+            port_file: std::env::var("TEO_PORT_FILE").ok().map(PathBuf::from),
+            seed_models_from: std::env::var("TEO_SEED_MODELS_FROM").ok().map(PathBuf::from),
         }
     }
 

@@ -15,7 +15,7 @@ source for the final product documentation.
 | 1 — extract the Tauri-free core | done |
 | 2 — HTTP server | done |
 | 3 — one front end, two transports | done |
-| 4 — desktop shell becomes a client | not started |
+| 4 — desktop shell becomes a client | done |
 | 5 — NAS container | not started |
 | 6 — remote GPU worker | not started |
 | 7 — multi-user hardening | not started |
@@ -264,6 +264,76 @@ Then the packaged desktop build: `hasTauri` true, `mediaUrlBase`
 `http://teomedia.localhost`, thumbnails loading over the protocol handler, the
 existing 253-file shoot intact, and a backend event arriving through
 `TauriProgressSink` as `{"reason":"albums","shootId":1}`.
+
+## Phase 4 — the desktop shell becomes a client
+
+`apps/desktop/src-tauri` is now 528 lines: a window, a log, a supervisor and
+three commands. The duplication Phase 2 introduced deliberately is gone — the
+Tauri command layer was deleted, and both editions run the one in `teo-server`.
+
+The shell binary went from 32 MB to **6 MB**, because it no longer links the
+database, the AI crates or ONNX Runtime. That weight moved to `teo-server.exe`
+(27.5 MB); the installer ships both.
+
+### How it runs
+
+`Supervisor::start` spawns `teo-server` with `--bind 127.0.0.1:0`, a token
+generated per launch and passed on the command line, and `--port-file`. Port 0
+means the OS picks a free port, so two launches never fight over one; the child
+writes the address it actually bound and the parent reads it, because a parent
+that asked for port 0 has no other way to learn it and pre-picking one would race
+with everything else on the machine. The child's stdout and stderr are forwarded
+into `logs/teo.log`, so one log tells the whole story.
+
+The token is never written to disk in this mode. The file-based token exists for
+the NAS case, where a person has to read it.
+
+A watcher thread restarts the child if it exits on its own, backing off a little
+each time and giving up after five in a row — at which point the UI says so
+rather than looping. `CloseRequested` kills it, because leaving it running would
+hold the database and a port after the window is gone.
+
+### What the webview loads
+
+The **embedded** bundle, not the server's copy. A first paint never waits on a
+port, and a broken static-file path cannot stop the app from starting. That makes
+every request cross-origin — page on `tauri.localhost`, server on `127.0.0.1` —
+which surfaced two things a same-origin browser test could never have shown:
+
+1. **CORS.** The server now allows the Tauri webview origins and the Vite dev
+   server explicitly, with credentials. A wildcard is invalid once credentials
+   are involved and wrong regardless; anything else goes in
+   `TEO_ALLOWED_ORIGINS`.
+2. **`SameSite` cookies are never sent cross-site**, so the session cookie
+   cannot authenticate `EventSource` or an `<img>`. Those carry `?token=…`
+   instead, which the middleware accepts as a third option after the header and
+   the cookie. Loopback only, with a token that lasts one launch — which is why
+   a token in a URL is acceptable there and unused in the browser edition, where
+   everything is same-origin.
+
+### Reconnecting
+
+A restart means a new port, so the desktop transport retries any request that
+fails to *connect* once, after re-asking the shell where the server went, and
+moves live event subscriptions onto the new connection. It then fires
+`teo:endpoint-changed`, which Boot turns into a full query invalidation: anything
+fetched through the old connection has to be fetched again.
+
+### Upgrading from 0.1.0
+
+The data layout is untouched — `com.teorganiser.desktop/{database, thumbnails,
+face_cache, models, logs}` — because the server is pointed at the same directory
+the shell used to use. An existing install opens its existing `media.db` and
+continues from whatever migration it was on.
+
+### Verified
+
+Launched against the real 297-file library on this machine: server on a random
+loopback port with a 64-character per-launch token, `Sort — Day 2` showing 297
+files with 44 sorted and the `Spero` group intact, thumbnails loading over
+loopback with a URL token. Then `Stop-Process` on the child: the supervisor
+restarted it on a new port (restart count 1), the transport re-pointed itself,
+and thumbnails came back on the new port with no error screen and no reload.
 
 ## Decisions worth keeping
 

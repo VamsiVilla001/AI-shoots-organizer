@@ -51,6 +51,8 @@ Options:
   --output-roots <list>     Folders exports may write to [env TEO_OUTPUT_ROOTS]
   --token <token>           Shared access token          [env TEO_TOKEN]
   --web-dir <path>          Built React bundle to serve  [env TEO_WEB_DIR]
+  --port-file <path>        Write the bound address here [env TEO_PORT_FILE]
+  --seed-models-from <path> Install models from here once [env TEO_SEED_MODELS_FROM]
   -h, --help                Print this message
 
 Lists are comma-separated, or semicolon-separated on Windows.
@@ -72,6 +74,8 @@ fn parse_args(mut config: ServerConfig) -> anyhow::Result<Option<ServerConfig>> 
             "--output-roots" => config.output_roots = parse_path_list(&value()?),
             "--token" => config.token = Some(value()?),
             "--web-dir" => config.web_dir = Some(PathBuf::from(value()?)),
+            "--port-file" => config.port_file = Some(PathBuf::from(value()?)),
+            "--seed-models-from" => config.seed_models_from = Some(PathBuf::from(value()?)),
             "-h" | "--help" => {
                 print!("{USAGE}");
                 return Ok(None);

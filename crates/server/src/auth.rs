@@ -4,12 +4,17 @@
 //! service for a small edit team, not a public site. The token comes from
 //! `TEO_TOKEN` or is generated on first run and written to `<data>/token`.
 //!
-//! Two ways to present it, both checked in constant time:
+//! Three ways to present it, all checked in constant time:
 //!
 //! * `Authorization: Bearer <token>` — for `fetch` and for `curl`.
 //! * a `teo_token` cookie — because `<img>` and `<video>` tags cannot send
 //!   headers, and media has to load in the browser without rewriting every URL
 //!   into a signed one.
+//! * `?token=…` — the same problem again, but cross-origin, where the cookie
+//!   cannot help: the desktop shell's webview is `tauri.localhost` talking to
+//!   `127.0.0.1`, so a `SameSite` cookie is never sent. That case is loopback
+//!   only with a token that lives for one launch, which is why a token in a URL
+//!   is acceptable there and avoided everywhere else.
 
 use std::sync::Arc;
 
@@ -81,7 +86,7 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-/// Pulls a token off the request, header first, then cookie.
+/// Pulls a token off the request: header first, then cookie, then query.
 fn presented_token<B>(request: &Request<B>) -> Option<String> {
     if let Some(value) = request.headers().get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()) {
         if let Some(token) = value.strip_prefix("Bearer ").or_else(|| value.strip_prefix("bearer ")) {
@@ -89,11 +94,58 @@ fn presented_token<B>(request: &Request<B>) -> Option<String> {
         }
     }
 
-    let cookies = request.headers().get(header::COOKIE).and_then(|v| v.to_str().ok())?;
-    cookies.split(';').find_map(|pair| {
-        let (name, value) = pair.split_once('=')?;
-        (name.trim() == COOKIE_NAME).then(|| value.trim().to_string())
+    if let Some(cookies) = request.headers().get(header::COOKIE).and_then(|v| v.to_str().ok()) {
+        let found = cookies.split(';').find_map(|pair| {
+            let (name, value) = pair.split_once('=')?;
+            (name.trim() == COOKIE_NAME).then(|| value.trim().to_string())
+        });
+        if found.is_some() {
+            return found;
+        }
+    }
+
+    // Last resort for a client that can send neither: `EventSource` and media
+    // tags, cross-origin.
+    request.uri().query().and_then(|query| {
+        query.split('&').find_map(|pair| {
+            let (name, value) = pair.split_once('=')?;
+            (name == "token").then(|| urldecode(value))
+        })
     })
+}
+
+/// Percent-decoding, limited to what a token can contain: hex and the odd
+/// character a configured token might carry.
+fn urldecode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' if i + 2 < bytes.len() => {
+                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
+                match hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                    Some(byte) => {
+                        out.push(byte);
+                        i += 3;
+                    }
+                    None => {
+                        out.push(bytes[i]);
+                        i += 1;
+                    }
+                }
+            }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            byte => {
+                out.push(byte);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).to_string()
 }
 
 /// Rejects anything that does not present the token.
@@ -221,5 +273,30 @@ mod tests {
             .body(())
             .unwrap();
         assert_eq!(presented_token(&wrong_scheme), None);
+    }
+
+    #[test]
+    fn a_query_token_is_the_last_resort() {
+        let in_query = Request::builder()
+            .uri("/media/7/thumb?token=secret-value")
+            .body(())
+            .unwrap();
+        assert_eq!(presented_token(&in_query).as_deref(), Some("secret-value"));
+
+        // Alongside other parameters, and percent-encoded.
+        let messy = Request::builder()
+            .uri("/api/events?other=1&token=a%2Fb")
+            .body(())
+            .unwrap();
+        assert_eq!(presented_token(&messy).as_deref(), Some("a/b"));
+
+        // A header still wins, so a stray query parameter cannot downgrade a
+        // properly authenticated request.
+        let both = Request::builder()
+            .uri("/media/7/thumb?token=from-query")
+            .header(header::AUTHORIZATION, "Bearer from-header")
+            .body(())
+            .unwrap();
+        assert_eq!(presented_token(&both).as_deref(), Some("from-header"));
     }
 }

@@ -4890,10 +4890,8 @@ name = "teo-desktop"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "chrono",
- "image",
- "num_cpus",
  "parking_lot",
+ "rand 0.9.5",
  "serde",
  "serde_json",
  "tauri",
@@ -4901,15 +4899,6 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
  "tempfile",
- "teo-app-core",
- "teo-clustering",
- "teo-database",
- "teo-export-engine",
- "teo-face-detection",
- "teo-face-recognition",
- "teo-media-core",
- "teo-video-analysis",
- "thiserror 2.0.20",
  "tracing",
  "tracing-subscriber",
 ]
