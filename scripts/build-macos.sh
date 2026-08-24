@@ -65,6 +65,18 @@ if [[ "${arch}" == "arm64" ]]; then
   target_args=(--target aarch64-apple-darwin)
 fi
 
+# The desktop app is a client of `teo-server`: the window, a log and a
+# supervisor, with every command living in the server. Ship the app without the
+# sidecar and it opens, reports that the local server did not start, and can do
+# nothing — so this is part of building it, not an extra.
+# macOS ships bash 3.2, where "set -u" treats expanding an empty array as an
+# unbound variable — which is what happens on an Intel Mac, where no --target is
+# passed. The ${a[@]+...} form expands to nothing instead of failing.
+echo "==> Building the server sidecar"
+cargo build --release -p teo-server ${target_args[@]+"${target_args[@]}"}
+node scripts/stage-sidecar.mjs
+config_args+=(--config src-tauri/tauri.sidecar.conf.json)
+
 if [[ -n "${APPLE_SIGNING_IDENTITY:-}" ]]; then
   echo "==> Signing as ${APPLE_SIGNING_IDENTITY}"
 else
@@ -72,7 +84,7 @@ else
 fi
 
 echo "==> Building"
-npm run tauri:build -w @teo/desktop -- "${target_args[@]}" "${config_args[@]}"
+npm run tauri:build -w @teo/desktop -- ${target_args[@]+"${target_args[@]}"} "${config_args[@]}"
 
 echo
 echo "==> Done. Installers:"

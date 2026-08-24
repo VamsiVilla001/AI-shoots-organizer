@@ -6,7 +6,7 @@
 // packaging step, not an optimisation.
 //
 //   node scripts/stage-sidecar.mjs      # after cargo build --release -p teo-server
-import { copyFileSync, existsSync, mkdirSync, statSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -14,11 +14,20 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const staged = join(root, 'dist-resources')
 const name = process.platform === 'win32' ? 'teo-server.exe' : 'teo-server'
 
-const candidates = [
-  join(root, 'target', 'release', name),
-  join(root, 'target', 'aarch64-apple-darwin', 'release', name),
-  join(root, 'target', 'x86_64-apple-darwin', 'release', name),
-]
+// `cargo build --target <triple>` writes to `target/<triple>/release`, not
+// `target/release`, and CI passes a triple on every platform — so the triples
+// are discovered rather than listed. Hard-coding them meant a Windows CI build
+// left the sidecar unstaged and the installer shipped an app with no server.
+const targetDir = join(root, 'target')
+const triples = existsSync(targetDir)
+  ? readdirSync(targetDir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && entry.name !== 'release' && entry.name !== 'debug')
+      .map((entry) => join(targetDir, entry.name, 'release', name))
+  : []
+
+// A plain `--release` build first: it is what a local build produces, and what
+// the build scripts document.
+const candidates = [join(targetDir, 'release', name), ...triples]
 
 const source = candidates.find(existsSync)
 if (!source) {

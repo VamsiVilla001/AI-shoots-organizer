@@ -74,9 +74,14 @@ bash scripts/build-macos.sh
 ```
 
 The script checks the prerequisites, fetches the models, bundles them if they
-are present, builds for `aarch64-apple-darwin`, and prints where the `.dmg`
-landed (`target/aarch64-apple-darwin/release/bundle/dmg/`). Expect 10–20
-minutes on a cold build — ONNX Runtime and the webview crates dominate.
+are present, builds and stages the `teo-server` sidecar, builds for
+`aarch64-apple-darwin`, and prints where the `.dmg` landed
+(`target/aarch64-apple-darwin/release/bundle/dmg/`). Expect 10–20 minutes on a
+cold build — ONNX Runtime and the webview crates dominate.
+
+The sidecar step matters as much as the models: since the shell became a client
+of `teo-server`, a `.dmg` built without it installs an app that opens, reports
+that the local server did not start, and can do nothing else.
 
 ## Path C — Windows installer by hand
 
