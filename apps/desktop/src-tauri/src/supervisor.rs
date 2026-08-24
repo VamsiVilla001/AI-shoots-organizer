@@ -60,6 +60,39 @@ struct Inner {
     restarts: usize,
 }
 
+/// The child's most recent output.
+///
+/// Without this a startup failure reads "exit code 1" and the reason is buried
+/// in a log file. With it, the error screen can quote the line that mattered —
+/// a rejected argument from a version-skewed sidecar, say, which is exactly the
+/// mistake a packaging step can make.
+#[derive(Default)]
+struct RecentOutput(Mutex<Vec<String>>);
+
+impl RecentOutput {
+    const KEEP: usize = 12;
+
+    fn push(&self, line: String) {
+        let mut lines = self.0.lock();
+        lines.push(line);
+        let excess = lines.len().saturating_sub(Self::KEEP);
+        lines.drain(..excess);
+    }
+
+    /// The last few non-empty lines, newest last.
+    fn tail(&self) -> String {
+        let lines = self.0.lock();
+        let mut kept: Vec<String> = lines
+            .iter()
+            .filter(|line| !line.trim().is_empty())
+            .cloned()
+            .collect();
+        let excess = kept.len().saturating_sub(3);
+        kept.drain(..excess);
+        kept.join(" / ")
+    }
+}
+
 pub struct Supervisor {
     inner: Mutex<Inner>,
     token: String,
@@ -67,6 +100,7 @@ pub struct Supervisor {
     executable: PathBuf,
     /// Bundle resources, where a packaged build keeps the ONNX models.
     resources: Option<PathBuf>,
+    output: Arc<RecentOutput>,
     stopping: Arc<AtomicBool>,
 }
 
@@ -82,6 +116,7 @@ impl Supervisor {
             data_dir,
             executable: executable.clone().unwrap_or_default(),
             resources,
+            output: Arc::new(RecentOutput::default()),
             stopping: Arc::new(AtomicBool::new(false)),
         };
 
@@ -160,7 +195,7 @@ impl Supervisor {
         };
 
         // The child's logs are the app's logs; without this they vanish.
-        forward_output(&mut child);
+        forward_output(&mut child, Arc::clone(&self.output));
 
         match wait_for_address(&port_file, &mut child) {
             Ok(address) => {
@@ -176,6 +211,11 @@ impl Supervisor {
             }
             Err(message) => {
                 let _ = child.kill();
+                // Give the child's own words priority: "unknown option --x" is
+                // actionable where "exit code 1" is not.
+                let said = self.output.tail();
+                let message =
+                    if said.is_empty() { message } else { format!("{message}. It said: {said}") };
                 tracing::error!("{message}");
                 let mut inner = self.inner.lock();
                 inner.error = Some(message);
@@ -283,16 +323,19 @@ fn wait_for_address(port_file: &Path, child: &mut Child) -> Result<String, Strin
     Err("the local server did not start listening within 30 seconds".to_string())
 }
 
-/// Pipes the child's stdout and stderr into this process's log.
-fn forward_output(child: &mut Child) {
+/// Pipes the child's stdout and stderr into this process's log, keeping the most
+/// recent lines for an error message.
+fn forward_output(child: &mut Child, recent: Arc<RecentOutput>) {
     for (name, pipe) in [
         ("stdout", child.stdout.take().map(|p| Box::new(p) as Box<dyn std::io::Read + Send>)),
         ("stderr", child.stderr.take().map(|p| Box::new(p) as Box<dyn std::io::Read + Send>)),
     ] {
         if let Some(pipe) = pipe {
+            let recent = Arc::clone(&recent);
             let _ = std::thread::Builder::new().name(format!("teo-server-{name}")).spawn(move || {
                 for line in BufReader::new(pipe).lines().map_while(Result::ok) {
                     tracing::info!(target: "teo_server", "{line}");
+                    recent.push(line);
                 }
             });
         }
@@ -345,6 +388,7 @@ mod tests {
             data_dir: dir.clone(),
             executable: dir.join("does-not-exist"),
             resources: None,
+            output: Arc::new(RecentOutput::default()),
             stopping: Arc::new(AtomicBool::new(false)),
         };
 
@@ -355,6 +399,20 @@ mod tests {
         assert!(status.endpoint.is_none());
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn recent_output_keeps_the_last_words() {
+        let output = RecentOutput::default();
+        for i in 0..20 {
+            output.push(format!("line {i}"));
+        }
+        output.push(String::new());
+
+        let tail = output.tail();
+        assert!(tail.contains("line 19"), "the newest line has to survive: {tail}");
+        assert!(!tail.contains("line 5"), "the oldest are dropped: {tail}");
+        assert!(!tail.contains(" / /"), "blank lines are not quoted back");
     }
 
     #[test]
