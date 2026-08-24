@@ -1169,6 +1169,114 @@ pub async fn ignore_faces(State(state): Ctx, Json(body): Json<FaceIds>) -> ApiRe
     Ok(Json(updated))
 }
 
+/// What naming one face turned into.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NameFaceResult {
+    pub person: Person,
+    /// Faces now assigned to them — more than one when the face belonged to a
+    /// cluster, because the cluster is the same person everywhere it appears.
+    pub faces_named: usize,
+    /// Their group, created if this is the first time they have been named.
+    pub group: Group,
+    /// Files gathered into that group by this naming.
+    pub files_added: usize,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NameFace {
+    pub face_id: i64,
+    pub name: String,
+    pub team: Option<String>,
+}
+
+/// Names the person in one face, and gathers their footage.
+///
+/// This is the whole sorting loop in a single call, because doing it in four
+/// round trips leaves the library half-updated when one of them fails:
+///
+/// 1. the name becomes a player, reused if that name is already known;
+/// 2. every face in the same unknown cluster is assigned to them — a cluster is
+///    one person by construction, so naming one face names them everywhere the
+///    clusterer found them;
+/// 3. albums are regenerated, which is what knows every file a player appears
+///    in;
+/// 4. a group named after them is created or topped up from that album.
+///
+/// Step 4 is the point: the answer to "who is this?" is only useful once their
+/// footage is sitting in a folder of its own. Naming a second face in the same
+/// photo does the same for that person, which is how a group photo becomes
+/// several people's groups.
+pub async fn name_face(State(state): Ctx, Json(body): Json<NameFace>) -> ApiResult<Json<NameFaceResult>> {
+    let name = body.name.trim().to_string();
+    if name.is_empty() {
+        return Err(ApiError::bad_request("give the person a name"));
+    }
+
+    let core = Arc::clone(&state.core);
+    let result = blocking(move || {
+        let (person, faces_named, shoot_id) = core.db.transaction(|conn| {
+            let face = faces::get_by_id(conn, body.face_id)?
+                .ok_or_else(|| teo_database::DbError::other("that face is no longer in the library"))?;
+
+            let person = people::get_or_create(conn, &name, body.team.as_deref())?;
+
+            // A cluster is one person wherever it appears, so naming a face in
+            // one names all of them. A face with no cluster — already reviewed,
+            // or too far from anything else — is assigned on its own.
+            let faces_named = match face.cluster_id {
+                Some(cluster_id) => clusters::name_cluster(conn, cluster_id, person.id)?,
+                None => faces::assign_many(conn, &[face.id], person.id)?,
+            };
+
+            logs::record_quiet(
+                conn,
+                logs::EVENT_PLAYER_ASSIGNMENT,
+                Some(face.shoot_id),
+                Some(face.media_id),
+                Some(person.id),
+                Some(&format!("named from a face; {faces_named} face(s) assigned")),
+            );
+
+            Ok((person, faces_named, face.shoot_id))
+        })?;
+
+        // Albums are derived from assignments, so they have to catch up before
+        // they can say which files this player appears in.
+        let (group, files_added) = core.db.transaction(|conn| {
+            albums::regenerate(conn, shoot_id)?;
+
+            let album = albums::list(conn, shoot_id)?.into_iter().find(|album| {
+                album.album_type == AlbumType::Player.as_str() && album.person_ids.contains(&person.id)
+            });
+
+            let group = groups::get_or_create(conn, shoot_id, &person.name, Some(person.id))?;
+            let files_added = match album {
+                Some(album) => {
+                    let media = albums::media_ids(conn, album.id, None)?;
+                    groups::add_media(conn, group.id, &media)?
+                }
+                // No album means the assignment produced no visible media yet,
+                // which is possible if every face on it was ignored.
+                None => 0,
+            };
+
+            let group = groups::get_by_id(conn, group.id)?
+                .ok_or_else(|| teo_database::DbError::other("that group no longer exists"))?;
+            Ok((group, files_added))
+        })?;
+
+        events::emit(core.sink(), events::LIBRARY_CHANGED, ());
+        events::shoot_changed(core.sink(), shoot_id, "groups");
+
+        Ok(NameFaceResult { person, faces_named, group, files_added })
+    })
+    .await?;
+
+    Ok(Json(result))
+}
+
 // ---------------------------------------------------------------------------
 // Export
 // ---------------------------------------------------------------------------

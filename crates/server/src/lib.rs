@@ -138,6 +138,8 @@ fn protected() -> Router<Arc<ServerState>> {
         .route("/api/faces/reject", post(api::reject_faces))
         .route("/api/faces/assign", post(api::assign_faces))
         .route("/api/faces/not-a-face", post(api::ignore_faces))
+        // Naming a person from one face, and gathering their footage with it.
+        .route("/api/faces/name", post(api::name_face))
         // export
         .route("/api/exports", get(api::list_exports).post(api::start_export))
         .route("/api/exports/preview", post(api::preview_export))

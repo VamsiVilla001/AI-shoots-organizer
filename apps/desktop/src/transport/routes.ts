@@ -176,6 +176,11 @@ const ROUTES: Record<string, (args: Args) => HttpRequestSpec> = {
     body: { faceIds: a.faceIds, personId: a.personId, personName: a.personName },
   }),
   ignore_faces: (a) => ({ method: 'POST', path: '/api/faces/not-a-face', body: { faceIds: a.faceIds } }),
+  name_face: (a) => ({
+    method: 'POST',
+    path: '/api/faces/name',
+    body: { faceId: a.faceId, name: a.name, team: a.team },
+  }),
 
   // --- export --------------------------------------------------------------
   preview_export: (a) => ({

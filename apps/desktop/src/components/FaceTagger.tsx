@@ -1,14 +1,12 @@
 /**
- * Naming one face by clicking it, the way tagging a photo works everywhere else.
+ * Naming one face by clicking it — the quick path through the same operation the
+ * guided flow uses.
  *
  * A photo with five people in it has five answers to "who is this?", so the
- * question has to be asked about a *face*, not about the file. Clicking a box in
- * the viewer opens this next to it: type or pick a player, and only that face is
- * assigned.
- *
- * "Tag & add to group" is here because identifying someone is rarely the point
- * on its own — the reason to know it is Jonathan is to get the shot into
- * Jonathan's folder.
+ * question is asked about a *face*. Answering it does the whole job: name_face
+ * assigns that face's cluster to the person, catches the albums up, and gathers
+ * every file they appear in into a group named after them. Both paths call it,
+ * so clicking a box and walking the guided flow cannot drift apart.
  */
 
 import { useEffect, useRef, useState } from 'react'
@@ -21,8 +19,6 @@ export function FaceTagger(props: {
   face: Face
   /** Current name, when the face already has one. */
   currentName: string | null
-  /** The shoot this media belongs to, for the group action. */
-  shootId: number
   mediaId: number
   onClose: () => void
 }) {
@@ -55,33 +51,21 @@ export function FaceTagger(props: {
     ])
   }
 
-  /** Assigns the face, and optionally files the photo into that person's group. */
+  /** Names the person, and gathers their footage into a group. */
   const tag = useMutation({
-    mutationFn: async (alsoGroup: boolean) => {
+    mutationFn: () => {
       const trimmed = name.trim()
       if (!trimmed) throw new Error('type or choose a name first')
-
-      const existing = people.data?.find((p) => p.name.toLowerCase() === trimmed.toLowerCase())
-      await api.assignFaces([props.face.id], existing?.id ?? null, existing ? null : trimmed)
-
-      if (alsoGroup) {
-        // The group is named after the person; `groupName` creates it if this is
-        // the first shot they appear in.
-        await api.addMediaToGroup({
-          shootId: props.shootId,
-          groupName: trimmed,
-          mediaIds: [props.mediaId],
-        })
-      }
-      return { name: trimmed, alsoGroup }
+      return api.nameFace(props.face.id, trimmed)
     },
-    onSuccess: async ({ name: tagged, alsoGroup }) => {
+    onSuccess: async (result) => {
       await refresh()
       pushNotice({
         level: 'success',
-        message: alsoGroup
-          ? `Tagged ${tagged} and added this file to their group.`
-          : `Tagged ${tagged}.`,
+        message:
+          result.filesAdded > 0
+            ? `${result.person.name}: ${result.filesAdded} file(s) gathered into their group.`
+            : `${result.person.name} named. Their group already had every file they appear in.`,
       })
       props.onClose()
     },
@@ -124,7 +108,7 @@ export function FaceTagger(props: {
         value={name}
         onChange={(e) => setName(e.target.value)}
         onKeyDown={(e) => {
-          if (e.key === 'Enter' && name.trim()) tag.mutate(false)
+          if (e.key === 'Enter' && name.trim()) tag.mutate()
           if (e.key === 'Escape') props.onClose()
         }}
         placeholder="Player name"
@@ -138,19 +122,15 @@ export function FaceTagger(props: {
       {error && <div style={{ color: 'var(--error)', fontSize: 12 }}>{error}</div>}
 
       <div className="face-tagger-actions">
-        <button className="small primary" disabled={busy || !name.trim()} onClick={() => tag.mutate(false)}>
-          Tag
-        </button>
         <button
-          className="small"
+          className="small primary"
           disabled={busy || !name.trim()}
-          title="Tag this face and put the photo in that person's group"
-          onClick={() => tag.mutate(true)}
+          title="Name this person and gather every file they appear in into their group"
+          onClick={() => tag.mutate()}
         >
-          Tag &amp; add to group
+          {tag.isPending ? 'Gathering…' : 'Name & group'}
         </button>
       </div>
-
       <div className="face-tagger-actions">
         {props.face.personId != null && (
           <button className="small" disabled={busy} onClick={() => clear.mutate()}>

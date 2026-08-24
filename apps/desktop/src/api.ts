@@ -29,6 +29,7 @@ import type {
   MediaGroupLink,
   MediaQuery,
   ModelStatus,
+  NameFaceResult,
   Person,
   PersonSummary,
   ProcessingProgress,
@@ -155,6 +156,12 @@ export const assignFaces = (
   personName: string | null,
 ) => call<number>('assign_faces', { faceIds, personId, personName })
 export const ignoreFaces = (faceIds: number[]) => call<number>('ignore_faces', { faceIds })
+/**
+ * Names the person in one face and gathers their footage: the cluster becomes
+ * them, albums catch up, and a group named after them is filled.
+ */
+export const nameFace = (faceId: number, name: string, team?: string | null) =>
+  call<NameFaceResult>('name_face', { faceId, name, team: team ?? null })
 
 // --- video -----------------------------------------------------------------
 

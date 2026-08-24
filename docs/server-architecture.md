@@ -335,6 +335,35 @@ loopback with a URL token. Then `Stop-Process` on the child: the supervisor
 restarted it on a new port (restart count 1), the transport re-pointed itself,
 and thumbnails came back on the new port with no error screen and no reload.
 
+## Naming a person gathers their footage
+
+The sequence the work actually follows: choose a photo, ask who is in it, name
+one of them, and their footage lands in a folder-shaped group. Naming a second
+face in the same photo does the same for that person, which is how one group
+shot becomes several people's groups.
+
+`POST /api/faces/name` is that whole loop in one call, because doing it in four
+round trips leaves the library half-updated when one of them fails:
+
+1. the name becomes a player, reused when the name is already known;
+2. every face in the same unknown cluster is assigned to them — a cluster is one
+   person by construction, so naming one face names them everywhere the
+   clusterer found them;
+3. albums are regenerated, which is what knows every file a player appears in;
+4. a group named after them is created or topped up from that album.
+
+Step 4 is the point. Naming without it leaves the editor sorting by hand anyway.
+
+Two entry points, one operation: **Name people (N)** in the viewer and **Name
+people in it** on a single selected file in the Sort screen both open the same
+guided flow, and the click-to-tag popover calls the same command, so the quick
+path and the guided path cannot drift apart.
+
+Measured on a copy of a real 183-file shoot: naming one face in a five-face
+photo matched 71 faces and gathered **72 files** into that person's group;
+naming a second face in the same photo gathered another 20 into theirs, taking
+the shoot from 0 sorted to 80 in two answers.
+
 ## Naming a face rather than a file
 
 A photo with five people in it has five answers to "who is this?", so the

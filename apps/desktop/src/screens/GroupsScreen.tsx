@@ -20,6 +20,7 @@ import { folderNameFor } from '../folders'
 import { formatCount } from '../media'
 import { MediaGrid } from '../components/MediaGrid'
 import { Modal } from '../components/Modal'
+import { NamePeopleModal } from '../components/NamePeopleModal'
 import { ProgressPanel } from '../components/ProgressPanel'
 import { useUi } from '../store'
 
@@ -41,6 +42,8 @@ function GroupsBody({ shootId }: { shootId: number }) {
   const [creating, setCreating] = useState(false)
   const [editing, setEditing] = useState<Group | null>(null)
   const [dropTarget, setDropTarget] = useState<number | null>(null)
+  /** The photo whose people are being named, if any. */
+  const [namingMediaId, setNamingMediaId] = useState<number | null>(null)
   /** The files the current drag carries — set when the drag starts. */
   const dragPayload = useRef<number[]>([])
   const lastClicked = useRef<number | null>(null)
@@ -349,6 +352,9 @@ function GroupsBody({ shootId }: { shootId: number }) {
           {selected.size > 0 && (
             <SelectionBar
               count={selected.size}
+              onNamePeople={
+                selected.size === 1 ? () => setNamingMediaId([...selected][0]) : undefined
+              }
               groups={groups.data ?? []}
               activeGroup={activeGroup}
               busy={sortInto.isPending || removeFromGroup.isPending}
@@ -369,6 +375,17 @@ function GroupsBody({ shootId }: { shootId: number }) {
           )}
         </section>
       </div>
+
+      {namingMediaId !== null && (
+        <NamePeopleModal
+          mediaId={namingMediaId}
+          onClose={() => {
+            setNamingMediaId(null)
+            setSelected(new Set())
+            refresh()
+          }}
+        />
+      )}
 
       {creating && (
         <NewGroupModal
@@ -405,6 +422,8 @@ function SelectionBar(props: {
   groups: Group[]
   activeGroup: Group | null
   busy: boolean
+  /** Only offered for a single photo: naming asks who is in *this* one. */
+  onNamePeople?: () => void
   onSortInto: (target: Group | string, move: boolean) => void
   onRemove: () => void
   onClear: () => void
@@ -455,6 +474,15 @@ function SelectionBar(props: {
       {props.activeGroup && (
         <button className="danger" disabled={props.busy} onClick={props.onRemove}>
           Remove from {props.activeGroup.name}
+        </button>
+      )}
+      {props.onNamePeople && (
+        <button
+          className="small"
+          title="Read the faces in this photo and name them one at a time"
+          onClick={props.onNamePeople}
+        >
+          Name people in it
         </button>
       )}
       <div style={{ flex: 1 }} />

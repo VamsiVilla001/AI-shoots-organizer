@@ -230,6 +230,21 @@ export interface GroupStats {
   ungrouped: number
 }
 
+/**
+ * What naming one face turned into.
+ *
+ * Naming spreads: the face's whole cluster becomes that person, and every file
+ * they appear in is gathered into a group named after them.
+ */
+export interface NameFaceResult {
+  person: Person
+  /** Faces now assigned to them — more than one when the face had a cluster. */
+  facesNamed: number
+  group: Group
+  /** Files this naming added to that group. */
+  filesAdded: number
+}
+
 /** What seeding groups from the AI albums did. */
 export interface SeedResult {
   groups: number

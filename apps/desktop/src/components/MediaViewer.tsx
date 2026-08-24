@@ -12,6 +12,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import * as api from '../api'
 import { FaceTagger } from './FaceTagger'
+import { NamePeopleModal } from './NamePeopleModal'
 import { formatConfidence, formatCount, formatTime, fullUrl, videoUrl } from '../media'
 import { useUi } from '../store'
 
@@ -20,6 +21,8 @@ export function MediaViewer(props: { mediaId: number }) {
   const [showBoxes, setShowBoxes] = useState(true)
   /** The face being named, if any. */
   const [taggingId, setTaggingId] = useState<number | null>(null)
+  /** The guided flow: read the faces, pick a person, name them, repeat. */
+  const [naming, setNaming] = useState(false)
   const videoRef = useRef<HTMLVideoElement>(null)
 
   const media = useQuery({
@@ -83,6 +86,11 @@ export function MediaViewer(props: { mediaId: number }) {
           </span>
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
+          {item.mediaType === 'photo' && visibleFaces.length > 0 && (
+            <button className="small primary" onClick={() => setNaming(true)}>
+              Name people ({formatCount(visibleFaces.length)})
+            </button>
+          )}
           {item.mediaType === 'photo' && (
             <button className="small" onClick={() => setShowBoxes((v) => !v)}>
               {showBoxes ? 'Hide faces (b)' : 'Show faces (b)'}
@@ -138,7 +146,6 @@ export function MediaViewer(props: { mediaId: number }) {
                       <FaceTagger
                         face={face}
                         currentName={personName(face.personId)}
-                        shootId={item.shootId}
                         mediaId={item.id}
                         onClose={() => setTaggingId(null)}
                       />
@@ -151,6 +158,8 @@ export function MediaViewer(props: { mediaId: number }) {
           )}
         </div>
       </div>
+
+      {naming && <NamePeopleModal mediaId={item.id} onClose={() => setNaming(false)} />}
 
       {item.mediaType === 'video' && timelines.data && timelines.data.length > 0 && (
         <div className="timeline-chips">
