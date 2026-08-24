@@ -5,6 +5,10 @@ load-bearing decision went the way it did, what was actually verified, and what
 is knowingly unfinished. Written so the next person — or the next agent — can
 pick this up without reconstructing it from diffs.
 
+Sections 1–11 are organised by concern. **Section 12 is the conversation
+itself** — the requests in order, and the two places where what was asked for and
+what was first built came apart.
+
 **Branch:** `feat/server-extraction` (14 commits, on top of three inherited from
 `V1`)
 **Base:** `cae09d8` "Esports AI Media Organiser: local-first player-wise shoot
@@ -372,3 +376,86 @@ npm run package:win
 | Route table (server) | `crates/server/src/lib.rs::protected` |
 | Route table (client) | `apps/desktop/src/transport/routes.ts` |
 | Child-process supervision | `apps/desktop/src-tauri/src/supervisor.rs` |
+
+---
+
+## 12. Appendix — how the conversation went
+
+Sections 1–11 are organised by concern. This one is chronological: what was
+asked, in the requester's own framing, and what changed as a result. It exists
+because the two course corrections below are the most useful thing in this
+document and they are invisible in the commit history — a commit shows what was
+built, not what was built *instead of* something else.
+
+The whole thing was one session on 23–24 August 2026, interrupted once by a
+usage limit and resumed.
+
+### 12.1 The requests, in order
+
+| # | Asked | What happened |
+| --- | --- | --- |
+| 1 | Describe the app's purpose — cut down the time editors spend sorting footage by whose it is; name groups in the app; those names become folders in a **new** directory; the raw footage folder is a source and must not be altered. *"check where is application now as per this requirement and start working where it lacks"* | Audited the app against the requirement. Found the AI half done and the editor's half missing entirely: albums are derived and cannot hold a human decision. Built manual grouping (§3). |
+| 2 | *"Build the changes into app and launch it"* | Two bugs surfaced before it ran: `cargo build --release` produces a *dev* Tauri app, and the manual-grouping migration collided with `V1`'s migration 2 (§4). After fixing both, the app ran on the real library. |
+| 3 | *"launch the tauri and the inbuilt is chromium based"* | Took the hint: attached to the WebView2 instance over the Chrome DevTools Protocol, which became the verification method for every later phase — reading the real DOM instead of asserting a build succeeded. |
+| 4 | *"Now give me a way to deploy it for others to use. I need a mac studio version"* | CI workflow building macOS (Apple Silicon) and Windows, a Mac build script, signing and notarisation documented, models and the DirectML redistributable bundled, and a Windows installer built and inspected (§5). Stated plainly that no macOS build could be produced or tested from this machine. |
+| 5 | Dropped `TASKS-server-refactor.md` — a seven-phase plan for "one core, two front doors" — with *"Start with it"* | Read the plan and the reference docs it names, then worked phases 0–1: extracted `teo-app-core`, replaced Tauri events with `ProgressSink` (§6). |
+| 6 | *"start with Phase 2"* | The HTTP server: 62 commands ported one-to-one, SSE, media routes, a jailed filesystem browser, bearer auth. Driven end to end with `curl` against a real shoot. |
+| 7 | *"Start phase 3"* | One React bundle, two transports. Verified by driving the browser edition in an actual browser — creating a shoot through the jailed folder picker, watching it process, sorting, exporting. |
+| 8 | *"Phase 4 start"* | The desktop shell became a client of its own loopback server; `src-tauri` fell to 601 lines and 5.7 MB. Cross-origin realities (CORS, `SameSite`) only appeared here, because only here is the page a different origin from the API. |
+| 9 | *"a small add on. When naming a photo if there are multiple people in it it shall ask for which particular person am I looking for… like how we tag in instagram"* | Built click-to-tag on the face boxes in the viewer. **Wrong scope** — see 12.2. |
+| 10 | *"No the sequence shall be…"* — select a photo, read its faces, ask which person is being named, and on naming, **a group of that person's photos is prepared**; name another face and the same happens for them | Rebuilt it as a propagating operation (§7): one answer names the person everywhere the clusterer found them and gathers every file they appear in into a group. Measured at 72 files from one answer. |
+| 11 | *"Make a doc of this chat's whole context"* | This document. |
+| 12 | *"I cant find the worklog doc written in docs"* | It was in the worktree, not the main checkout — see 12.3. Copied the three new docs into the main folder and explained how to bring the code across. |
+
+### 12.2 The two corrections, and what they teach
+
+**Naming was scoped as tagging.** Request 9 described clicking a person in a
+photo, "like how we tag in Instagram", and that was built literally: clickable
+face boxes, a popover, one face assigned per answer. Request 10 made the actual
+requirement explicit — naming has to *propagate*. The point of identifying
+someone is not the label; it is that their footage ends up in a folder. One
+answer now matches every face in that person's cluster and gathers every file
+they appear in.
+
+The tell was in the original wording and was missed: *"a group of such persons
+photos shall be prepared"*. The lesson is not "ask more questions" — it is that a
+request describing a **mechanism** ("click the person") usually also states an
+**outcome**, and the outcome is the requirement. Mechanism without outcome ships
+something that demos well and saves nobody any time.
+
+**The task list's route table conflicted with the code.** Phase 2 asked for
+`POST /api/shoots/:id/pause`, but pausing is process-wide in the core, so a
+per-shoot URL would have been a lie. Four such deviations were built differently
+and written down with reasons rather than followed to the letter or silently
+dropped. The plan was a good plan; it was written before the code it describes
+had settled.
+
+### 12.3 Why the doc could not be found
+
+Every change in this session was made in a git worktree —
+`.claude/worktrees/footage-grouping-nas-org-25d54b`, branch
+`feat/server-extraction` — while the main checkout stayed on `V1`. The desktop
+app that was launched and used throughout was built *from* that worktree, so the
+features were real and working while none of the source or docs appeared in the
+main folder.
+
+Worth knowing for next time: the main checkout also holds roughly 174 lines of
+uncommitted `V1` work touching six of the same frontend files this branch
+rewrote. Merging on top of that without committing it first would tangle them,
+which is why the merge was left as a decision rather than performed.
+
+### 12.4 What verification looked like in practice
+
+The pattern that caught the most, in rough order of how much each found:
+
+1. **Run the real thing against real data.** The migration collision, the dev
+   build, the CORS failure and the cookie failure were all invisible to the test
+   suite and obvious on launch.
+2. **Drive the actual UI**, not the API underneath it. The browser edition was
+   verified by clicking through a shoot creation in a real browser; the desktop
+   by scripting its webview over CDP.
+3. **Write to a copy when the operation writes.** The naming flow was measured on
+   a duplicate of the live database precisely so the real one could be left
+   untouched — then confirmed untouched afterwards.
+4. **Then the gate:** 277 tests, clippy with `-D warnings`, typecheck, bundle
+   build. Necessary, and last.
