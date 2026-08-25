@@ -11,6 +11,7 @@ use image::{imageops::FilterType, DynamicImage, RgbImage};
 use crate::ffmpeg::Ffmpeg;
 use crate::formats::{self, Decoder, MediaKind};
 use crate::metadata::Orientation;
+use crate::raw;
 use crate::{MediaError, Result};
 
 /// Loads a still image, applying its EXIF orientation and capping the longest
@@ -31,18 +32,68 @@ pub fn load_image(path: &Path, orientation: u16, max_dim: Option<u32>, ffmpeg: O
             };
             img.to_rgb8()
         }
-        Decoder::Ffmpeg => {
-            let ff = ffmpeg.ok_or_else(|| {
-                MediaError::MissingFfmpeg(format!(
-                    "{} needs FFmpeg to decode",
-                    formats::extension(path).to_uppercase()
-                ))
-            })?;
-            ff.decode_still(path, max_dim)?
-        }
+        Decoder::Ffmpeg => decode_raw_or_ffmpeg(path, max_dim, ffmpeg)?,
     };
 
     Ok(apply_orientation(image, Orientation::from_exif(orientation)))
+}
+
+/// Decodes a file FFmpeg is nominally responsible for, preferring the JPEG a
+/// camera embedded in it.
+///
+/// The order is deliberate. A useful preview wins outright: it is the camera's
+/// own rendering, it costs a seek rather than a demosaic, and for RAF it is the
+/// only thing that works at all. A preview too small to be the picture yields to
+/// FFmpeg — but is still better than nothing, so it is kept in reserve for when
+/// FFmpeg cannot open the file either. HEIC and AVIF never reach the preview
+/// path at all; they are finished images FFmpeg decodes properly.
+fn decode_raw_or_ffmpeg(path: &Path, max_dim: Option<u32>, ffmpeg: Option<&Ffmpeg>) -> Result<RgbImage> {
+    let preview = if raw::is_raw(path) { raw::best_preview(path) } else { None };
+
+    if let Some(preview) = preview.as_ref().filter(|p| p.is_useful()) {
+        tracing::debug!(
+            file = %path.display(),
+            width = preview.width,
+            height = preview.height,
+            "decoding the embedded preview instead of the sensor data"
+        );
+        return decode_preview(path, preview, max_dim);
+    }
+
+    let ffmpeg_error = match ffmpeg {
+        Some(ff) => match ff.decode_still(path, max_dim) {
+            Ok(image) => return Ok(image),
+            Err(e) => e,
+        },
+        None => MediaError::MissingFfmpeg(format!(
+            "{} needs FFmpeg to decode",
+            formats::extension(path).to_uppercase()
+        )),
+    };
+
+    match preview.as_ref() {
+        Some(preview) => {
+            tracing::debug!(
+                file = %path.display(),
+                width = preview.width,
+                height = preview.height,
+                "FFmpeg could not decode this file; using its small embedded preview"
+            );
+            decode_preview(path, preview, max_dim)
+        }
+        None => Err(ffmpeg_error),
+    }
+}
+
+fn decode_preview(path: &Path, preview: &raw::Preview, max_dim: Option<u32>) -> Result<RgbImage> {
+    debug_assert!(preview.complete, "a truncated preview is for indexing, not decoding");
+    let image = image::load_from_memory(&preview.bytes)
+        .map_err(|e| MediaError::Decode(format!("{}: embedded preview: {e}", path.display())))?;
+    let image = match max_dim {
+        Some(max) if image.width().max(image.height()) > max => resize_within(&image, max),
+        _ => image,
+    };
+    Ok(image.to_rgb8())
 }
 
 /// Grabs one frame from a video, already oriented and downscaled.

@@ -8,6 +8,7 @@ use exif::{In, Tag, Value};
 
 use crate::ffmpeg::Ffmpeg;
 use crate::formats::{Decoder, MediaKind};
+use crate::raw;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Metadata {
@@ -99,12 +100,33 @@ pub fn read(path: &Path, kind: MediaKind, decoder: Decoder, ffmpeg: Option<&Ffmp
                     meta.width = Some(w);
                     meta.height = Some(h);
                 }
-            } else if let Some(ff) = ffmpeg {
-                // HEIC and raw files still carry EXIF, but their dimensions
-                // have to come from the decoder.
-                if let Ok(info) = ff.probe(path) {
-                    meta.width = meta.width.or(info.width);
-                    meta.height = meta.height.or(info.height);
+            } else {
+                // A raw file is not something the EXIF reader can open: it sees
+                // Fujifilm's own header, not a JPEG or a TIFF, so orientation
+                // came back as 1 and every RAF was stored unrotated. The
+                // embedded preview *is* a JPEG, complete with the EXIF the
+                // camera wrote, so read it from there.
+                // The head of the preview only: its dimensions and EXIF sit at
+                // the front, and the decode pass will read the rest.
+                let preview = if raw::is_raw(path) { raw::preview_metadata(path) } else { None };
+                if let Some(preview) = preview.as_ref() {
+                    if meta.orientation == 1 || meta.captured_at.is_none() {
+                        read_exif_from_bytes(&preview.bytes, &mut meta);
+                    }
+                    // The preview's dimensions, not the sensor's — which is what
+                    // the app displays anyway, and the alternative here is null.
+                    meta.width = meta.width.or(Some(preview.width));
+                    meta.height = meta.height.or(Some(preview.height));
+                }
+
+                if let Some(ff) = ffmpeg {
+                    // HEIC and AVIF still need the decoder for their dimensions.
+                    if meta.width.is_none() || meta.height.is_none() {
+                        if let Ok(info) = ff.probe(path) {
+                            meta.width = meta.width.or(info.width);
+                            meta.height = meta.height.or(info.height);
+                        }
+                    }
                 }
             }
         }
@@ -140,7 +162,22 @@ fn read_exif_into(path: &Path, meta: &mut Metadata) {
     let Ok(exif) = exif::Reader::new().read_from_container(&mut reader) else {
         return; // PNG, WEBP and stripped JPEGs simply have nothing to read.
     };
+    fill_from_exif(&exif, meta);
+}
 
+/// The same read, against bytes rather than a path.
+///
+/// Used for the JPEG inside a raw file: the container itself is opaque to the
+/// EXIF reader, while the preview it holds carries everything the camera wrote.
+fn read_exif_from_bytes(bytes: &[u8], meta: &mut Metadata) {
+    let mut cursor = std::io::Cursor::new(bytes);
+    let Ok(exif) = exif::Reader::new().read_from_container(&mut cursor) else {
+        return;
+    };
+    fill_from_exif(&exif, meta);
+}
+
+fn fill_from_exif(exif: &exif::Exif, meta: &mut Metadata) {
     if let Some(field) = exif.get_field(Tag::Orientation, In::PRIMARY) {
         if let Some(v) = field.value.get_uint(0) {
             meta.orientation = v as u16;
@@ -165,14 +202,14 @@ fn read_exif_into(path: &Path, meta: &mut Metadata) {
         }
     }
 
-    meta.camera_make = ascii_field(&exif, Tag::Make);
-    meta.camera_model = ascii_field(&exif, Tag::Model);
-    meta.lens = ascii_field(&exif, Tag::LensModel);
+    meta.camera_make = ascii_field(exif, Tag::Make);
+    meta.camera_model = ascii_field(exif, Tag::Model);
+    meta.lens = ascii_field(exif, Tag::LensModel);
     meta.iso = exif
         .get_field(Tag::PhotographicSensitivity, In::PRIMARY)
         .and_then(|f| f.value.get_uint(0));
-    meta.focal_length = rational_field(&exif, Tag::FocalLength);
-    meta.aperture = rational_field(&exif, Tag::FNumber);
+    meta.focal_length = rational_field(exif, Tag::FocalLength);
+    meta.aperture = rational_field(exif, Tag::FNumber);
     meta.shutter = exif
         .get_field(Tag::ExposureTime, In::PRIMARY)
         .map(|f| f.display_value().to_string());
