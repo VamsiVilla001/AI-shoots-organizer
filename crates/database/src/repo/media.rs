@@ -278,6 +278,17 @@ pub fn set_status(conn: &Connection, id: i64, status: ProcessingStatus, error: O
     Ok(())
 }
 
+/// Corrects orientation when analysis defensively re-reads the source file.
+/// Indexing normally writes this first; keeping the repair narrow avoids
+/// replacing unrelated metadata with fallbacks after a transient read issue.
+pub fn set_orientation(conn: &Connection, id: i64, orientation: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE media SET orientation = ?2 WHERE id = ?1",
+        params![id, orientation.clamp(1, 8)],
+    )?;
+    Ok(())
+}
+
 pub fn refresh_face_count(conn: &Connection, id: i64) -> Result<()> {
     conn.execute(
         "UPDATE media SET face_count = (SELECT COUNT(*) FROM faces WHERE media_id = ?1 AND assignment != 'ignored')

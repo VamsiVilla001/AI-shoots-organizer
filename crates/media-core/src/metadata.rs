@@ -134,6 +134,33 @@ pub fn read(path: &Path, kind: MediaKind, decoder: Decoder, ffmpeg: Option<&Ffmp
     meta
 }
 
+/// Reads only the orientation and distinguishes "upright" from "could not
+/// read orientation". Analysis uses this narrower API so a transient EXIF or
+/// FFprobe failure cannot replace a valid indexed rotation with the default 1.
+pub fn read_orientation(path: &Path, kind: MediaKind, ffmpeg: Option<&Ffmpeg>) -> Option<u16> {
+    match kind {
+        MediaKind::Photo => {
+            let file = File::open(path).ok()?;
+            let mut reader = BufReader::new(file);
+            let exif = exif::Reader::new().read_from_container(&mut reader).ok()?;
+            let orientation = exif
+                .get_field(Tag::Orientation, In::PRIMARY)?
+                .value
+                .get_uint(0)? as u16;
+            (1..=8).contains(&orientation).then_some(orientation)
+        }
+        MediaKind::Video => {
+            let rotation = ffmpeg?.probe(path).ok()?.rotation.rem_euclid(360);
+            Some(match rotation {
+                90 => 6,
+                180 => 3,
+                270 => 8,
+                _ => 1,
+            })
+        }
+    }
+}
+
 fn read_exif_into(path: &Path, meta: &mut Metadata) {
     let Ok(file) = File::open(path) else { return };
     let mut reader = BufReader::new(file);

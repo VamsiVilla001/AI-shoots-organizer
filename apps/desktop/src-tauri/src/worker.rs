@@ -314,6 +314,16 @@ fn run_media_job(
         Err(outcome) => return outcome,
     };
 
+    // The I/O worker and AI worker deliberately run in parallel, but a newly
+    // scanned media row starts with orientation=1 until its indexing job reads
+    // EXIF/container metadata. Running AI during that window permanently puts
+    // boxes and landmarks in the wrong coordinate system for rotated files.
+    // Waiting on this one media row preserves lane parallelism while enforcing
+    // the actual dependency.
+    if indexing_incomplete(&item) {
+        return JobOutcome::Deferred;
+    }
+
     if engine.is_none() {
         let version = state.settings_version();
         match Engine::new(&state.paths, &state.settings()) {
@@ -339,6 +349,10 @@ fn run_media_job(
         }
         Err(e) => JobOutcome::Failed(e.to_string()),
     }
+}
+
+fn indexing_incomplete(item: &teo_database::models::Media) -> bool {
+    item.processing_status == ProcessingStatus::Pending.as_str()
 }
 
 /// True while any per-file job for the shoot is still queued or running.
@@ -549,5 +563,58 @@ mod tests {
 
         // Still runnable after ten deferrals — far more than MAX_ATTEMPTS.
         assert!(jobs::claim_next(&conn, None).unwrap().is_some());
+    }
+
+    #[test]
+    fn analysis_waits_while_its_indexing_job_is_running() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+        let shoot = shoots::create(&conn, "S", "C:\\s").unwrap();
+        let media_id = media_repo::upsert(
+            &conn,
+            &teo_database::models::NewMedia {
+                shoot_id: shoot.id,
+                path: "C:\\s\\rotated.jpg".into(),
+                filename: "rotated.jpg".into(),
+                media_type: MediaType::Photo,
+                extension: "jpg".into(),
+                file_size: 1,
+                content_key: "rotated".into(),
+                captured_at: None,
+            },
+        )
+        .unwrap();
+        jobs::enqueue(
+            &conn,
+            shoot.id,
+            JobKind::Thumbnail,
+            Some(media_id),
+            stages::priority::INDEX,
+            None,
+        )
+        .unwrap();
+        jobs::enqueue(
+            &conn,
+            shoot.id,
+            JobKind::AnalysePhoto,
+            Some(media_id),
+            stages::priority::ANALYSE_PHOTO,
+            None,
+        )
+        .unwrap();
+
+        // Recreate the production race: one lane has claimed indexing while
+        // the compute lane has independently claimed analysis for the same
+        // row. The row must still make analysis wait.
+        let indexing = jobs::claim_next_io(&conn).unwrap().unwrap();
+        let analysis = jobs::claim_next_compute(&conn).unwrap().unwrap();
+        assert_eq!(indexing.kind, JobKind::Thumbnail.as_str());
+        assert_eq!(analysis.kind, JobKind::AnalysePhoto.as_str());
+        let before = media_repo::get_by_id(&conn, media_id).unwrap().unwrap();
+        assert!(indexing_incomplete(&before));
+
+        media_repo::set_status(&conn, media_id, ProcessingStatus::Thumbnailed, None).unwrap();
+        let after = media_repo::get_by_id(&conn, media_id).unwrap().unwrap();
+        assert!(!indexing_incomplete(&after));
     }
 }

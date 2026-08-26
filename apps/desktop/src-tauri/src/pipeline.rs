@@ -118,9 +118,11 @@ impl Engine {
     /// The returned box remains normalised against the oriented image, exactly
     /// like detector-produced boxes.
     pub fn embed_manual_face(&mut self, item: &Media, bbox: BoundingBox) -> Result<(Vec<f32>, f64)> {
+        let path = Path::new(&item.path);
+        let orientation = source_media_orientation(item, MediaKind::Photo, self.ffmpeg.as_ref());
         let image = teo_media_core::decode::load_image(
-            Path::new(&item.path),
-            item.orientation.clamp(1, 8) as u16,
+            path,
+            orientation,
             Some(self.settings.analysis_max_dim),
             self.ffmpeg.as_ref(),
         )?;
@@ -147,7 +149,20 @@ impl Engine {
     /// Full analysis of a still image.
     pub fn analyse_photo(&mut self, db: &Database, item: &Media) -> Result<AnalysisOutcome> {
         let path = PathBuf::from(&item.path);
-        let orientation = item.orientation.clamp(1, 8) as u16;
+        // Indexing is the normal source of metadata, but reading EXIF again is
+        // cheap compared with inference and protects this coordinate system
+        // even if a stale database row came from an older build.
+        let orientation = source_media_orientation(item, MediaKind::Photo, self.ffmpeg.as_ref());
+        if i64::from(orientation) != item.orientation {
+            tracing::warn!(
+                media = item.id,
+                indexed = item.orientation,
+                source = orientation,
+                "correcting stale photo orientation before face analysis"
+            );
+            let conn = db.conn()?;
+            media_repo::set_orientation(&conn, item.id, i64::from(orientation))?;
+        }
 
         let image = teo_media_core::decode::load_image(
             &path,
@@ -178,7 +193,17 @@ impl Engine {
             return Err(PipelineError::FfmpegUnavailable);
         };
         let path = PathBuf::from(&item.path);
-        let orientation = item.orientation.clamp(1, 8) as u16;
+        let orientation = source_media_orientation(item, MediaKind::Video, Some(&ffmpeg));
+        if i64::from(orientation) != item.orientation {
+            tracing::warn!(
+                media = item.id,
+                indexed = item.orientation,
+                source = orientation,
+                "correcting stale video orientation before face analysis"
+            );
+            let conn = db.conn()?;
+            media_repo::set_orientation(&conn, item.id, i64::from(orientation))?;
+        }
         let config = self.settings.video_config();
 
         let plan = teo_video_analysis::plan_video(&ffmpeg, &path, item.duration, &config);
@@ -299,6 +324,22 @@ impl Engine {
     }
 }
 
+/// Reads orientation from the source immediately before pixels are decoded.
+/// A missing/invalid orientation falls back to the indexed value so a transient
+/// source-read failure cannot turn a valid rotation into the default upright
+/// orientation. The decode path reports missing or unsupported files itself.
+fn source_media_orientation(item: &Media, expected_kind: MediaKind, ffmpeg: Option<&Ffmpeg>) -> u16 {
+    let indexed = item.orientation.clamp(1, 8) as u16;
+    let path = Path::new(&item.path);
+    let Some((kind, _)) = formats::classify(path) else {
+        return indexed;
+    };
+    if kind != expected_kind || !path.exists() {
+        return indexed;
+    }
+    teo_media_core::metadata::read_orientation(path, kind, ffmpeg).unwrap_or(indexed)
+}
+
 /// Finds FFmpeg, honouring an explicit directory from Settings.
 pub fn discover_ffmpeg(settings: &AppSettings) -> Option<Ffmpeg> {
     let hint = settings.ffmpeg_directory.as_ref().map(PathBuf::from);
@@ -399,6 +440,31 @@ mod tests {
         image.save(path).expect("failed to write the test jpeg");
     }
 
+    /// Adds a minimal EXIF APP1 segment with only the orientation tag. Keeping
+    /// this fixture local avoids depending on a camera file or an EXIF writer.
+    fn write_oriented_jpeg(path: &std::path::Path, orientation: u16) {
+        write_jpeg(path);
+        let jpeg = std::fs::read(path).unwrap();
+        assert_eq!(&jpeg[..2], &[0xff, 0xd8]);
+
+        let mut exif = vec![
+            0xff, 0xe1, 0x00, 0x22, // APP1, 34 bytes including this length
+            b'E', b'x', b'i', b'f', 0, 0,
+            b'I', b'I', 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00, // little-endian TIFF
+            0x01, 0x00, // one IFD entry
+            0x12, 0x01, // Orientation tag
+            0x03, 0x00, // SHORT
+            0x01, 0x00, 0x00, 0x00, // count 1
+            orientation as u8, (orientation >> 8) as u8, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, // no next IFD
+        ];
+        let mut with_exif = Vec::with_capacity(jpeg.len() + exif.len());
+        with_exif.extend_from_slice(&jpeg[..2]);
+        with_exif.append(&mut exif);
+        with_exif.extend_from_slice(&jpeg[2..]);
+        std::fs::write(path, with_exif).unwrap();
+    }
+
     #[test]
     fn engine_initialization_is_process_wide_serialized() {
         const THREADS: usize = 8;
@@ -473,6 +539,46 @@ mod tests {
         assert_eq!(stored.width, Some(320));
         assert_eq!(stored.height, Some(240));
         assert!(std::path::Path::new(&stored.thumbnail_path.unwrap()).is_file());
+    }
+
+    #[test]
+    fn analysis_re_reads_orientation_from_the_source() {
+        let source = tempfile::tempdir().unwrap();
+        let photo = source.path().join("portrait.jpg");
+        write_oriented_jpeg(&photo, 6);
+
+        let db = Database::open_in_memory().unwrap();
+        let item = {
+            let conn = db.conn().unwrap();
+            let shoot = shoots::create(&conn, "Shoot", &source.path().display().to_string()).unwrap();
+            let media_id = media_repo::upsert(
+                &conn,
+                &NewMedia {
+                    shoot_id: shoot.id,
+                    path: photo.display().to_string(),
+                    filename: "portrait.jpg".into(),
+                    media_type: MediaType::Photo,
+                    extension: "jpg".into(),
+                    file_size: 1,
+                    content_key: "oriented".into(),
+                    captured_at: None,
+                },
+            )
+            .unwrap();
+            media_repo::get_by_id(&conn, media_id).unwrap().unwrap()
+        };
+
+        assert_eq!(
+            item.orientation, 1,
+            "the fresh database row recreates the stale-metadata window"
+        );
+        assert_eq!(
+            source_media_orientation(&item, MediaKind::Photo, None),
+            6,
+            "source EXIF must win at analysis time"
+        );
+        let decoded = teo_media_core::decode::load_image(&photo, 6, None, None).unwrap();
+        assert_eq!(decoded.dimensions(), (240, 320), "orientation 6 swaps the decoded axes");
     }
 
     #[test]
