@@ -20,11 +20,14 @@ interface UiState {
   /** Latest progress per shoot, pushed by the backend monitor. */
   progress: Record<number, ProgressEvent>
   exportProgress: ExportProgressEvent | null
+  /** Person ids handed from Albums to the Export screen; null means no filter. */
+  exportPersonIds: number[] | null
   notices: Notice[]
   /** Media id open in the viewer overlay, if any. */
   viewerMediaId: number | null
 
   navigate: (screen: Screen) => void
+  openExport: (personIds: number[]) => void
   openShoot: (shootId: number, screen?: Screen) => void
   setProgress: (event: ProgressEvent) => void
   setExportProgress: (event: ExportProgressEvent | null) => void
@@ -42,12 +45,21 @@ export const useUi = create<UiState>((set) => ({
   activeShootId: null,
   progress: {},
   exportProgress: null,
+  exportPersonIds: null,
   notices: [],
   viewerMediaId: null,
 
-  navigate: (screen) => set({ screen }),
+  navigate: (screen) =>
+    set({
+      screen,
+      // Opening Export from the sidebar means a fresh, unfiltered export.
+      ...(screen === 'export' ? { exportPersonIds: null } : {}),
+    }),
 
-  openShoot: (shootId, screen = 'albums') => set({ activeShootId: shootId, screen }),
+  openExport: (personIds) => set({ screen: 'export', exportPersonIds: [...personIds] }),
+
+  openShoot: (shootId, screen = 'albums') =>
+    set({ activeShootId: shootId, screen, exportPersonIds: null }),
 
   setProgress: (event) =>
     set((state) => ({ progress: { ...state.progress, [event.shootId]: event } })),
@@ -75,6 +87,7 @@ export const useUi = create<UiState>((set) => ({
       activeShootId: null,
       progress: {},
       exportProgress: null,
+      exportPersonIds: null,
       viewerMediaId: null,
     }),
 }))

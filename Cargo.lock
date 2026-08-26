@@ -4729,7 +4729,7 @@ dependencies = [
 
 [[package]]
 name = "teo-clustering"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "rayon",
  "serde",
@@ -4738,7 +4738,7 @@ dependencies = [
 
 [[package]]
 name = "teo-database"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4753,7 +4753,7 @@ dependencies = [
 
 [[package]]
 name = "teo-desktop"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4781,7 +4781,7 @@ dependencies = [
 
 [[package]]
 name = "teo-export-engine"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "filetime",
  "serde",
@@ -4792,7 +4792,7 @@ dependencies = [
 
 [[package]]
 name = "teo-face-detection"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "image",
  "num_cpus",
@@ -4804,7 +4804,7 @@ dependencies = [
 
 [[package]]
 name = "teo-face-recognition"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "image",
  "ort",
@@ -4817,7 +4817,7 @@ dependencies = [
 
 [[package]]
 name = "teo-media-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -4835,7 +4835,7 @@ dependencies = [
 
 [[package]]
 name = "teo-video-analysis"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "image",
  "serde",

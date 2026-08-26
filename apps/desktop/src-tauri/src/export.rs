@@ -221,12 +221,12 @@ fn run(
     );
 
     match error {
-        Some(message) => events::notice(&app, "error", format!("Export failed: {message}")),
-        None if status == ExportStatus::Cancelled => events::notice(&app, "warn", "Export cancelled."),
+        Some(message) => events::notice(&app, "error", format!("Copy failed: {message}")),
+        None if status == ExportStatus::Cancelled => events::notice(&app, "warn", "Copy cancelled."),
         None => events::notice(
             &app,
             "success",
-            format!("Exported {done} file(s) to {}", destination.display()),
+            format!("Copied {done} file(s) to {}", destination.display()),
         ),
     }
 }

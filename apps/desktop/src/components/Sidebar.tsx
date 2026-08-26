@@ -7,7 +7,7 @@ const ITEMS: Array<{ id: Screen; label: string; needsShoot: boolean }> = [
   { id: 'players', label: 'Players', needsShoot: false },
   { id: 'albums', label: 'AI Albums', needsShoot: true },
   { id: 'review', label: 'Review', needsShoot: true },
-  { id: 'export', label: 'Export', needsShoot: true },
+  { id: 'export', label: 'Copy & Organise', needsShoot: true },
   { id: 'settings', label: 'Settings', needsShoot: false },
 ]
 

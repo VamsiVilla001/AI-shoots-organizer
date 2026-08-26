@@ -26,10 +26,12 @@ Key decisions, and where to look:
 - **The queue lives in SQLite** (`repo/jobs.rs`). `claim_next` is a single
   `UPDATE … RETURNING`, so concurrent workers cannot double-claim. On startup
   `requeue_stale` recovers anything a crash left `running`.
-- **One AI engine per worker thread** (`pipeline.rs::Engine`). ONNX sessions
-  are not shared; models load once per worker, not once per file. A bump of
-  `AppState::settings_version` makes workers rebuild their engines, so settings
-  apply without restart.
+- **One dedicated AI worker and one optional I/O helper** (`worker.rs`). Worker
+  zero owns a single `pipeline.rs::Engine` and the shoot-wide finishing stages;
+  worker one handles scans and thumbnails. This overlaps indexing with GPU
+  inference without loading several detector/embedder pairs. Models load lazily,
+  unload after 30 idle seconds, and rebuild when `AppState::settings_version`
+  changes, so settings apply without restart.
 - **Media reaches the webview through `teomedia://`** (`protocol.rs`), which
   resolves database ids — the webview never gets raw filesystem access. The
   `full/` route is also what makes HEIC/RAW previewable (decoded via FFmpeg).
@@ -67,7 +69,7 @@ change the other in the same commit.
 
 ## Testing
 
-- `cargo test --workspace` — 180+ unit tests, all hermetic (in-memory SQLite,
+- `cargo test --workspace` — 200+ unit tests, all hermetic (in-memory SQLite,
   temp dirs; no models or network needed).
 - AI correctness is pinned by math-level tests: SCRFD anchor decode,
   similarity-transform alignment, cosine/kNN, cluster determinism (seeded
@@ -105,9 +107,14 @@ Four things this pinned down, each of which had a wrong default:
    DirectML at "42x" because it was timing inferences that were erroring out.
    Anything measuring inference has to assert the embeddings come back and are
    unit length.
-4. **Threads were oversubscribed.** `worker_threads` × `inference_threads` used
-   to exceed the core count (4 × 8 on a 16-core machine); the default now
-   divides the machine between workers instead of giving each one half of it.
+4. **Threads and model sessions were oversubscribed.** Four workers used to
+   construct four detector/embedder pairs and could request more inference
+   threads than the machine had. The current policy caps the pool at two,
+   reserves one logical CPU for the UI/supporting work, gives only worker zero
+   an AI engine, and caps inference threads at four.
+5. **Long SQLite writer transactions look like a frozen application.** Scan
+   inserts and job enqueues are committed in batches of 200 so UI reads and
+   progress updates regularly regain access to the database.
 
 ## Threshold defaults
 

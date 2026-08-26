@@ -134,7 +134,7 @@ function ShootCard({ shoot }: { shoot: ShootSummary }) {
           </button>
         )}
         <button className="small" onClick={() => openShoot(shoot.id, 'export')}>
-          Export
+          Copy &amp; Organise
         </button>
         <button
           className="small danger"

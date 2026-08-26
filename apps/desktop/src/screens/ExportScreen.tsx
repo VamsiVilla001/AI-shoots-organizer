@@ -1,5 +1,5 @@
 /**
- * The Export screen (§11): choose a destination and options, preview the file
+ * The Copy & Organise screen (§11): choose a destination and options, preview the file
  * count, run the copy with live progress. Originals are only ever read.
  */
 
@@ -28,8 +28,14 @@ export function ExportScreen() {
 }
 
 function ExportBody({ shootId }: { shootId: number }) {
+  const exportPersonIds = useUi((s) => s.exportPersonIds)
   const [destination, setDestination] = useState('')
-  const [options, setOptions] = useState<ExportOptions>(DEFAULT_OPTIONS)
+  const [options, setOptions] = useState<ExportOptions>(() => ({
+    ...DEFAULT_OPTIONS,
+    personIds: exportPersonIds === null ? null : [...exportPersonIds],
+    // A selection made on Albums should copy exactly those named groups.
+    includeUnidentified: exportPersonIds === null,
+  }))
   const [preview, setPreview] = useState<ExportPreview | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [running, setRunning] = useState(false)
@@ -59,7 +65,7 @@ function ExportBody({ shootId }: { shootId: number }) {
   }, [exportProgress])
 
   const pickDestination = async () => {
-    const picked = await open({ directory: true, multiple: false, title: 'Choose the export folder' })
+    const picked = await open({ directory: true, multiple: false, title: 'Choose the destination folder' })
     if (typeof picked === 'string') setDestination(picked)
   }
 
@@ -82,8 +88,18 @@ function ExportBody({ shootId }: { shootId: number }) {
   return (
     <>
       <div className="workspace-header">
-        <h1>Export — {shoot.data?.name ?? ''}</h1>
+        <h1>Copy &amp; Organise — {shoot.data?.name ?? ''}</h1>
       </div>
+
+      {options.personIds !== null && (
+        <div className="filter-bar export-selection-summary">
+          <strong>{formatCount(options.personIds.length)} selected person group(s)</strong>
+          <span className="hint">
+            Choose a destination below. Each selected person will get a folder named after them,
+            containing copies of their grouped media.
+          </span>
+        </div>
+      )}
 
       <div className="settings-grid">
         <div className="card">
@@ -164,7 +180,7 @@ function ExportBody({ shootId }: { shootId: number }) {
                 setOptions({ ...options, personIds: e.target.checked ? null : [] })
               }
             />
-            Export every player
+            Copy every player group
           </label>
           {options.personIds !== null && (
             <div className="row-list" style={{ maxHeight: 280, overflowY: 'auto' }}>
@@ -219,7 +235,7 @@ function ExportBody({ shootId }: { shootId: number }) {
                 {formatBytes(exportProgress.bytesDone)}
               </div>
               <button className="small danger" onClick={() => api.cancelExport(shootId)}>
-                Cancel export
+                Cancel copying
               </button>
             </div>
           )}
@@ -229,7 +245,7 @@ function ExportBody({ shootId }: { shootId: number }) {
               disabled={!preview || preview.fileCount === 0 || busy || !!error}
               onClick={start}
             >
-              {busy ? 'Exporting…' : 'Start Export'}
+              {busy ? 'Copying…' : 'Copy into folders'}
             </button>
             {destination && !busy && (
               <button onClick={() => api.openPath(destination)}>Open folder</button>
@@ -240,7 +256,7 @@ function ExportBody({ shootId }: { shootId: number }) {
 
       {(history.data?.length ?? 0) > 0 && (
         <div className="section" style={{ marginTop: 26 }}>
-          <h2>Previous exports</h2>
+          <h2>Previous copies</h2>
           <div className="row-list">
             {history.data?.map((record) => (
               <div className="row" key={record.id}>

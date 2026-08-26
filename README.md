@@ -5,6 +5,8 @@ player. Import a shoot folder, let on-device face recognition find and group
 every player, name each person once, review the uncertain matches, and export
 the original files into player-wise folders.
 
+**Current release:** 1.0.0
+
 > Reduce hours of manual player-image sorting into a short AI-assisted review
 > workflow.
 
@@ -95,5 +97,9 @@ npm run typecheck      # TypeScript
    with collision-safe names; the source folder is never written to.
 
 Processing is a resumable SQLite-backed job queue — quitting mid-import loses
-nothing. See [docs/development.md](docs/development.md) for more detail, and
-the original plan in `docs/` for the product spec.
+nothing. See the [current full application documentation](docs/current-application.md)
+for the implemented product guide, [docs/development.md](docs/development.md)
+for engineering notes, [docs/release-1.0.md](docs/release-1.0.md) for the
+noteworthy 1.0 feature inventory, and [docs/roadmap.md](docs/roadmap.md) for the
+1.2 and 2.0 product plan. The original plan in `docs/` remains the historical
+product specification.

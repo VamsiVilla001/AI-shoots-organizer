@@ -3,7 +3,7 @@
  * "Needs Review" clusters, with photo/video filters on the open album.
  */
 
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { GROUP_SIZE_CAP, type Album, type ClusterSummary, type MediaType } from '@teo/shared-types'
 import * as api from '../api'
@@ -25,6 +25,7 @@ function AlbumsBody({ shootId }: { shootId: number }) {
   const [openAlbum, setOpenAlbum] = useState<Album | null>(null)
   const [typeFilter, setTypeFilter] = useState<MediaType | 'all'>('all')
   const [namingCluster, setNamingCluster] = useState<ClusterSummary | null>(null)
+  const [selectedPersonIds, setSelectedPersonIds] = useState<number[]>([])
 
   const shoot = useQuery({ queryKey: ['shoots', shootId], queryFn: () => api.getShoot(shootId) })
   const albums = useQuery({ queryKey: ['albums', shootId], queryFn: () => api.listAlbums(shootId) })
@@ -35,6 +36,7 @@ function AlbumsBody({ shootId }: { shootId: number }) {
 
   const queryClient = useQueryClient()
   const pushNotice = useUi((s) => s.pushNotice)
+  const openExport = useUi((s) => s.openExport)
   const regenerate = useMutation({
     mutationFn: () => api.regenerateAlbums(shootId),
     onSuccess: (count) => {
@@ -55,6 +57,24 @@ function AlbumsBody({ shootId }: { shootId: number }) {
       groupSize: all.filter((a) => a.albumType === 'groupSize'),
     }
   }, [albums.data])
+
+  const playerIds = useMemo(
+    () => grouped.players.flatMap((album) => album.personIds.slice(0, 1)),
+    [grouped.players],
+  )
+  const validSelectedPersonIds = selectedPersonIds.filter((id) => playerIds.includes(id))
+  const allPlayersSelected =
+    playerIds.length > 0 && playerIds.every((id) => validSelectedPersonIds.includes(id))
+
+  useEffect(() => setSelectedPersonIds([]), [shootId])
+
+  const togglePerson = (personId: number) => {
+    setSelectedPersonIds((current) =>
+      current.includes(personId)
+        ? current.filter((id) => id !== personId)
+        : [...current, personId],
+    )
+  }
 
   if (openAlbum) {
     return (
@@ -113,10 +133,41 @@ function AlbumsBody({ shootId }: { shootId: number }) {
                 Player albums appear once faces are recognised or clusters are named.
               </div>
             )}
+            {grouped.players.length > 0 && (
+              <div className="filter-bar album-export-bar">
+                <button
+                  className="small"
+                  onClick={() => setSelectedPersonIds(allPlayersSelected ? [] : playerIds)}
+                >
+                  {allPlayersSelected ? 'Clear selection' : 'Select all players'}
+                </button>
+                <span className="hint">
+                  {validSelectedPersonIds.length === 0
+                    ? 'Select one or more named person groups to copy.'
+                    : `${formatCount(validSelectedPersonIds.length)} group(s) selected`}
+                </span>
+                <button
+                  className="small primary"
+                  disabled={validSelectedPersonIds.length === 0}
+                  onClick={() => openExport(validSelectedPersonIds)}
+                >
+                  Copy selected groups…
+                </button>
+              </div>
+            )}
             <div className="card-grid">
-              {grouped.players.map((album) => (
-                <AlbumCard key={album.id} album={album} onOpen={() => setOpenAlbum(album)} />
-              ))}
+              {grouped.players.map((album) => {
+                const personId = album.personIds[0]
+                return (
+                  <AlbumCard
+                    key={album.id}
+                    album={album}
+                    onOpen={() => setOpenAlbum(album)}
+                    selected={personId !== undefined && validSelectedPersonIds.includes(personId)}
+                    onToggle={personId === undefined ? undefined : () => togglePerson(personId)}
+                  />
+                )
+              })}
             </div>
           </Section>
 
@@ -187,9 +238,25 @@ function Section(props: { title: string; children: React.ReactNode }) {
   )
 }
 
-function AlbumCard({ album, onOpen }: { album: Album; onOpen: () => void }) {
+function AlbumCard({
+  album,
+  onOpen,
+  selected = false,
+  onToggle,
+}: {
+  album: Album
+  onOpen: () => void
+  selected?: boolean
+  onToggle?: () => void
+}) {
   return (
-    <div className="card shoot-card" onClick={onOpen}>
+    <div className={`card shoot-card${selected ? ' selected' : ''}`} onClick={onOpen}>
+      {onToggle && (
+        <label className="album-select" onClick={(event) => event.stopPropagation()}>
+          <input type="checkbox" checked={selected} onChange={onToggle} />
+          Select for copy
+        </label>
+      )}
       {album.coverMediaId != null && (
         <div className="media-tile" style={{ marginBottom: 10 }}>
           <img src={thumbUrl(album.coverMediaId)} alt="" loading="lazy" />
@@ -305,6 +372,7 @@ function AlbumDetail(props: {
   const [sizeFilter, setSizeFilter] = useState<number | null>(null)
   const showSizeFilter = album.albumType !== 'groupSize'
   const personId = album.albumType === 'player' ? (album.personIds[0] ?? null) : null
+  const openExport = useUi((s) => s.openExport)
 
   const media = useQuery({
     queryKey: ['media', album.shootId, 'album', album.id, typeFilter, sizeFilter],
@@ -348,6 +416,11 @@ function AlbumDetail(props: {
       <div className="workspace-header">
         <h1>{album.name}</h1>
         <div className="actions">
+          {personId !== null && (
+            <button className="primary" onClick={() => openExport([personId])}>
+              Copy this person's group…
+            </button>
+          )}
           <button onClick={props.onBack}>← All albums</button>
         </div>
       </div>
