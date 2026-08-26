@@ -24,6 +24,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "person_count",
         sql: include_str!("migration_002_person_count.sql"),
     },
+    Migration {
+        version: 3,
+        name: "media_quality",
+        sql: include_str!("migration_003_media_quality.sql"),
+    },
 ];
 
 /// The schema version this build expects.

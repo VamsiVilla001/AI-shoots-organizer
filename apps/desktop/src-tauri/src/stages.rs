@@ -318,7 +318,10 @@ pub fn cluster_shoot(db: &Database, shoot_id: i64, settings: &AppSettings) -> Re
 
 /// Rebuilds the shoot's albums and marks it complete.
 pub fn generate_albums(db: &Database, shoot_id: i64) -> Result<usize> {
-    let created = db.transaction(|conn| albums::regenerate(conn, shoot_id))?;
+    let created = db.transaction(|conn| {
+        media_repo::refresh_duplicate_groups(conn, shoot_id, 6)?;
+        albums::regenerate(conn, shoot_id)
+    })?;
 
     let conn = db.conn()?;
     let progress = jobs::progress(&conn, shoot_id)?;

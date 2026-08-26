@@ -1,8 +1,9 @@
 # Esports AI Media Organiser — Current Application Documentation
 
-**Application version:** 1.0.0  
+**Application version:** 1.2.0 (development)
+
 **Documentation snapshot:** 23 August 2026  
-**Status:** Version 1.0 product baseline under active development
+**Status:** Version 1.2 editor workflow under active development; 1.0.0 is the stable baseline
 
 This document describes the application as it is implemented in the current
 repository. It is the canonical guide to current behavior. The separate

@@ -58,6 +58,17 @@ export function MediaGrid(props: {
                 {item.faceCount} face{item.faceCount > 1 ? 's' : ''}
               </span>
             )}
+            {item.mediaType === 'photo' && item.qualityScore !== null && (
+              <div className="quality-badges">
+                {item.duplicateCount > 1 && (
+                  <span className="quality-badge duplicate">{item.duplicateCount} similar</span>
+                )}
+                {item.isBestShot && item.duplicateCount > 1 && (
+                  <span className="quality-badge best">★ Best</span>
+                )}
+                <span className="quality-badge">Quality {Math.round(item.qualityScore * 100)}</span>
+              </div>
+            )}
             <div className="overlay">{item.filename}</div>
           </div>
         )

@@ -106,6 +106,14 @@ export interface Media {
   faceCount: number
   /** Distinct people in the file; what group-size albums are built from. */
   personCount: number
+  /** Local editorial hints derived from the cached thumbnail. */
+  qualityScore: number | null
+  sharpnessScore: number | null
+  exposureScore: number | null
+  perceptualHash: string | null
+  duplicateGroupId: number | null
+  duplicateCount: number
+  isBestShot: boolean
   error: string | null
 }
 
@@ -280,6 +288,9 @@ export interface MediaQuery {
   /** Only files holding exactly this many people; at `GROUP_SIZE_CAP` it means
    *  "this many or more", matching how the albums bucket. */
   groupSize?: number | null
+  onlyBestShots?: boolean
+  onlyDuplicates?: boolean
+  sort?: 'capturedAt' | 'quality' | 'filename' | null
   limit?: number | null
   offset?: number | null
 }

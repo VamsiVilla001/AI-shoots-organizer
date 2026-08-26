@@ -370,18 +370,32 @@ function AlbumDetail(props: {
   // Narrowing an existing album by group size is the useful cross-filter:
   // "Jonathan's solo shots". Redundant inside a size album, so hidden there.
   const [sizeFilter, setSizeFilter] = useState<number | null>(null)
+  const [qualityFilter, setQualityFilter] = useState<'all' | 'best' | 'duplicates'>('all')
+  const [mediaSort, setMediaSort] = useState<'capturedAt' | 'quality' | 'filename'>('capturedAt')
   const showSizeFilter = album.albumType !== 'groupSize'
   const personId = album.albumType === 'player' ? (album.personIds[0] ?? null) : null
   const openExport = useUi((s) => s.openExport)
 
   const media = useQuery({
-    queryKey: ['media', album.shootId, 'album', album.id, typeFilter, sizeFilter],
+    queryKey: [
+      'media',
+      album.shootId,
+      'album',
+      album.id,
+      typeFilter,
+      sizeFilter,
+      qualityFilter,
+      mediaSort,
+    ],
     queryFn: () =>
       api.listMedia({
         shootId: album.shootId,
         albumId: album.id,
         mediaType: typeFilter === 'all' ? null : typeFilter,
         groupSize: sizeFilter,
+        onlyBestShots: qualityFilter === 'best',
+        onlyDuplicates: qualityFilter === 'duplicates',
+        sort: mediaSort,
         limit: 2000,
       }),
   })
@@ -455,6 +469,28 @@ function AlbumDetail(props: {
             </select>
           </label>
         )}
+        <label className="checkbox-row">
+          <span className="hint">Photo picks</span>
+          <select
+            value={qualityFilter}
+            onChange={(event) => setQualityFilter(event.target.value as typeof qualityFilter)}
+          >
+            <option value="all">All media</option>
+            <option value="best">Best picks</option>
+            <option value="duplicates">Duplicate groups</option>
+          </select>
+        </label>
+        <label className="checkbox-row">
+          <span className="hint">Sort</span>
+          <select
+            value={mediaSort}
+            onChange={(event) => setMediaSort(event.target.value as typeof mediaSort)}
+          >
+            <option value="capturedAt">Capture time</option>
+            <option value="quality">Best quality</option>
+            <option value="filename">Filename</option>
+          </select>
+        </label>
       </div>
       {sizeFilter !== null && media.data?.length === 0 && (
         <div className="hint" style={{ marginBottom: 10 }}>
@@ -465,6 +501,13 @@ function AlbumDetail(props: {
         <div className="hint" style={{ marginBottom: 10 }}>
           Match confidence comes from the InsightFace ArcFace similarity score. “Reference” means
           you named that face manually, so no AI confidence is invented.
+        </div>
+      )}
+      {qualityFilter !== 'all' && (
+        <div className="hint" style={{ marginBottom: 10 }}>
+          {qualityFilter === 'best'
+            ? 'Best picks keeps unique photos and the strongest sharpness/exposure result from each similar set.'
+            : 'Duplicate groups use a local perceptual fingerprint; review before excluding any alternative.'}
         </div>
       )}
       <MediaGrid media={media.data ?? []} cornerLabels={confidenceLabels} />

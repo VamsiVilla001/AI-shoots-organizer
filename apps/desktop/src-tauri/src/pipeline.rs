@@ -318,6 +318,24 @@ pub fn index_media(db: &Database, thumbnails: &ThumbnailCache, ffmpeg: Option<&F
         Ok(thumb) => {
             let conn = db.conn()?;
             media_repo::set_thumbnail(&conn, item.id, &thumb.display().to_string())?;
+            if kind == MediaKind::Photo {
+                match image::open(&thumb) {
+                    Ok(image) => {
+                        let quality = teo_media_core::quality::analyse(&image.to_rgb8());
+                        media_repo::set_quality(
+                            &conn,
+                            item.id,
+                            quality.overall,
+                            quality.sharpness,
+                            quality.exposure,
+                            quality.perceptual_hash,
+                        )?;
+                    }
+                    Err(error) => {
+                        tracing::warn!(file = %item.path, %error, "photo quality analysis failed");
+                    }
+                }
+            }
             media_repo::set_status(&conn, item.id, ProcessingStatus::Thumbnailed, None)?;
         }
         Err(e) => {

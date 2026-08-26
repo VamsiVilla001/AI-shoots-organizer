@@ -1,7 +1,7 @@
 {
   "name": "esports-media-ai",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.2.0",
   "description": "Esports AI Media Organiser — local-first player-wise sorting for esports photo and video shoots",
   "workspaces": [
     "apps/*",

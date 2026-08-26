@@ -177,6 +177,15 @@ pub struct Media {
     /// Number of distinct people in the file, which is what group-size albums
     /// are built from.
     pub person_count: i64,
+    /// Editorial quality hints derived locally from the cached thumbnail.
+    pub quality_score: Option<f64>,
+    pub sharpness_score: Option<f64>,
+    pub exposure_score: Option<f64>,
+    /// Hex-encoded 64-bit difference hash used for near-duplicate grouping.
+    pub perceptual_hash: Option<String>,
+    pub duplicate_group_id: Option<i64>,
+    pub duplicate_count: i64,
+    pub is_best_shot: bool,
     pub error: Option<String>,
 }
 
@@ -432,6 +441,13 @@ pub struct MediaQuery {
     /// Only media holding exactly this many people. Values at or above the
     /// group-size cap mean "this many or more", matching how the albums bucket.
     pub group_size: Option<i64>,
+    /// Keep one highest-quality photo from every duplicate group, plus unique
+    /// photos. Videos are excluded when this filter is active.
+    pub only_best_shots: bool,
+    /// Show only photos that belong to a near-duplicate group.
+    pub only_duplicates: bool,
+    /// capturedAt (default) | quality | filename.
+    pub sort: Option<String>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
 }

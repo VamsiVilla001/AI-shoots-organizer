@@ -5,7 +5,9 @@ player. Import a shoot folder, let on-device face recognition find and group
 every player, name each person once, review the uncertain matches, and export
 the original files into player-wise folders.
 
-**Current release:** 1.0.0
+**Current stable release:** 1.0.0
+
+**Active development branch:** 1.2.0
 
 > Reduce hours of manual player-image sorting into a short AI-assisted review
 > workflow.
@@ -101,5 +103,6 @@ nothing. See the [current full application documentation](docs/current-applicati
 for the implemented product guide, [docs/development.md](docs/development.md)
 for engineering notes, [docs/release-1.0.md](docs/release-1.0.md) for the
 noteworthy 1.0 feature inventory, and [docs/roadmap.md](docs/roadmap.md) for the
-1.2 and 2.0 product plan. The original plan in `docs/` remains the historical
-product specification.
+1.2 and 2.0 product plan. Active 1.2 work is tracked in
+[docs/v1.2-progress.md](docs/v1.2-progress.md). The original plan in `docs/`
+remains the historical product specification.

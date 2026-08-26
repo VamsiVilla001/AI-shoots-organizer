@@ -9,6 +9,7 @@ pub mod decode;
 pub mod ffmpeg;
 pub mod formats;
 pub mod metadata;
+pub mod quality;
 pub mod scanner;
 pub mod thumbnails;
 

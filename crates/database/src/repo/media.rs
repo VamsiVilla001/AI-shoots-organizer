@@ -31,6 +31,13 @@ fn map(row: &Row<'_>) -> rusqlite::Result<Media> {
         processing_status: get(row, "processing_status")?,
         face_count: get(row, "face_count")?,
         person_count: get(row, "person_count")?,
+        quality_score: get(row, "quality_score")?,
+        sharpness_score: get(row, "sharpness_score")?,
+        exposure_score: get(row, "exposure_score")?,
+        perceptual_hash: get(row, "perceptual_hash")?,
+        duplicate_group_id: get(row, "duplicate_group_id")?,
+        duplicate_count: get(row, "duplicate_count")?,
+        is_best_shot: get::<i64>(row, "is_best_shot")? != 0,
         error: get(row, "error")?,
     })
 }
@@ -50,6 +57,20 @@ pub fn upsert(conn: &Connection, m: &NewMedia) -> Result<i64> {
                                        THEN media.processing_status ELSE 'pending' END,
               thumbnail_path    = CASE WHEN media.content_key = excluded.content_key
                                        THEN media.thumbnail_path ELSE NULL END,
+              quality_score     = CASE WHEN media.content_key = excluded.content_key
+                                       THEN media.quality_score ELSE NULL END,
+              sharpness_score   = CASE WHEN media.content_key = excluded.content_key
+                                       THEN media.sharpness_score ELSE NULL END,
+              exposure_score    = CASE WHEN media.content_key = excluded.content_key
+                                       THEN media.exposure_score ELSE NULL END,
+              perceptual_hash   = CASE WHEN media.content_key = excluded.content_key
+                                       THEN media.perceptual_hash ELSE NULL END,
+              duplicate_group_id = CASE WHEN media.content_key = excluded.content_key
+                                         THEN media.duplicate_group_id ELSE NULL END,
+              duplicate_count   = CASE WHEN media.content_key = excluded.content_key
+                                       THEN media.duplicate_count ELSE 1 END,
+              is_best_shot      = CASE WHEN media.content_key = excluded.content_key
+                                       THEN media.is_best_shot ELSE 0 END,
               content_key = excluded.content_key",
         params![
             m.shoot_id,
@@ -112,6 +133,141 @@ pub fn set_thumbnail(conn: &Connection, id: i64, thumbnail_path: &str) -> Result
         params![id, thumbnail_path],
     )?;
     Ok(())
+}
+
+pub fn set_quality(
+    conn: &Connection,
+    id: i64,
+    quality: f64,
+    sharpness: f64,
+    exposure: f64,
+    perceptual_hash: u64,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE media
+            SET quality_score = ?2, sharpness_score = ?3, exposure_score = ?4,
+                perceptual_hash = ?5, is_best_shot = 1
+          WHERE id = ?1",
+        params![id, quality, sharpness, exposure, format!("{perceptual_hash:016x}")],
+    )?;
+    Ok(())
+}
+
+/// Groups visually similar photos and promotes the best-scoring member.
+///
+/// A 64-bit difference hash is intentionally conservative here: a Hamming
+/// distance of six catches resized/re-encoded bursts without treating broadly
+/// similar compositions as copies. Single photos remain best shots but do not
+/// receive a duplicate-group badge.
+pub fn refresh_duplicate_groups(conn: &Connection, shoot_id: i64, max_distance: u32) -> Result<usize> {
+    let candidates = {
+        let mut stmt = conn.prepare(
+            "SELECT id, perceptual_hash, COALESCE(quality_score, 0)
+               FROM media
+              WHERE shoot_id = ?1 AND media_type = 'photo' AND perceptual_hash IS NOT NULL
+              ORDER BY id",
+        )?;
+        let rows = stmt.query_map(params![shoot_id], |row| {
+            let encoded: String = row.get(1)?;
+            Ok((
+                row.get::<_, i64>(0)?,
+                u64::from_str_radix(&encoded, 16).unwrap_or_default(),
+                row.get::<_, f64>(2)?,
+            ))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+
+    conn.execute(
+        "UPDATE media
+            SET duplicate_group_id = NULL, duplicate_count = 1,
+                is_best_shot = CASE WHEN quality_score IS NULL THEN 0 ELSE 1 END
+          WHERE shoot_id = ?1 AND media_type = 'photo'",
+        params![shoot_id],
+    )?;
+
+    let mut parent: Vec<usize> = (0..candidates.len()).collect();
+    // Split the hash into distance+1 bands. If two hashes differ in at most D
+    // bits, at least one of D+1 bands must be identical. This avoids comparing
+    // every photo with every other photo on normal large shoots.
+    let band_count = max_distance.clamp(1, 63) + 1;
+    let mut buckets = std::collections::HashMap::<(u32, u64), Vec<usize>>::new();
+    let mut compared = std::collections::HashSet::<(usize, usize)>::new();
+    for right in 0..candidates.len() {
+        for band in 0..band_count {
+            let key = (band, hash_band(candidates[right].1, band, band_count));
+            if let Some(lefts) = buckets.get(&key) {
+                for &left in lefts {
+                    if compared.insert((left, right))
+                        && (candidates[left].1 ^ candidates[right].1).count_ones() <= max_distance
+                    {
+                        union(&mut parent, left, right);
+                    }
+                }
+            }
+            buckets.entry(key).or_default().push(right);
+        }
+    }
+
+    let mut groups = std::collections::BTreeMap::<usize, Vec<usize>>::new();
+    for index in 0..candidates.len() {
+        let root = find(&mut parent, index);
+        groups.entry(root).or_default().push(index);
+    }
+
+    let mut duplicate_groups = 0;
+    for members in groups.values().filter(|members| members.len() > 1) {
+        duplicate_groups += 1;
+        let best = members
+            .iter()
+            .copied()
+            .max_by(|&a, &b| {
+                candidates[a]
+                    .2
+                    .total_cmp(&candidates[b].2)
+                    .then_with(|| candidates[b].0.cmp(&candidates[a].0))
+            })
+            .unwrap_or(members[0]);
+        let group_id = candidates[members[0]].0;
+        for &member in members {
+            conn.execute(
+                "UPDATE media
+                    SET duplicate_group_id = ?2, duplicate_count = ?3, is_best_shot = ?4
+                  WHERE id = ?1",
+                params![
+                    candidates[member].0,
+                    group_id,
+                    members.len() as i64,
+                    i64::from(member == best),
+                ],
+            )?;
+        }
+    }
+
+    Ok(duplicate_groups)
+}
+
+fn find(parent: &mut [usize], node: usize) -> usize {
+    if parent[node] != node {
+        parent[node] = find(parent, parent[node]);
+    }
+    parent[node]
+}
+
+fn union(parent: &mut [usize], left: usize, right: usize) {
+    let left_root = find(parent, left);
+    let right_root = find(parent, right);
+    if left_root != right_root {
+        parent[right_root] = left_root;
+    }
+}
+
+fn hash_band(hash: u64, band: u32, band_count: u32) -> u64 {
+    let start = band * 64 / band_count;
+    let end = (band + 1) * 64 / band_count;
+    let width = end - start;
+    let mask = if width == 64 { u64::MAX } else { (1_u64 << width) - 1 };
+    (hash >> start) & mask
 }
 
 pub fn set_status(conn: &Connection, id: i64, status: ProcessingStatus, error: Option<&str>) -> Result<()> {
@@ -268,6 +424,12 @@ pub fn query(conn: &Connection, q: &MediaQuery) -> Result<Vec<Media>> {
         wheres.push(format!("m.media_type = ?{}", args.len() + 1));
         args.push(Box::new(media_type.clone()));
     }
+    if q.only_best_shots {
+        wheres.push("m.media_type = 'photo' AND m.is_best_shot = 1".to_string());
+    }
+    if q.only_duplicates {
+        wheres.push("m.media_type = 'photo' AND m.duplicate_group_id IS NOT NULL".to_string());
+    }
     if let Some(search) = &q.search {
         if !search.trim().is_empty() {
             wheres.push(format!("m.filename LIKE ?{}", args.len() + 1));
@@ -279,7 +441,11 @@ pub fn query(conn: &Connection, q: &MediaQuery) -> Result<Vec<Media>> {
         sql.push_str(" WHERE ");
         sql.push_str(&wheres.join(" AND "));
     }
-    sql.push_str(" ORDER BY m.captured_at IS NULL, m.captured_at, m.filename");
+    match q.sort.as_deref() {
+        Some("quality") => sql.push_str(" ORDER BY m.quality_score IS NULL, m.quality_score DESC, m.filename"),
+        Some("filename") => sql.push_str(" ORDER BY m.filename COLLATE NOCASE"),
+        _ => sql.push_str(" ORDER BY m.captured_at IS NULL, m.captured_at, m.filename"),
+    }
 
     let limit = q.limit.unwrap_or(500).clamp(1, 5_000);
     sql.push_str(&format!(" LIMIT ?{}", args.len() + 1));
@@ -383,5 +549,41 @@ mod tests {
         .unwrap();
         assert_eq!(videos.len(), 1);
         assert_eq!(videos[0].filename, "c.mp4");
+    }
+
+    #[test]
+    fn near_duplicates_promote_the_highest_quality_photo() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+        let shoot_id = seed(&conn);
+        let a = conn
+            .query_row("SELECT id FROM media WHERE filename = 'a.jpg'", [], |row| row.get(0))
+            .unwrap();
+        let b = conn
+            .query_row("SELECT id FROM media WHERE filename = 'b.jpg'", [], |row| row.get(0))
+            .unwrap();
+
+        set_quality(&conn, a, 0.45, 0.4, 0.6, 0xaaaa_aaaa_aaaa_aaaa).unwrap();
+        set_quality(&conn, b, 0.90, 0.9, 0.9, 0xaaaa_aaaa_aaaa_aaab).unwrap();
+        assert_eq!(refresh_duplicate_groups(&conn, shoot_id, 6).unwrap(), 1);
+
+        let first = get_by_id(&conn, a).unwrap().unwrap();
+        let second = get_by_id(&conn, b).unwrap().unwrap();
+        assert_eq!(first.duplicate_group_id, second.duplicate_group_id);
+        assert_eq!(first.duplicate_count, 2);
+        assert!(!first.is_best_shot);
+        assert!(second.is_best_shot);
+
+        let best = query(
+            &conn,
+            &MediaQuery {
+                shoot_id: Some(shoot_id),
+                only_best_shots: true,
+                sort: Some("quality".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(best.iter().map(|item| item.id).collect::<Vec<_>>(), vec![b]);
     }
 }

@@ -495,7 +495,10 @@ pub fn list_albums(state: State<'_, Arc<AppState>>, shoot_id: i64) -> Result<Vec
 
 #[tauri::command]
 pub fn regenerate_albums(app: AppHandle, state: State<'_, Arc<AppState>>, shoot_id: i64) -> Result<usize> {
-    let created = state.db.transaction(|conn| albums::regenerate(conn, shoot_id))?;
+    let created = state.db.transaction(|conn| {
+        media_repo::refresh_duplicate_groups(conn, shoot_id, 6)?;
+        albums::regenerate(conn, shoot_id)
+    })?;
     events::shoot_changed(&app, shoot_id, "albums");
     Ok(created)
 }
