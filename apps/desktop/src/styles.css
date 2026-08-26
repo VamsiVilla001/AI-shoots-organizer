@@ -652,12 +652,14 @@ h2 {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  flex-wrap: wrap;
   padding: 12px 18px;
   gap: 10px;
 }
 
 .viewer-stage {
   flex: 1;
+  min-height: 0;
   position: relative;
   display: flex;
   align-items: center;
@@ -1033,12 +1035,13 @@ h2 {
 }
 
 .face-tagger {
-  position: absolute;
-  /* Below the box, where the label above it is not. */
-  top: calc(100% + 8px);
-  left: 0;
-  z-index: 80;
-  width: 260px;
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 90;
+  width: min(360px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
   background: var(--bg-raised);
   border: 1px solid var(--accent);
   border-radius: var(--radius);
@@ -1068,6 +1071,52 @@ h2 {
   border-radius: 8px;
   font-size: 13px;
   align-self: flex-start;
+}
+
+.manual-face-prompt {
+  background: rgba(124, 92, 255, 0.18);
+}
+
+.frame.drawing-face {
+  cursor: crosshair;
+  touch-action: none;
+  user-select: none;
+}
+
+.frame.drawing-face .face-box {
+  pointer-events: none;
+}
+
+.manual-face-box {
+  position: absolute;
+  z-index: 4;
+  border: 2px solid var(--accent);
+  border-radius: 5px;
+  background: rgba(124, 92, 255, 0.16);
+  box-shadow: 0 0 0 3px rgba(124, 92, 255, 0.22);
+  pointer-events: none;
+}
+
+@media (max-width: 720px), (max-height: 520px) {
+  .viewer-top {
+    padding: 8px 10px;
+  }
+
+  .viewer-stage {
+    padding: 0 10px 10px;
+  }
+
+  .viewer-stage img,
+  .viewer-stage video {
+    max-height: calc(100vh - 130px);
+  }
+
+  .face-tagger {
+    right: 8px;
+    bottom: 8px;
+    width: min(360px, calc(100vw - 16px));
+    max-height: calc(100vh - 16px);
+  }
 }
 
 /* The faces a naming dialog is actually about. */

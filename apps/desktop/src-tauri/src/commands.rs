@@ -10,6 +10,7 @@ use std::sync::Arc;
 use serde::Serialize;
 use tauri::{AppHandle, State};
 
+use teo_clustering::FaceMatcher;
 use teo_database::models::*;
 use teo_database::repo::{
     albums, clusters, exports, faces, groups, jobs, logs, media as media_repo, people, shoots, video,
@@ -832,6 +833,119 @@ pub fn assign_faces(
     Ok(updated)
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManualFaceResult {
+    pub face: Face,
+    pub suggested_person: Option<Person>,
+}
+
+fn validate_manual_bbox(bbox: BoundingBox) -> Result<BoundingBox> {
+    if !bbox.x.is_finite() || !bbox.y.is_finite() || !bbox.w.is_finite() || !bbox.h.is_finite() {
+        return Err(err("the face box contains invalid coordinates"));
+    }
+
+    let x1 = bbox.x.clamp(0.0, 1.0);
+    let y1 = bbox.y.clamp(0.0, 1.0);
+    let x2 = (bbox.x + bbox.w).clamp(0.0, 1.0);
+    let y2 = (bbox.y + bbox.h).clamp(0.0, 1.0);
+    let clean = BoundingBox { x: x1, y: y1, w: x2 - x1, h: y2 - y1 };
+    if clean.w < 0.005 || clean.h < 0.005 {
+        return Err(err("draw a larger box around the face"));
+    }
+    Ok(clean)
+}
+
+/// Turns a reviewer-drawn box into a real face record: decode the original,
+/// extract an embedding from the crop, compare it with confirmed named faces,
+/// then return the suggestion for human review. Model work runs off the UI
+/// thread because loading and inference can take a moment.
+#[tauri::command]
+pub async fn add_manual_face(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    media_id: i64,
+    bbox: BoundingBox,
+) -> Result<ManualFaceResult> {
+    let bbox = validate_manual_bbox(bbox)?;
+    let state = Arc::clone(&state);
+    let result = tauri::async_runtime::spawn_blocking(move || -> Result<ManualFaceResult> {
+        let media = {
+            let conn = state.db.conn()?;
+            media_repo::get_by_id(&conn, media_id)?
+                .ok_or_else(|| err("that photograph is no longer in the library"))?
+        };
+        if media.media_type != MediaType::Photo.as_str() {
+            return Err(err("manual face boxes are currently available for photographs"));
+        }
+
+        let settings = state.settings();
+        let mut engine = crate::pipeline::Engine::new(&state.paths, &settings)?;
+        let (embedding, quality) = engine.embed_manual_face(&media, bbox)?;
+
+        let (library, used_people) = {
+            let conn = state.db.conn()?;
+            let used_people: Vec<i64> = faces::for_media(&conn, media.id)?
+                .into_iter()
+                .filter(|face| face.assignment != FaceAssignment::Ignored.as_str())
+                .filter_map(|face| face.person_id)
+                .collect();
+            (faces::library_vectors(&conn)?, used_people)
+        };
+        let matcher = FaceMatcher::build(library.into_iter().filter_map(|sample| {
+            sample
+                .person_id
+                .filter(|person_id| !used_people.contains(person_id))
+                .map(|person_id| (person_id, sample.embedding))
+        }));
+        let matched = matcher.match_one(&embedding, &settings.matcher_config());
+
+        let result = state.db.transaction(|conn| {
+            let face_id = faces::insert_manual(
+                conn,
+                &NewFace {
+                    media_id: media.id,
+                    shoot_id: media.shoot_id,
+                    bbox,
+                    landmarks: None,
+                    detection_confidence: 1.0,
+                    embedding: Some(embedding),
+                    quality: Some(quality),
+                    frame_time: None,
+                    crop_path: None,
+                },
+            )?;
+
+            let suggested_person = match matched {
+                Some(matched) => {
+                    faces::set_suggestion(conn, face_id, matched.person_id, matched.similarity as f64)?;
+                    people::get_by_id(conn, matched.person_id)?
+                }
+                None => None,
+            };
+            media_repo::refresh_face_count(conn, media.id)?;
+            logs::record_quiet(
+                conn,
+                logs::EVENT_MANUAL_CORRECTION,
+                Some(media.shoot_id),
+                Some(media.id),
+                suggested_person.as_ref().map(|person| person.id),
+                Some("reviewer drew a missed face box"),
+            );
+            let face = faces::get_by_id(conn, face_id)?
+                .ok_or_else(|| teo_database::DbError::other("the new face could not be read back"))?;
+            Ok(ManualFaceResult { face, suggested_person })
+        })?;
+        Ok(result)
+    })
+    .await
+    .map_err(|e| err(format!("manual face recognition stopped unexpectedly: {e}")))??;
+
+    events::emit(&app, events::LIBRARY_CHANGED, ());
+    events::shoot_changed(&app, result.face.shoot_id, "manualFace");
+    Ok(result)
+}
+
 /// Names the person in one face and gathers every currently known appearance
 /// into an editor-owned group. Keeping the assignment, album refresh, and
 /// grouping in one transaction prevents the UI from observing a half-named
@@ -1041,4 +1155,24 @@ pub fn clear_thumbnail_cache(state: State<'_, Arc<AppState>>) -> Result<u64> {
 pub fn clear_log(state: State<'_, Arc<AppState>>) -> Result<()> {
     let conn = state.db.conn()?;
     Ok(logs::clear(&conn)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manual_face_boxes_are_clamped_to_the_photo() {
+        let bbox = validate_manual_bbox(BoundingBox { x: -0.1, y: 0.2, w: 0.4, h: 1.0 }).unwrap();
+        assert_eq!(bbox.x, 0.0);
+        assert_eq!(bbox.y, 0.2);
+        assert!((bbox.w - 0.3).abs() < 1e-9);
+        assert!((bbox.h - 0.8).abs() < 1e-9);
+    }
+
+    #[test]
+    fn manual_face_boxes_reject_tiny_or_invalid_regions() {
+        assert!(validate_manual_bbox(BoundingBox { x: 0.1, y: 0.1, w: 0.001, h: 0.2 }).is_err());
+        assert!(validate_manual_bbox(BoundingBox { x: f64::NAN, y: 0.1, w: 0.2, h: 0.2 }).is_err());
+    }
 }

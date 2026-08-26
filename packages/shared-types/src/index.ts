@@ -246,6 +246,12 @@ export interface NameFaceResult {
   filesAdded: number
 }
 
+/** A reviewer-drawn face and any safe match found in the named-face library. */
+export interface ManualFaceResult {
+  face: Face
+  suggestedPerson: Person | null
+}
+
 /** What seeding groups from the AI albums did. */
 export interface SeedResult {
   groups: number

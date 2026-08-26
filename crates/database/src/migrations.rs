@@ -34,6 +34,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "media_quality",
         sql: include_str!("migration_004_media_quality.sql"),
     },
+    Migration {
+        version: 5,
+        name: "manual_faces",
+        sql: include_str!("migration_005_manual_faces.sql"),
+    },
 ];
 
 /// The schema version this build expects.
@@ -133,7 +138,7 @@ mod tests {
 
         run(&mut conn).unwrap();
 
-        assert_eq!(current_version(&conn).unwrap(), 4);
+        assert_eq!(current_version(&conn).unwrap(), 5);
         let has_quality: bool = conn
             .prepare("PRAGMA table_info(media)")
             .unwrap()
@@ -141,5 +146,12 @@ mod tests {
             .unwrap()
             .any(|name| matches!(name.as_deref(), Ok("quality_score")));
         assert!(has_quality);
+        let has_face_source: bool = conn
+            .prepare("PRAGMA table_info(faces)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .any(|name| matches!(name.as_deref(), Ok("source")));
+        assert!(has_face_source);
     }
 }

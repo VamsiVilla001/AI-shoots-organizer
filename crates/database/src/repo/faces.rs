@@ -58,6 +58,33 @@ pub fn insert(conn: &Connection, face: &NewFace) -> Result<i64> {
     Ok(conn.last_insert_rowid())
 }
 
+/// Inserts a reviewer-drawn face. Its source marker keeps it safe when the
+/// detector is run over the same photograph again.
+pub fn insert_manual(conn: &Connection, face: &NewFace) -> Result<i64> {
+    let embedding = face.embedding.as_ref().map(|e| vec_to_blob(e));
+    let dim = face.embedding.as_ref().map(|e| e.len() as i64);
+
+    conn.execute(
+        "INSERT INTO faces (media_id, shoot_id, embedding, embedding_dim,
+                            bbox_x, bbox_y, bbox_w, bbox_h, landmarks,
+                            detection_confidence, source, quality, frame_time, crop_path, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, 1.0, 'manual', ?9, NULL, NULL, ?10)",
+        params![
+            face.media_id,
+            face.shoot_id,
+            embedding,
+            dim,
+            face.bbox.x,
+            face.bbox.y,
+            face.bbox.w,
+            face.bbox.h,
+            face.quality,
+            now(),
+        ],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
 pub fn get_by_id(conn: &Connection, id: i64) -> Result<Option<Face>> {
     Ok(conn
         .prepare("SELECT * FROM faces WHERE id = ?1")?
@@ -68,7 +95,10 @@ pub fn get_by_id(conn: &Connection, id: i64) -> Result<Option<Face>> {
 /// Clears every face detected for a media file. Called before re-analysing so
 /// a second pass does not double-count.
 pub fn delete_for_media(conn: &Connection, media_id: i64) -> Result<usize> {
-    Ok(conn.execute("DELETE FROM faces WHERE media_id = ?1", params![media_id])?)
+    Ok(conn.execute(
+        "DELETE FROM faces WHERE media_id = ?1 AND source != 'manual'",
+        params![media_id],
+    )?)
 }
 
 /// One embedding, with just enough context for the matcher and clusterer.
@@ -397,5 +427,33 @@ mod tests {
         assert_eq!(face.person_id, None);
         assert_eq!(face.assignment, "unassigned");
         assert_eq!(unassigned_vectors(&conn, shoot_id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn reanalysis_preserves_reviewer_drawn_faces() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+        let (shoot_id, detected_id) = seed_face(&conn, vec![0.3, 0.7]);
+        let detected = get_by_id(&conn, detected_id).unwrap().unwrap();
+        let manual_id = insert_manual(
+            &conn,
+            &NewFace {
+                media_id: detected.media_id,
+                shoot_id,
+                bbox: BoundingBox { x: 0.5, y: 0.2, w: 0.2, h: 0.3 },
+                landmarks: None,
+                detection_confidence: 1.0,
+                embedding: Some(vec![0.8, 0.2]),
+                quality: Some(0.9),
+                frame_time: None,
+                crop_path: None,
+            },
+        )
+        .unwrap();
+
+        delete_for_media(&conn, detected.media_id).unwrap();
+
+        assert!(get_by_id(&conn, detected_id).unwrap().is_none());
+        assert!(get_by_id(&conn, manual_id).unwrap().is_some());
     }
 }

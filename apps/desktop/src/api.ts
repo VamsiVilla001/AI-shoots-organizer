@@ -11,6 +11,7 @@ import type {
   Album,
   AppInfo,
   AppSettings,
+  BoundingBox,
   ClusterSummary,
   ExportOptions,
   ExportPreview,
@@ -22,6 +23,7 @@ import type {
   GroupStats,
   Job,
   LogEntry,
+  ManualFaceResult,
   Media,
   MediaGroupLink,
   MediaQuery,
@@ -161,6 +163,9 @@ export const assignFaces = (
   personName: string | null,
 ) => call<number>('assign_faces', { faceIds, personId, personName })
 export const ignoreFaces = (faceIds: number[]) => call<number>('ignore_faces', { faceIds })
+/** Embeds a reviewer-drawn face box and compares it with confirmed named faces. */
+export const addManualFace = (mediaId: number, bbox: BoundingBox) =>
+  call<ManualFaceResult>('add_manual_face', { mediaId, bbox })
 /** Names a face's person and gathers all currently known appearances into their group. */
 export const nameFace = (faceId: number, name: string, team?: string | null) =>
   call<NameFaceResult>('name_face', { faceId, name, team: team ?? null })

@@ -13,7 +13,7 @@ use image::RgbImage;
 use teo_database::models::{BoundingBox, Media, MediaMetadata, NewFace, ProcessingStatus};
 use teo_database::repo::{faces, media as media_repo, video as video_repo};
 use teo_database::Database;
-use teo_face_detection::{Detection, FaceDetector, ScrfdDetector};
+use teo_face_detection::{Detection, FaceDetector, Rect, ScrfdDetector};
 use teo_face_recognition::{ArcFaceEmbedder, FaceEmbedder};
 use teo_media_core::formats::{self, MediaKind};
 use teo_media_core::{Ffmpeg, ThumbnailCache};
@@ -110,6 +110,38 @@ impl Engine {
 
     pub fn ffmpeg(&self) -> Option<&Ffmpeg> {
         self.ffmpeg.as_ref()
+    }
+
+    /// Extracts a recognition vector from a box a reviewer drew around a
+    /// missed face. Manual boxes have no five-point landmarks, so the
+    /// embedder deliberately uses its padded bounding-box alignment fallback.
+    /// The returned box remains normalised against the oriented image, exactly
+    /// like detector-produced boxes.
+    pub fn embed_manual_face(&mut self, item: &Media, bbox: BoundingBox) -> Result<(Vec<f32>, f64)> {
+        let image = teo_media_core::decode::load_image(
+            Path::new(&item.path),
+            item.orientation.clamp(1, 8) as u16,
+            Some(self.settings.analysis_max_dim),
+            self.ffmpeg.as_ref(),
+        )?;
+        let (width, height) = image.dimensions();
+        let rect = Rect {
+            x1: (bbox.x * width as f64) as f32,
+            y1: (bbox.y * height as f64) as f32,
+            x2: ((bbox.x + bbox.w) * width as f64) as f32,
+            y2: ((bbox.y + bbox.h) * height as f64) as f32,
+        };
+        if rect.width() < 12.0 || rect.height() < 12.0 {
+            return Err(PipelineError::Other("draw a slightly larger box around the face".into()));
+        }
+
+        let detection = Detection { bbox: rect, score: 1.0, landmarks: None };
+        let quality = detection.quality(width, height);
+        let embedding = self
+            .embedder
+            .embed(&image, &detection)
+            .map_err(|e| PipelineError::Other(format!("could not read the manually marked face: {e}")))?;
+        Ok((embedding.into_vec(), quality))
     }
 
     /// Full analysis of a still image.
