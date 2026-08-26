@@ -1,5 +1,8 @@
--- Photo quality and perceptual-duplicate metadata (migration 3).
+-- Photo quality and perceptual-duplicate metadata (migration 4).
 -- Scores are derived from cached thumbnails; originals remain read-only.
+--
+-- Version 3 existed in pre-release databases outside the current checkout, so
+-- this migration deliberately starts at 4 to upgrade those installations.
 
 ALTER TABLE media ADD COLUMN quality_score REAL;
 ALTER TABLE media ADD COLUMN sharpness_score REAL;

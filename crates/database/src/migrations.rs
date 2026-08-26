@@ -25,9 +25,9 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("migration_002_person_count.sql"),
     },
     Migration {
-        version: 3,
+        version: 4,
         name: "media_quality",
-        sql: include_str!("migration_003_media_quality.sql"),
+        sql: include_str!("migration_004_media_quality.sql"),
     },
 ];
 
@@ -90,5 +90,24 @@ mod tests {
 
         let remaining: i64 = conn.query_row("SELECT COUNT(*) FROM media", [], |r| r.get(0)).unwrap();
         assert_eq!(remaining, 0, "media rows should cascade away with their shoot");
+    }
+
+    #[test]
+    fn upgrades_pre_release_version_three_databases() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(include_str!("schema.sql")).unwrap();
+        conn.execute_batch(include_str!("migration_002_person_count.sql")).unwrap();
+        conn.pragma_update(None, "user_version", 3).unwrap();
+
+        run(&mut conn).unwrap();
+
+        assert_eq!(current_version(&conn).unwrap(), 4);
+        let has_quality: bool = conn
+            .prepare("PRAGMA table_info(media)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .any(|name| matches!(name.as_deref(), Ok("quality_score")));
+        assert!(has_quality);
     }
 }
