@@ -8,6 +8,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::time::Instant;
 
 use image::RgbImage;
 use teo_database::models::{BoundingBox, Media, MediaMetadata, NewFace, ProcessingStatus};
@@ -148,6 +149,7 @@ impl Engine {
 
     /// Full analysis of a still image.
     pub fn analyse_photo(&mut self, db: &Database, item: &Media) -> Result<AnalysisOutcome> {
+        let analysis_started = Instant::now();
         let path = PathBuf::from(&item.path);
         // Indexing is the normal source of metadata, but reading EXIF again is
         // cheap compared with inference and protects this coordinate system
@@ -164,7 +166,7 @@ impl Engine {
             media_repo::set_orientation(&conn, item.id, i64::from(orientation))?;
         }
 
-        let image = teo_media_core::decode::load_image(
+        let decoded = teo_media_core::decode::decode_image(
             &path,
             orientation,
             Some(self.settings.analysis_max_dim),
@@ -177,13 +179,29 @@ impl Engine {
             faces::delete_for_media(&conn, item.id)?;
         }
 
-        let outcome = self.detect_and_store(db, item, &image, None)?;
+        let ai_started = Instant::now();
+        let outcome = self.detect_and_store(db, item, &decoded.image, None)?;
+        let ai_elapsed = ai_started.elapsed();
 
         {
             let conn = db.conn()?;
             media_repo::set_status(&conn, item.id, ProcessingStatus::Analysed, None)?;
             media_repo::refresh_face_count(&conn, item.id)?;
         }
+        tracing::info!(
+            file = %item.filename,
+            source_format = %decoded.source_format,
+            decode_method = decoded.decode_method.as_str(),
+            open_ms = decoded.timings.open.as_millis(),
+            preview_ms = decoded.timings.preview.as_millis(),
+            full_decode_ms = decoded.timings.full_decode.as_millis(),
+            resize_ms = decoded.timings.resize.as_millis(),
+            ai_ms = ai_elapsed.as_millis(),
+            total_ms = analysis_started.elapsed().as_millis(),
+            faces = outcome.faces_detected,
+            result = "ok",
+            "photo analysis complete"
+        );
         Ok(outcome)
     }
 
@@ -615,4 +633,3 @@ mod tests {
         );
     }
 }
-

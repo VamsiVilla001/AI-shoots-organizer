@@ -5,31 +5,91 @@
 //! original.
 
 use std::path::Path;
+use std::time::Instant;
 
 use image::{imageops::FilterType, DynamicImage, RgbImage};
 
 use crate::ffmpeg::Ffmpeg;
 use crate::formats::{self, Decoder, MediaKind};
 use crate::metadata::Orientation;
+use crate::raw;
 use crate::{MediaError, Result};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecodeMethod {
+    Native,
+    FfmpegStill,
+    LibRawEmbeddedPreview,
+    LibRawHalfSizeDemosaic,
+}
+
+impl DecodeMethod {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Native => "native",
+            Self::FfmpegStill => "ffmpeg-still",
+            Self::LibRawEmbeddedPreview => "libraw-embedded-preview",
+            Self::LibRawHalfSizeDemosaic => "libraw-half-size-demosaic",
+        }
+    }
+}
+
+/// Normalised output shared by thumbnails, full-image serving and AI.
+pub struct DecodedImage {
+    pub image: RgbImage,
+    pub source_format: String,
+    pub decode_method: DecodeMethod,
+    pub timings: raw::DecodeTimings,
+}
 
 /// Loads a still image, applying its EXIF orientation and capping the longest
 /// edge at `max_dim` if given.
 pub fn load_image(path: &Path, orientation: u16, max_dim: Option<u32>, ffmpeg: Option<&Ffmpeg>) -> Result<RgbImage> {
-    let (kind, decoder) = formats::classify(path)
-        .ok_or_else(|| MediaError::Unsupported(path.display().to_string()))?;
+    Ok(decode_image(path, orientation, max_dim, ffmpeg)?.image)
+}
+
+pub fn decode_image(
+    path: &Path,
+    orientation: u16,
+    max_dim: Option<u32>,
+    ffmpeg: Option<&Ffmpeg>,
+) -> Result<DecodedImage> {
+    let total_started = Instant::now();
+    let (kind, decoder) = formats::classify(path).ok_or_else(|| MediaError::Unsupported(path.display().to_string()))?;
     if kind != MediaKind::Photo {
-        return Err(MediaError::Unsupported(format!("{} is not a still image", path.display())));
+        return Err(MediaError::Unsupported(format!(
+            "{} is not a still image",
+            path.display()
+        )));
     }
 
-    let image = match decoder {
+    let source_format = formats::extension(path).to_ascii_uppercase();
+    let (image, decode_method, mut timings) = match decoder {
         Decoder::Native => {
+            let opened = Instant::now();
             let img = image::open(path).map_err(|e| MediaError::Decode(format!("{}: {e}", path.display())))?;
+            let mut timings = raw::DecodeTimings {
+                open: opened.elapsed(),
+                ..Default::default()
+            };
             let img = match max_dim {
-                Some(max) if img.width().max(img.height()) > max => resize_within(&img, max),
+                Some(max) if img.width().max(img.height()) > max => {
+                    let resized = Instant::now();
+                    let result = resize_within(&img, max);
+                    timings.resize = resized.elapsed();
+                    result
+                }
                 _ => img,
             };
-            img.to_rgb8()
+            (img.to_rgb8(), DecodeMethod::Native, timings)
+        }
+        Decoder::LibRaw => {
+            let decoded = raw::decode(path, max_dim)?;
+            let method = match decoded.method {
+                raw::DecodeMethod::EmbeddedPreview => DecodeMethod::LibRawEmbeddedPreview,
+                raw::DecodeMethod::HalfSizeDemosaic => DecodeMethod::LibRawHalfSizeDemosaic,
+            };
+            (decoded.image, method, decoded.timings)
         }
         Decoder::Ffmpeg => {
             let ff = ffmpeg.ok_or_else(|| {
@@ -38,11 +98,27 @@ pub fn load_image(path: &Path, orientation: u16, max_dim: Option<u32>, ffmpeg: O
                     formats::extension(path).to_uppercase()
                 ))
             })?;
-            ff.decode_still(path, max_dim)?
+            let decoded = Instant::now();
+            let image = ff.decode_still(path, max_dim)?;
+            (
+                image,
+                DecodeMethod::FfmpegStill,
+                raw::DecodeTimings {
+                    full_decode: decoded.elapsed(),
+                    ..Default::default()
+                },
+            )
         }
     };
 
-    Ok(apply_orientation(image, Orientation::from_exif(orientation)))
+    let image = apply_orientation(image, Orientation::from_exif(orientation));
+    timings.total = total_started.elapsed();
+    Ok(DecodedImage {
+        image,
+        source_format,
+        decode_method,
+        timings,
+    })
 }
 
 /// Grabs one frame from a video, already oriented and downscaled.

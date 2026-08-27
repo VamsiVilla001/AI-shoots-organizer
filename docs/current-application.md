@@ -54,7 +54,7 @@ The application is deliberately local-first:
 | AI runtime | ONNX Runtime |
 | Face detection | InsightFace SCRFD `det_10g.onnx` |
 | Face recognition | InsightFace ArcFace `w600k_r50.onnx` |
-| Media decode | Rust `image` crate plus FFmpeg |
+| Media decode | Rust `image` crate, LibRaw for camera RAW, plus FFmpeg |
 | Video sampling | FFmpeg scene detection and interval sampling |
 | Windows acceleration | DirectML, with CPU fallback |
 | macOS acceleration | CoreML, with CPU fallback |
@@ -284,19 +284,24 @@ Extension matching is case-insensitive.
 `jpg`, `jpeg`, `png`, `webp`, `tif`, `tiff`, and `bmp` are decoded by the Rust
 image library and do not require FFmpeg.
 
+### LibRaw camera decoding
+
+Camera RAW formats including `raf`, `arw`, `nef`, `cr2`, `cr3`, `orf`, `rw2`,
+`dng`, `pef`, `srw`, `3fr`, `iiq`, `rwl`, and common additional RAW containers
+use a preview-first LibRaw pipeline. See [Camera RAW support](raw-support.md).
+
 ### FFmpeg still-image decoding
 
-`heic`, `heif`, `avif`, `cr2`, `cr3`, `nef`, `arw`, `dng`, `raf`, `orf`, and
-`rw2` require an FFmpeg build capable of decoding the specific format.
+`heic`, `heif`, and `avif` require an FFmpeg build capable of decoding the
+specific format.
 
 ### Video
 
 `mp4`, `mov`, `mkv`, `avi`, `webm`, `m4v`, `mpg`, `mpeg`, `wmv`, `mts`, and
 `m2ts` require FFmpeg.
 
-Recognition can still process native photos when FFmpeg is absent. Video and
-FFmpeg-dependent still formats will be unavailable or fail clearly until
-FFmpeg is configured.
+Recognition can process native and camera RAW photos when FFmpeg is absent.
+Video and FFmpeg-dependent still formats remain unavailable until configured.
 
 ## 6. Scan and processing pipeline
 
@@ -587,7 +592,7 @@ records serialise in camelCase and are mirrored by hand in
 - Node.js 20 or newer;
 - stable Rust with the platform toolchain;
 - Tauri platform prerequisites;
-- FFmpeg on `PATH` or configured in Settings for video/HEIC/RAW;
+- FFmpeg on `PATH` or configured in Settings for video/HEIC;
 - approximately 280 MB for the fetched model archive plus application caches.
 
 ### Install and fetch models
@@ -685,7 +690,8 @@ required.
 - A source file can appear in multiple virtual albums and output folders.
 - Video analysis samples frames and can miss a person visible only between
   samples.
-- FFmpeg codec/RAW support varies by the installed FFmpeg build.
+- FFmpeg codec support varies by the installed build; LibRaw camera coverage
+  varies by its linked version.
 - Models are downloaded separately and increase installation/setup complexity.
 - macOS code paths exist, but signed/notarised distribution and real-device
   acceptance remain release tasks.

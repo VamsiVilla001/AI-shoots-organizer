@@ -22,27 +22,35 @@ impl MediaKind {
 pub enum Decoder {
     /// Handled natively by the `image` crate — no external process.
     Native,
-    /// Needs FFmpeg. HEIC and camera raw formats have no pure-Rust decoder we
-    /// want to depend on, and FFmpeg is already a requirement for video.
+    /// Camera sensor data and its embedded preview, decoded by LibRaw.
+    LibRaw,
+    /// Finished still formats and video containers decoded by FFmpeg.
     Ffmpeg,
 }
 
 /// Formats listed as "initial support" in the architecture plan (§3.2).
 const PHOTO_NATIVE: &[&str] = &["jpg", "jpeg", "png", "webp", "tif", "tiff", "bmp"];
 
-/// Formats the plan lists for later support, decoded through FFmpeg.
-const PHOTO_FFMPEG: &[&str] = &[
-    "heic", "heif", "avif", // Apple / modern still formats
-    "cr2", "cr3", "nef", "arw", "dng", "raf", "orf", "rw2", // camera raw
+/// The one authoritative RAW extension registry. Classification is intentionally
+/// cheap; LibRaw still verifies the actual container when it opens the file.
+pub const PHOTO_RAW: &[&str] = &[
+    "raf", "arw", "nef", "cr2", "cr3", "orf", "rw2", "dng", "pef", "srw", "3fr", "iiq", "rwl", "raw", "erf", "mrw",
+    "mos", "x3f", "kdc", "dcr", "mef", "nrw",
 ];
 
-const VIDEO: &[&str] = &["mp4", "mov", "mkv", "avi", "webm", "m4v", "mpg", "mpeg", "wmv", "mts", "m2ts"];
+const PHOTO_FFMPEG: &[&str] = &["heic", "heif", "avif"];
+
+const VIDEO: &[&str] = &[
+    "mp4", "mov", "mkv", "avi", "webm", "m4v", "mpg", "mpeg", "wmv", "mts", "m2ts",
+];
 
 /// Returns `None` for anything that is not media we can index.
 pub fn classify(path: &Path) -> Option<(MediaKind, Decoder)> {
     let ext = path.extension()?.to_str()?.to_ascii_lowercase();
     if PHOTO_NATIVE.contains(&ext.as_str()) {
         Some((MediaKind::Photo, Decoder::Native))
+    } else if PHOTO_RAW.contains(&ext.as_str()) {
+        Some((MediaKind::Photo, Decoder::LibRaw))
     } else if PHOTO_FFMPEG.contains(&ext.as_str()) {
         Some((MediaKind::Photo, Decoder::Ffmpeg))
     } else if VIDEO.contains(&ext.as_str()) {
@@ -67,6 +75,7 @@ pub fn extension(path: &Path) -> String {
 pub fn supported_extensions() -> Vec<&'static str> {
     PHOTO_NATIVE
         .iter()
+        .chain(PHOTO_RAW.iter())
         .chain(PHOTO_FFMPEG.iter())
         .chain(VIDEO.iter())
         .copied()
@@ -79,10 +88,26 @@ mod tests {
 
     #[test]
     fn classifies_by_extension_case_insensitively() {
-        assert_eq!(classify(Path::new("a/IMG_0231.JPG")), Some((MediaKind::Photo, Decoder::Native)));
-        assert_eq!(classify(Path::new("a/clip.MP4")), Some((MediaKind::Video, Decoder::Ffmpeg)));
-        assert_eq!(classify(Path::new("a/shot.heic")), Some((MediaKind::Photo, Decoder::Ffmpeg)));
-        assert_eq!(classify(Path::new("a/raw.CR3")), Some((MediaKind::Photo, Decoder::Ffmpeg)));
+        assert_eq!(
+            classify(Path::new("a/IMG_0231.JPG")),
+            Some((MediaKind::Photo, Decoder::Native))
+        );
+        assert_eq!(
+            classify(Path::new("a/clip.MP4")),
+            Some((MediaKind::Video, Decoder::Ffmpeg))
+        );
+        assert_eq!(
+            classify(Path::new("a/shot.heic")),
+            Some((MediaKind::Photo, Decoder::Ffmpeg))
+        );
+        assert_eq!(
+            classify(Path::new("a/raw.CR3")),
+            Some((MediaKind::Photo, Decoder::LibRaw))
+        );
+        assert_eq!(
+            classify(Path::new("a/phase.IIQ")),
+            Some((MediaKind::Photo, Decoder::LibRaw))
+        );
     }
 
     #[test]

@@ -10,6 +10,7 @@ pub mod ffmpeg;
 pub mod formats;
 pub mod metadata;
 pub mod quality;
+pub mod raw;
 pub mod scanner;
 pub mod thumbnails;
 
@@ -27,6 +28,8 @@ pub enum MediaError {
     Unsupported(String),
     #[error("could not decode: {0}")]
     Decode(String),
+    #[error("{code}: {detail}")]
+    Raw { code: raw::RawErrorCode, detail: String },
     #[error("could not encode: {0}")]
     Encode(String),
     #[error("FFmpeg is required but not available: {0}")]

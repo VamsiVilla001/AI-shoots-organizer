@@ -14,7 +14,7 @@ destination.
 > once in the app and every file you put in it lands in a folder of that name.
 
 **Platforms:** Windows 10/11 · macOS (Apple Silicon)
-**Stack:** Tauri 2 · React + TypeScript · Rust · ONNX Runtime · FFmpeg · SQLite
+**Stack:** Tauri 2 · React + TypeScript · Rust · ONNX Runtime · LibRaw · FFmpeg · SQLite
 
 Everything runs locally. No cloud APIs, no uploads; the source folder is only
 ever read — every export copies originals into a new destination.
@@ -40,7 +40,7 @@ docs/                    Architecture and development notes
 ## Getting started
 
 Prerequisites: Rust (stable, MSVC on Windows), Node 20+, FFmpeg on `PATH`
-(needed for videos, HEIC and camera raw — JPEG/PNG shoots work without it).
+(needed for videos and HEIC; camera RAW is decoded by bundled LibRaw on Windows).
 
 ```bash
 npm install

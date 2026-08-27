@@ -94,17 +94,21 @@ pub fn read(path: &Path, kind: MediaKind, decoder: Decoder, ffmpeg: Option<&Ffmp
         MediaKind::Photo => {
             read_exif_into(path, &mut meta);
 
-            if decoder == Decoder::Native {
-                if let Ok((w, h)) = image::image_dimensions(path) {
-                    meta.width = Some(w);
-                    meta.height = Some(h);
+            match decoder {
+                Decoder::Native => {
+                    if let Ok((w, h)) = image::image_dimensions(path) {
+                        meta.width = Some(w);
+                        meta.height = Some(h);
+                    }
                 }
-            } else if let Some(ff) = ffmpeg {
-                // HEIC and raw files still carry EXIF, but their dimensions
-                // have to come from the decoder.
-                if let Ok(info) = ff.probe(path) {
-                    meta.width = meta.width.or(info.width);
-                    meta.height = meta.height.or(info.height);
+                Decoder::LibRaw => read_libraw_metadata_into(path, &mut meta),
+                Decoder::Ffmpeg => {
+                    if let Some(ff) = ffmpeg {
+                        if let Ok(info) = ff.probe(path) {
+                            meta.width = meta.width.or(info.width);
+                            meta.height = meta.height.or(info.height);
+                        }
+                    }
                 }
             }
         }
@@ -140,14 +144,18 @@ pub fn read(path: &Path, kind: MediaKind, decoder: Decoder, ffmpeg: Option<&Ffmp
 pub fn read_orientation(path: &Path, kind: MediaKind, ffmpeg: Option<&Ffmpeg>) -> Option<u16> {
     match kind {
         MediaKind::Photo => {
-            let file = File::open(path).ok()?;
-            let mut reader = BufReader::new(file);
-            let exif = exif::Reader::new().read_from_container(&mut reader).ok()?;
-            let orientation = exif
-                .get_field(Tag::Orientation, In::PRIMARY)?
-                .value
-                .get_uint(0)? as u16;
-            (1..=8).contains(&orientation).then_some(orientation)
+            if let Ok(file) = File::open(path) {
+                let mut reader = BufReader::new(file);
+                if let Ok(exif) = exif::Reader::new().read_from_container(&mut reader) {
+                    if let Some(orientation) = orientation_from_exif(&exif) {
+                        return Some(orientation);
+                    }
+                }
+            }
+            let (_, decoder) = crate::formats::classify(path)?;
+            (decoder == Decoder::LibRaw)
+                .then(|| raw_preview_orientation(path))
+                .flatten()
         }
         MediaKind::Video => {
             let rotation = ffmpeg?.probe(path).ok()?.rotation.rem_euclid(360);
@@ -168,6 +176,10 @@ fn read_exif_into(path: &Path, meta: &mut Metadata) {
         return; // PNG, WEBP and stripped JPEGs simply have nothing to read.
     };
 
+    fill_from_exif(&exif, meta);
+}
+
+fn fill_from_exif(exif: &exif::Exif, meta: &mut Metadata) {
     if let Some(field) = exif.get_field(Tag::Orientation, In::PRIMARY) {
         if let Some(v) = field.value.get_uint(0) {
             meta.orientation = v as u16;
@@ -192,14 +204,14 @@ fn read_exif_into(path: &Path, meta: &mut Metadata) {
         }
     }
 
-    meta.camera_make = ascii_field(&exif, Tag::Make);
-    meta.camera_model = ascii_field(&exif, Tag::Model);
-    meta.lens = ascii_field(&exif, Tag::LensModel);
+    meta.camera_make = ascii_field(exif, Tag::Make);
+    meta.camera_model = ascii_field(exif, Tag::Model);
+    meta.lens = ascii_field(exif, Tag::LensModel);
     meta.iso = exif
         .get_field(Tag::PhotographicSensitivity, In::PRIMARY)
         .and_then(|f| f.value.get_uint(0));
-    meta.focal_length = rational_field(&exif, Tag::FocalLength);
-    meta.aperture = rational_field(&exif, Tag::FNumber);
+    meta.focal_length = rational_field(exif, Tag::FocalLength);
+    meta.aperture = rational_field(exif, Tag::FNumber);
     meta.shutter = exif
         .get_field(Tag::ExposureTime, In::PRIMARY)
         .map(|f| f.display_value().to_string());
@@ -214,6 +226,66 @@ fn read_exif_into(path: &Path, meta: &mut Metadata) {
             .get_field(Tag::PixelYDimension, In::PRIMARY)
             .and_then(|f| f.value.get_uint(0));
     }
+}
+
+fn orientation_from_exif(exif: &exif::Exif) -> Option<u16> {
+    let orientation = exif.get_field(Tag::Orientation, In::PRIMARY)?.value.get_uint(0)? as u16;
+    (1..=8).contains(&orientation).then_some(orientation)
+}
+
+fn raw_preview_orientation(path: &Path) -> Option<u16> {
+    let preview = rawlib::RawProcessor::extract_thumbnail(path).ok()?;
+    if preview.format != rawlib::ImageFormat::Jpeg {
+        return None;
+    }
+    let mut cursor = std::io::Cursor::new(preview.data);
+    let exif = exif::Reader::new().read_from_container(&mut cursor).ok()?;
+    orientation_from_exif(&exif)
+}
+
+fn read_libraw_metadata_into(path: &Path, meta: &mut Metadata) {
+    // LibRaw identifies the real container here, so a renamed JPEG with a RAW
+    // extension cannot silently enter the RAW pipeline.
+    if let Ok(raw) = rawlib::extract_exif(path) {
+        meta.width = raw.image_width.or(meta.width);
+        meta.height = raw.image_height.or(meta.height);
+        meta.camera_make = raw.make.or_else(|| meta.camera_make.take());
+        meta.camera_model = raw.model.or_else(|| meta.camera_model.take());
+        meta.lens = raw.lens_model.or_else(|| meta.lens.take());
+        meta.iso = raw.iso.or(meta.iso);
+        meta.shutter = raw.exposure_time.or_else(|| meta.shutter.take());
+        meta.aperture = raw.f_number.as_deref().and_then(parse_first_number).or(meta.aperture);
+        meta.focal_length = raw
+            .focal_length
+            .as_deref()
+            .and_then(parse_first_number)
+            .or(meta.focal_length);
+        meta.captured_at = raw
+            .date_time_original
+            .as_deref()
+            .and_then(normalise_timestamp)
+            .or_else(|| meta.captured_at.take());
+    }
+
+    // Orientation commonly lives in the embedded JPEG even when the RAW
+    // container reader does not expose it.
+    if let Ok(preview) = rawlib::RawProcessor::extract_thumbnail(path) {
+        if preview.format == rawlib::ImageFormat::Jpeg {
+            let mut cursor = std::io::Cursor::new(preview.data);
+            if let Ok(exif) = exif::Reader::new().read_from_container(&mut cursor) {
+                fill_from_exif(&exif, meta);
+            }
+        }
+    }
+}
+
+fn parse_first_number(text: &str) -> Option<f64> {
+    let number: String = text
+        .chars()
+        .skip_while(|c| !c.is_ascii_digit() && *c != '.')
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    number.parse().ok()
 }
 
 fn ascii_field(exif: &exif::Exif, tag: Tag) -> Option<String> {
