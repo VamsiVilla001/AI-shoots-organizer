@@ -110,6 +110,18 @@ pub fn delete_index(conn: &Connection, id: i64) -> Result<()> {
     Ok(())
 }
 
+/// Removes only the requested shoot indexes, ignoring ids that no longer
+/// exist. The caller supplies an explicit list so this can never widen into a
+/// database-wide clear by accident.
+pub fn delete_indexes(conn: &Connection, ids: &[i64]) -> Result<usize> {
+    let mut statement = conn.prepare("DELETE FROM shoots WHERE id = ?1")?;
+    let mut removed = 0usize;
+    for id in ids {
+        removed += statement.execute(params![id])?;
+    }
+    Ok(removed)
+}
+
 /// Removes every scanned shoot index. Shoot-owned media, faces, clusters,
 /// albums, jobs and exports cascade away; global settings and player profiles
 /// are deliberately retained. Source media is never touched.
@@ -156,5 +168,22 @@ mod tests {
             .query_row("SELECT value FROM settings WHERE key = 'theme'", [], |row| row.get(0))
             .unwrap();
         assert_eq!(setting, "dark");
+    }
+
+    #[test]
+    fn clearing_selected_indexes_preserves_unselected_shoots() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+        let one = create(&conn, "One", "D:\\one").unwrap();
+        let two = create(&conn, "Two", "D:\\two").unwrap();
+        let three = create(&conn, "Three", "D:\\three").unwrap();
+
+        assert_eq!(
+            delete_indexes(&conn, &[one.id, three.id, three.id, 999_999]).unwrap(),
+            2
+        );
+        let remaining = list(&conn).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, two.id);
     }
 }

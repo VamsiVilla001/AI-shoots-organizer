@@ -81,6 +81,7 @@ pub fn run() {
             commands::create_shoot,
             commands::rename_shoot,
             commands::delete_shoot_index,
+            commands::clear_selected_scanned_data,
             commands::clear_scanned_data,
             commands::resume_processing,
             commands::pause_processing,

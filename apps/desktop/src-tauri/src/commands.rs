@@ -168,6 +168,81 @@ pub fn delete_shoot_index(app: AppHandle, state: State<'_, Arc<AppState>>, shoot
     Ok(())
 }
 
+/// Removes the indexes and unshared cached thumbnails for an explicit set of
+/// shoots. The original source folders are read-only and are never traversed
+/// or modified by this operation.
+#[tauri::command]
+pub fn clear_selected_scanned_data(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    shoot_ids: Vec<i64>,
+) -> Result<usize> {
+    let mut shoot_ids: Vec<i64> = shoot_ids.into_iter().filter(|id| *id > 0).collect();
+    shoot_ids.sort_unstable();
+    shoot_ids.dedup();
+    if shoot_ids.is_empty() {
+        return Err(err("select at least one shoot to clear"));
+    }
+
+    for shoot_id in &shoot_ids {
+        state.cancel_shoot(*shoot_id);
+    }
+
+    let (removed, mut thumbnail_paths) = state.db.transaction(|conn| {
+        let mut thumbnail_paths = Vec::<PathBuf>::new();
+        {
+            let mut statement = conn.prepare(
+                "SELECT thumbnail_path FROM media
+                  WHERE shoot_id = ?1 AND thumbnail_path IS NOT NULL",
+            )?;
+            for shoot_id in &shoot_ids {
+                let paths = statement
+                    .query_map(teo_database::rusqlite::params![shoot_id], |row| row.get::<_, String>(0))?
+                    .collect::<teo_database::rusqlite::Result<Vec<_>>>()?;
+                thumbnail_paths.extend(paths.into_iter().map(PathBuf::from));
+            }
+        }
+
+        for shoot_id in &shoot_ids {
+            jobs::cancel_for_shoot(conn, *shoot_id)?;
+        }
+        let removed = shoots::delete_indexes(conn, &shoot_ids)?;
+        Ok((removed, thumbnail_paths))
+    })?;
+
+    thumbnail_paths.sort_unstable();
+    thumbnail_paths.dedup();
+    let cache_root = state.thumbnails.root();
+    let conn = state.db.conn()?;
+    let mut thumbnails_removed = 0usize;
+    for path in thumbnail_paths {
+        let still_referenced: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM media WHERE thumbnail_path = ?1)",
+            teo_database::rusqlite::params![path.to_string_lossy().as_ref()],
+            |row| row.get(0),
+        )?;
+        if still_referenced || !path.starts_with(cache_root) || !path.is_file() {
+            continue;
+        }
+        match std::fs::remove_file(&path) {
+            Ok(()) => thumbnails_removed += 1,
+            Err(error) => tracing::warn!(file = %path.display(), %error, "could not remove an unused thumbnail"),
+        }
+    }
+    drop(conn);
+
+    for shoot_id in &shoot_ids {
+        events::shoot_changed(&app, *shoot_id, "deleted");
+    }
+    events::emit(&app, events::LIBRARY_CHANGED, ());
+    tracing::info!(
+        shoots = removed,
+        thumbnails = thumbnails_removed,
+        "cleared selected scanned data"
+    );
+    Ok(removed)
+}
+
 /// Removes all scanned shoot indexes and generated thumbnails while keeping
 /// settings, player profiles, logs and installed models. Original media
 /// folders are never modified.

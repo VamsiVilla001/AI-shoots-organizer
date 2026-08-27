@@ -68,6 +68,8 @@ export const createShoot = (name: string, sourcePath: string) =>
 export const renameShoot = (shootId: number, name: string) =>
   call<void>('rename_shoot', { shootId, name })
 export const deleteShootIndex = (shootId: number) => call<void>('delete_shoot_index', { shootId })
+export const clearSelectedScannedData = (shootIds: number[]) =>
+  call<number>('clear_selected_scanned_data', { shootIds })
 export const clearScannedData = () => call<number>('clear_scanned_data')
 export const resumeProcessing = (shootId: number) => call<number>('resume_processing', { shootId })
 export const pauseProcessing = (paused: boolean) => call<boolean>('pause_processing', { paused })

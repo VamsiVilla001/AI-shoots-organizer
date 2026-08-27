@@ -14,16 +14,32 @@ import { useUi } from '../store'
 
 export function ShootsScreen() {
   const [creating, setCreating] = useState(false)
+  const [selected, setSelected] = useState<Set<number>>(new Set())
   const shoots = useQuery({ queryKey: ['shoots'], queryFn: api.listShoots })
   const queryClient = useQueryClient()
   const pushNotice = useUi((state) => state.pushNotice)
   const resetWorkspace = useUi((state) => state.resetWorkspace)
+  const activeShootId = useUi((state) => state.activeShootId)
+  const clearSelected = useMutation({
+    mutationFn: (shootIds: number[]) => api.clearSelectedScannedData(shootIds),
+    onSuccess: (removed, shootIds) => {
+      setSelected(new Set())
+      if (activeShootId !== null && shootIds.includes(activeShootId)) resetWorkspace()
+      queryClient.invalidateQueries({ queryKey: ['shoots'] })
+      pushNotice({
+        level: 'success',
+        message: `Cleared scanned data for ${removed} selected shoot${removed === 1 ? '' : 's'}. Original files were not touched.`,
+      })
+    },
+    onError: (error) => pushNotice({ level: 'error', message: String(error) }),
+  })
   const clearScanned = useMutation({
     mutationFn: api.clearScannedData,
     onSuccess: (removed) => {
       queryClient.clear()
       resetWorkspace()
       queryClient.invalidateQueries({ queryKey: ['shoots'] })
+      setSelected(new Set())
       pushNotice({
         level: 'success',
         message: `Cleared ${removed} scanned shoot${removed === 1 ? '' : 's'} and thumbnail cache.`,
@@ -32,11 +48,46 @@ export function ShootsScreen() {
     onError: (error) => pushNotice({ level: 'error', message: String(error) }),
   })
 
+  const listedIds = (shoots.data ?? []).map((shoot) => shoot.id)
+  const selectedShoots = (shoots.data ?? []).filter((shoot) => selected.has(shoot.id))
+  const toggleSelected = (shootId: number) => {
+    setSelected((current) => {
+      const next = new Set(current)
+      if (next.has(shootId)) next.delete(shootId)
+      else next.add(shootId)
+      return next
+    })
+  }
+
   return (
     <>
       <div className="workspace-header">
         <h1>Recent Shoots</h1>
         <div className="actions">
+          <button
+            disabled={listedIds.length === 0}
+            onClick={() =>
+              setSelected(selectedShoots.length === listedIds.length ? new Set() : new Set(listedIds))
+            }
+          >
+            {selectedShoots.length === listedIds.length && listedIds.length > 0 ? 'Clear selection' : 'Select all'}
+          </button>
+          <button
+            className="danger"
+            disabled={selectedShoots.length === 0 || clearSelected.isPending}
+            onClick={() => {
+              const names = selectedShoots.map((shoot) => `• ${shoot.name}`).join('\n')
+              if (
+                window.confirm(
+                  `Clear scanned data for ${selectedShoots.length} selected shoot${selectedShoots.length === 1 ? '' : 's'}?\n\n${names}\n\nIndexes, analysis and unused thumbnails will be removed. Original photos and videos are not touched.`,
+                )
+              ) {
+                clearSelected.mutate(selectedShoots.map((shoot) => shoot.id))
+              }
+            }}
+          >
+            {clearSelected.isPending ? 'Clearing selected…' : `Clear selected (${selectedShoots.length})`}
+          </button>
           <button
             className="danger"
             disabled={clearScanned.isPending}
@@ -50,7 +101,7 @@ export function ShootsScreen() {
               }
             }}
           >
-            {clearScanned.isPending ? 'Clearing…' : 'Clear scanned data'}
+            {clearScanned.isPending ? 'Clearing…' : 'Clear all scanned data'}
           </button>
           <button className="primary" onClick={() => setCreating(true)}>
             + New Shoot
@@ -69,7 +120,14 @@ export function ShootsScreen() {
       )}
 
       <div className="card-grid">
-        {shoots.data?.map((shoot) => <ShootCard key={shoot.id} shoot={shoot} />)}
+        {shoots.data?.map((shoot) => (
+          <ShootCard
+            key={shoot.id}
+            shoot={shoot}
+            selected={selected.has(shoot.id)}
+            onToggleSelected={() => toggleSelected(shoot.id)}
+          />
+        ))}
       </div>
 
       {creating && <NewShootModal onClose={() => setCreating(false)} />}
@@ -77,7 +135,15 @@ export function ShootsScreen() {
   )
 }
 
-function ShootCard({ shoot }: { shoot: ShootSummary }) {
+function ShootCard({
+  shoot,
+  selected,
+  onToggleSelected,
+}: {
+  shoot: ShootSummary
+  selected: boolean
+  onToggleSelected: () => void
+}) {
   const openShoot = useUi((s) => s.openShoot)
   const progress = useUi((s) => s.progress[shoot.id])
   const pushNotice = useUi((s) => s.pushNotice)
@@ -103,9 +169,16 @@ function ShootCard({ shoot }: { shoot: ShootSummary }) {
     shoot.status === 'completed' ? 'completed' : shoot.status === 'failed' ? 'failed' : working ? 'processing' : ''
 
   return (
-    <div className="card shoot-card" onClick={() => openShoot(shoot.id)}>
+    <div className={`card shoot-card${selected ? ' selected' : ''}`} onClick={() => openShoot(shoot.id)}>
       <div className="title">
-        <span>{shoot.name}</span>
+        <label
+          className="checkbox-row"
+          style={{ fontWeight: 700 }}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <input type="checkbox" checked={selected} onChange={onToggleSelected} />
+          <span>{shoot.name}</span>
+        </label>
         <span className={`badge ${badgeClass}`}>{statusLabel}</span>
       </div>
       <div className="stats">
