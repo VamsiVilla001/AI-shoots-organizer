@@ -1030,59 +1030,100 @@ pub async fn add_manual_face(
 pub struct NameFaceResult {
     pub person: Person,
     pub faces_named: usize,
+    pub matches_found: usize,
     pub group: Group,
     pub files_added: usize,
 }
 
 #[tauri::command]
-pub fn name_face(
+pub async fn name_face(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
     face_id: i64,
     name: String,
     team: Option<String>,
 ) -> Result<NameFaceResult> {
-    let name = name.trim();
+    let name = name.trim().to_string();
     if name.is_empty() {
         return Err(err("give the person a name"));
     }
 
-    let result = state.db.transaction(|conn| {
-        let face = faces::get_by_id(conn, face_id)?
-            .ok_or_else(|| teo_database::DbError::other("that face is no longer in the library"))?;
-        let person = people::get_or_create(conn, name, team.as_deref())?;
+    let state = Arc::clone(&state);
+    let result = tauri::async_runtime::spawn_blocking(move || -> Result<NameFaceResult> {
+        let (person, faces_named, shoot_id, appearances_before_matching) = state.db.transaction(|conn| {
+            let face = faces::get_by_id(conn, face_id)?
+                .ok_or_else(|| teo_database::DbError::other("that face is no longer in the library"))?;
+            let person = people::get_or_create(conn, &name, team.as_deref())?;
 
-        // A cluster represents the same unknown person across files. Naming one
-        // member names the cluster; isolated/reviewed faces are assigned alone.
-        let faces_named = match face.cluster_id {
-            Some(cluster_id) => clusters::name_cluster(conn, cluster_id, person.id)?,
-            None => faces::assign_many(conn, &[face.id], person.id)?,
-        };
+            // A cluster represents the same unknown person across files. Naming one
+            // member names the cluster; isolated/reviewed faces are assigned alone.
+            let faces_named = match face.cluster_id {
+                Some(cluster_id) => clusters::name_cluster(conn, cluster_id, person.id)?,
+                None => faces::assign_many(conn, &[face.id], person.id)?,
+            };
 
-        logs::record_quiet(
-            conn,
-            logs::EVENT_PLAYER_ASSIGNMENT,
-            Some(face.shoot_id),
-            Some(face.media_id),
-            Some(person.id),
-            Some(&format!("named from photo; {faces_named} face(s) assigned")),
-        );
+            logs::record_quiet(
+                conn,
+                logs::EVENT_PLAYER_ASSIGNMENT,
+                Some(face.shoot_id),
+                Some(face.media_id),
+                Some(person.id),
+                Some(&format!("named from photo; {faces_named} face(s) assigned")),
+            );
+            let appearances_before_matching = conn.query_row(
+                "SELECT COUNT(*) FROM faces
+                  WHERE shoot_id = ?1 AND person_id = ?2
+                    AND assignment IN ('suggested','confirmed')",
+                teo_database::rusqlite::params![face.shoot_id, person.id],
+                |row| row.get::<_, i64>(0),
+            )?;
+            Ok((person, faces_named, face.shoot_id, appearances_before_matching))
+        })?;
 
-        albums::regenerate(conn, face.shoot_id)?;
-        let player_album = albums::list(conn, face.shoot_id)?.into_iter().find(|album| {
-            album.album_type == AlbumType::Player.as_str() && album.person_ids.contains(&person.id)
-        });
+        // The newly confirmed face is now a reference sample. Recognition may
+        // have completed before the reviewer named it, so compare the remaining
+        // unknown faces immediately. This is deliberately format-agnostic:
+        // camera RAW, JPEG, PNG, HEIC and TIFF are all photo rows here.
+        stages::recognise_shoot(&state.db, shoot_id, &state.settings())?;
 
-        let group = groups::get_or_create(conn, face.shoot_id, &person.name, Some(person.id))?;
-        let files_added = match player_album {
-            Some(album) => groups::add_media(conn, group.id, &albums::media_ids(conn, album.id, None)?)?,
-            None => 0,
-        };
-        let group = groups::get_by_id(conn, group.id)?
-            .ok_or_else(|| teo_database::DbError::other("that group no longer exists"))?;
+        state
+            .db
+            .transaction(|conn| {
+                let appearances_after_matching = conn.query_row(
+                    "SELECT COUNT(*) FROM faces
+                  WHERE shoot_id = ?1 AND person_id = ?2
+                    AND assignment IN ('suggested','confirmed')",
+                    teo_database::rusqlite::params![shoot_id, person.id],
+                    |row| row.get::<_, i64>(0),
+                )?;
+                let matches_found = appearances_after_matching
+                    .saturating_sub(appearances_before_matching)
+                    .max(0) as usize;
+                albums::regenerate(conn, shoot_id)?;
+                let player_album = albums::list(conn, shoot_id)?.into_iter().find(|album| {
+                    album.album_type == AlbumType::Player.as_str() && album.person_ids.contains(&person.id)
+                });
 
-        Ok(NameFaceResult { person, faces_named, group, files_added })
-    })?;
+                let group = groups::get_or_create(conn, shoot_id, &person.name, Some(person.id))?;
+                let files_added = match player_album {
+                    Some(album) => groups::add_media(conn, group.id, &albums::media_ids(conn, album.id, None)?)?,
+                    None => 0,
+                };
+                let group = groups::get_by_id(conn, group.id)?
+                    .ok_or_else(|| teo_database::DbError::other("that group no longer exists"))?;
+
+                Ok(NameFaceResult {
+                    person,
+                    faces_named,
+                    matches_found,
+                    group,
+                    files_added,
+                })
+            })
+            .map_err(CommandError::from)
+    })
+    .await
+    .map_err(|error| err(format!("face matching stopped unexpectedly: {error}")))??;
 
     events::emit(&app, events::LIBRARY_CHANGED, ());
     events::shoot_changed(&app, result.group.shoot_id, "groups");

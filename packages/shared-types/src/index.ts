@@ -242,6 +242,8 @@ export interface GroupStats {
 export interface NameFaceResult {
   person: Person
   facesNamed: number
+  /** Similar unidentified faces matched immediately after this reference was named. */
+  matchesFound: number
   group: Group
   filesAdded: number
 }

@@ -35,6 +35,8 @@ export function GroupsScreen() {
 function GroupsBody({ shootId }: { shootId: number }) {
   const [view, setView] = useState<View>({ kind: 'ungrouped' })
   const [typeFilter, setTypeFilter] = useState<MediaType | 'all'>('all')
+  const [qualityFilter, setQualityFilter] = useState<'all' | 'best' | 'duplicates'>('all')
+  const [mediaSort, setMediaSort] = useState<'capturedAt' | 'quality' | 'filename'>('capturedAt')
   const [search, setSearch] = useState('')
   const [debouncedSearch, setDebouncedSearch] = useState('')
   const [selected, setSelected] = useState<Set<number>>(new Set())
@@ -60,13 +62,16 @@ function GroupsBody({ shootId }: { shootId: number }) {
   }, [search])
 
   const media = useQuery({
-    queryKey: ['media', shootId, 'sort', view, typeFilter, debouncedSearch],
+    queryKey: ['media', shootId, 'sort', view, typeFilter, qualityFilter, mediaSort, debouncedSearch],
     queryFn: () =>
       api.listMedia({
         shootId,
         groupId: view.kind === 'group' ? view.id : null,
         ungrouped: view.kind === 'ungrouped',
         mediaType: typeFilter === 'all' ? null : typeFilter,
+        onlyBestShots: qualityFilter === 'best',
+        onlyDuplicates: qualityFilter === 'duplicates',
+        sort: mediaSort,
         search: debouncedSearch || null,
         limit: 2000,
       }),
@@ -306,6 +311,28 @@ function GroupsBody({ shootId }: { shootId: number }) {
                 {option === 'all' ? 'All' : option === 'photo' ? 'Photos' : 'Videos'}
               </button>
             ))}
+            <label className="checkbox-row">
+              <span className="hint">Photo picks</span>
+              <select
+                value={qualityFilter}
+                onChange={(event) => setQualityFilter(event.target.value as typeof qualityFilter)}
+              >
+                <option value="all">All media</option>
+                <option value="best">Best picks</option>
+                <option value="duplicates">Similar sets</option>
+              </select>
+            </label>
+            <label className="checkbox-row">
+              <span className="hint">Sort</span>
+              <select
+                value={mediaSort}
+                onChange={(event) => setMediaSort(event.target.value as typeof mediaSort)}
+              >
+                <option value="capturedAt">Capture time</option>
+                <option value="quality">Best quality</option>
+                <option value="filename">Filename</option>
+              </select>
+            </label>
             <span className="hint">
               {activeGroup
                 ? `${activeGroup.name} — ${formatCount(visible.length)} shown`

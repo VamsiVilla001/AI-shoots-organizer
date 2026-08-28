@@ -13,7 +13,10 @@ use rawlib::{DecodeOptions, ImageFormat, RawProcessor, ThumbnailData};
 
 use crate::{MediaError, Result};
 
-/// Embedded previews below this size are not suitable for face analysis.
+/// Absolute floor for an embedded preview. The requested decode size can raise
+/// this requirement so RAW analysis receives the same working resolution as a
+/// JPEG/PNG analysis instead of silently accepting a much smaller camera
+/// thumbnail.
 const MIN_PREVIEW_LONG_EDGE: u32 = 640;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,7 +97,9 @@ pub fn decode(path: &Path, max_dim: Option<u32>) -> Result<DecodedRaw> {
     let preview_detail = match preview_result {
         Ok(preview) => match pixels_from_libraw(preview) {
             Ok(mut image) => {
-                if image.width().max(image.height()) >= MIN_PREVIEW_LONG_EDGE {
+                let preview_long_edge = image.width().max(image.height());
+                let required_long_edge = required_preview_long_edge(max_dim);
+                if preview_long_edge >= required_long_edge {
                     resize_if_needed(&mut image, max_dim, &mut timings);
                     timings.total = total_started.elapsed();
                     log_success(path, &source_format, DecodeMethod::EmbeddedPreview, &image, timings);
@@ -105,7 +110,9 @@ pub fn decode(path: &Path, max_dim: Option<u32>) -> Result<DecodedRaw> {
                         timings,
                     });
                 }
-                format!("embedded preview was smaller than {MIN_PREVIEW_LONG_EDGE}px")
+                format!(
+                    "embedded preview was {preview_long_edge}px; this operation needs at least {required_long_edge}px"
+                )
             }
             Err(error) => error,
         },
@@ -150,6 +157,10 @@ pub fn decode(path: &Path, max_dim: Option<u32>) -> Result<DecodedRaw> {
         method: DecodeMethod::HalfSizeDemosaic,
         timings,
     })
+}
+
+fn required_preview_long_edge(max_dim: Option<u32>) -> u32 {
+    max_dim.unwrap_or(MIN_PREVIEW_LONG_EDGE).max(MIN_PREVIEW_LONG_EDGE)
 }
 
 fn decode_half_size(path: &Path, timings: &mut DecodeTimings) -> std::result::Result<RgbImage, rawlib::RawError> {
@@ -320,5 +331,13 @@ mod tests {
         let image = pixels_from_libraw(data).unwrap();
         assert_eq!(image.dimensions(), (2, 1));
         assert_eq!(image.get_pixel(1, 0).0, [0, 0, 255]);
+    }
+
+    #[test]
+    fn raw_preview_must_meet_the_requested_working_resolution() {
+        assert_eq!(required_preview_long_edge(Some(512)), MIN_PREVIEW_LONG_EDGE);
+        assert_eq!(required_preview_long_edge(Some(1600)), 1600);
+        assert_eq!(required_preview_long_edge(Some(2048)), 2048);
+        assert_eq!(required_preview_long_edge(None), MIN_PREVIEW_LONG_EDGE);
     }
 }

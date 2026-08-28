@@ -427,7 +427,7 @@ mod tests {
                 path: format!("C:\\shoot\\{filename}"),
                 filename: filename.to_string(),
                 media_type: MediaType::Photo,
-                extension: "jpg".into(),
+                extension: filename.split('.').next_back().unwrap_or_default().to_ascii_lowercase(),
                 file_size: 1,
                 content_key: filename.to_string(),
                 captured_at: None,
@@ -470,7 +470,9 @@ mod tests {
             faces::assign(&conn, known_face, person.id, Some(1.0)).unwrap();
         }
 
-        let (_, new_face) = add_face(&db, shoot_id, "new.jpg", unit(vec![0.97, 0.1, 0.0]));
+        // RAW and finished stills share the exact same recognition route once
+        // their pixels have been decoded into the common photo representation.
+        let (_, new_face) = add_face(&db, shoot_id, "new.RAF", unit(vec![0.97, 0.1, 0.0]));
 
         let report = recognise_shoot(&db, shoot_id, &AppSettings::default()).unwrap();
         assert_eq!(report.library_players, 1);
@@ -481,6 +483,31 @@ mod tests {
         let face = faces::get_by_id(&conn, new_face).unwrap().unwrap();
         assert_eq!(face.assignment, "suggested");
         assert!(face.person_id.is_some());
+    }
+
+    #[test]
+    fn naming_a_raw_reference_after_the_initial_pass_enables_matching() {
+        let db = Database::open_in_memory().unwrap();
+        let shoot_id = seed_shoot(&db);
+        let (_, reference) = add_face(&db, shoot_id, "reference.RAF", unit(vec![1.0, 0.0, 0.0]));
+        let (_, similar) = add_face(&db, shoot_id, "similar.RAF", unit(vec![0.98, 0.08, 0.0]));
+
+        let first_pass = recognise_shoot(&db, shoot_id, &AppSettings::default()).unwrap();
+        assert_eq!(first_pass.library_players, 0);
+        assert_eq!(first_pass.faces_matched, 0);
+
+        {
+            let conn = db.conn().unwrap();
+            let person = people::get_or_create(&conn, "Jonathan", None).unwrap();
+            faces::assign(&conn, reference, person.id, None).unwrap();
+        }
+
+        let after_naming = recognise_shoot(&db, shoot_id, &AppSettings::default()).unwrap();
+        assert_eq!(after_naming.faces_matched, 1);
+        let conn = db.conn().unwrap();
+        let matched = faces::get_by_id(&conn, similar).unwrap().unwrap();
+        assert_eq!(matched.assignment, "suggested");
+        assert!(matched.person_id.is_some());
     }
 
     #[test]

@@ -30,6 +30,10 @@ fn raw_is_verified_and_decoded_without_ffmpeg() {
         decoded.decode_method,
         DecodeMethod::LibRawEmbeddedPreview | DecodeMethod::LibRawHalfSizeDemosaic
     ));
+    let quality = teo_media_core::quality::analyse(&decoded.image);
+    assert!((0.0..=1.0).contains(&quality.overall));
+    assert!((0.0..=1.0).contains(&quality.sharpness));
+    assert!((0.0..=1.0).contains(&quality.exposure));
 
     let cache_dir = tempfile::tempdir().unwrap();
     let cache = teo_media_core::ThumbnailCache::new(cache_dir.path());

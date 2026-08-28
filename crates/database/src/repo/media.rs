@@ -501,7 +501,7 @@ mod tests {
 
     fn seed(conn: &Connection) -> i64 {
         let shoot = shoots::create(conn, "Test", "C:\\shoot").unwrap();
-        for (i, name) in ["a.jpg", "b.jpg", "c.mp4"].iter().enumerate() {
+        for (i, name) in ["a.jpg", "b.raf", "c.mp4"].iter().enumerate() {
             upsert(
                 conn,
                 &NewMedia {
@@ -624,7 +624,7 @@ mod tests {
             .query_row("SELECT id FROM media WHERE filename = 'a.jpg'", [], |row| row.get(0))
             .unwrap();
         let b = conn
-            .query_row("SELECT id FROM media WHERE filename = 'b.jpg'", [], |row| row.get(0))
+            .query_row("SELECT id FROM media WHERE filename = 'b.raf'", [], |row| row.get(0))
             .unwrap();
 
         set_quality(&conn, a, 0.45, 0.4, 0.6, 0xaaaa_aaaa_aaaa_aaaa).unwrap();

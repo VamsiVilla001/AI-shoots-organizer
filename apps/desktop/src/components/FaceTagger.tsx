@@ -58,11 +58,15 @@ export function FaceTagger(props: {
     },
     onSuccess: async (result) => {
       await refresh()
+      const newMatches =
+        result.matchesFound > 0
+          ? `, including ${result.matchesFound} new face match${result.matchesFound === 1 ? '' : 'es'}`
+          : ''
       pushNotice({
         level: 'success',
         message:
           result.filesAdded > 0
-            ? `${result.person.name}: ${result.filesAdded} file(s) gathered into their group.`
+            ? `${result.person.name}: ${result.filesAdded} file(s) gathered into their group${newMatches}.`
             : `${result.person.name} named. Their group already contains every known appearance.`,
       })
       props.onClose()
