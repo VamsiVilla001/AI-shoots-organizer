@@ -212,9 +212,33 @@ pub fn validate_destination(destination: &Path, source_roots: &[PathBuf]) -> Res
 }
 
 fn normalise(path: &Path) -> PathBuf {
-    // canonicalize only works on paths that exist; fall back to the raw path so
-    // validation still runs for a folder the user is about to create.
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    if let Ok(canonical) = path.canonicalize() {
+        return canonical;
+    }
+
+    // A destination the user is about to create does not exist yet. Resolve
+    // its deepest existing ancestor, then put the missing components back.
+    // This matters on macOS, where `/var` canonicalises to `/private/var`:
+    // comparing a canonical source with an uncanonical child would otherwise
+    // miss that the destination sits inside the source.
+    let mut ancestor = path;
+    let mut missing = Vec::new();
+    while !ancestor.exists() {
+        let Some(name) = ancestor.file_name() else {
+            return path.to_path_buf();
+        };
+        missing.push(name.to_os_string());
+        let Some(parent) = ancestor.parent() else {
+            return path.to_path_buf();
+        };
+        ancestor = parent;
+    }
+
+    let mut normalised = ancestor.canonicalize().unwrap_or_else(|_| ancestor.to_path_buf());
+    for component in missing.into_iter().rev() {
+        normalised.push(component);
+    }
+    normalised
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -512,10 +536,12 @@ mod tests {
 
     #[test]
     fn exporting_into_the_source_folder_is_refused() {
-        let source = PathBuf::from("C:\\BGMS_Final_Shoot");
-        assert!(validate_destination(Path::new("C:\\BGMS_Final_Shoot"), std::slice::from_ref(&source)).is_err());
-        assert!(validate_destination(Path::new("C:\\BGMS_Final_Shoot\\Export"), std::slice::from_ref(&source)).is_err());
-        assert!(validate_destination(Path::new("D:\\Export"), &[source]).is_ok());
+        let source = tempfile::tempdir().unwrap();
+        let unrelated = tempfile::tempdir().unwrap();
+        let source_root = source.path().to_path_buf();
+        assert!(validate_destination(source.path(), std::slice::from_ref(&source_root)).is_err());
+        assert!(validate_destination(&source.path().join("Export"), std::slice::from_ref(&source_root)).is_err());
+        assert!(validate_destination(unrelated.path(), &[source_root]).is_ok());
     }
 
     #[test]

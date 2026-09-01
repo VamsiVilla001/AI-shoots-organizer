@@ -1,14 +1,16 @@
-//! Preview-first camera RAW decoding through LibRaw.
+//! Preview-first camera RAW decoding.
 //!
-//! Every call owns its own [`rawlib::RawProcessor`]. That is required by
-//! LibRaw's threading model and fits the desktop application's existing bounded
-//! worker queue. Pixels stay in memory; source files are never modified.
+//! Windows uses LibRaw, while macOS uses Rawler because rawlib's packaged Unix
+//! archive is linked against Linux's C++ runtime. Both paths first use the
+//! camera's embedded preview and fall back to demosaicing. Pixels stay in
+//! memory; source files are never modified.
 
 use std::fmt;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 use image::{DynamicImage, RgbImage};
+#[cfg(not(target_os = "macos"))]
 use rawlib::{DecodeOptions, ImageFormat, RawProcessor, ThumbnailData};
 
 use crate::{MediaError, Result};
@@ -49,11 +51,13 @@ pub enum DecodeMethod {
 impl DecodeMethod {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::EmbeddedPreview => "libraw-embedded-preview",
-            Self::HalfSizeDemosaic => "libraw-half-size-demosaic",
+            Self::EmbeddedPreview => "raw-embedded-preview",
+            Self::HalfSizeDemosaic => "raw-demosaic-fallback",
         }
     }
 }
+
+const RAW_DECODER: &str = if cfg!(target_os = "macos") { "rawler" } else { "libraw" };
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DecodeTimings {
@@ -71,56 +75,40 @@ pub struct DecodedRaw {
     pub timings: DecodeTimings,
 }
 
-/// Opens a RAW with LibRaw, first trying its largest embedded preview and then
-/// falling back to a fast half-size, 8-bit sRGB demosaic.
+/// Opens a RAW, first trying its largest embedded preview and then falling back
+/// to a demosaic. The LibRaw fallback is half-size; Rawler develops to sRGB and
+/// the common resize step immediately bounds the result.
 pub fn decode(path: &Path, max_dim: Option<u32>) -> Result<DecodedRaw> {
     let total_started = Instant::now();
     let source_format = crate::formats::extension(path).to_ascii_uppercase();
     let mut timings = DecodeTimings::default();
 
-    let open_started = Instant::now();
-    let mut preview_processor = RawProcessor::new().map_err(|e| raw_error(path, e, RawErrorCode::DecodeFailed))?;
-    preview_processor
-        .open_file(path)
-        .map_err(|e| raw_error(path, e, RawErrorCode::Unsupported))?;
-    timings.open += open_started.elapsed();
-
     let preview_started = Instant::now();
-    let preview_result = preview_processor
-        .unpack_thumb()
-        .and_then(|_| preview_processor.get_thumbnail());
+    let preview_result = decode_preview(path, &mut timings);
     timings.preview = preview_started.elapsed();
-    // The returned thumbnail owns its bytes, so the LibRaw context can be
-    // released before image decoding allocates RGB pixels.
-    drop(preview_processor);
 
     let preview_detail = match preview_result {
-        Ok(preview) => match pixels_from_libraw(preview) {
-            Ok(mut image) => {
-                let preview_long_edge = image.width().max(image.height());
-                let required_long_edge = required_preview_long_edge(max_dim);
-                if preview_long_edge >= required_long_edge {
-                    resize_if_needed(&mut image, max_dim, &mut timings);
-                    timings.total = total_started.elapsed();
-                    log_success(path, &source_format, DecodeMethod::EmbeddedPreview, &image, timings);
-                    return Ok(DecodedRaw {
-                        image,
-                        source_format,
-                        method: DecodeMethod::EmbeddedPreview,
-                        timings,
-                    });
-                }
-                format!(
-                    "embedded preview was {preview_long_edge}px; this operation needs at least {required_long_edge}px"
-                )
+        Ok(mut image) => {
+            let preview_long_edge = image.width().max(image.height());
+            let required_long_edge = required_preview_long_edge(max_dim);
+            if preview_long_edge >= required_long_edge {
+                resize_if_needed(&mut image, max_dim, &mut timings);
+                timings.total = total_started.elapsed();
+                log_success(path, &source_format, DecodeMethod::EmbeddedPreview, &image, timings);
+                return Ok(DecodedRaw {
+                    image,
+                    source_format,
+                    method: DecodeMethod::EmbeddedPreview,
+                    timings,
+                });
             }
-            Err(error) => error,
-        },
-        Err(error) => error.to_string(),
+            format!("embedded preview was {preview_long_edge}px; this operation needs at least {required_long_edge}px")
+        }
+        Err(error) => error,
     };
 
     let full_started = Instant::now();
-    let full_result = decode_half_size(path, &mut timings);
+    let full_result = decode_fallback(path, &mut timings);
     timings.full_decode = full_started.elapsed();
     let mut image = match full_result {
         Ok(image) => image,
@@ -130,7 +118,7 @@ pub fn decode(path: &Path, max_dim: Option<u32>) -> Result<DecodedRaw> {
             tracing::warn!(
                 file = %path.display(),
                 source_format,
-                decoder = "libraw",
+                decoder = RAW_DECODER,
                 preview_error = %preview_detail,
                 error = %mapped,
                 open_ms = millis(timings.open),
@@ -163,7 +151,33 @@ fn required_preview_long_edge(max_dim: Option<u32>) -> u32 {
     max_dim.unwrap_or(MIN_PREVIEW_LONG_EDGE).max(MIN_PREVIEW_LONG_EDGE)
 }
 
-fn decode_half_size(path: &Path, timings: &mut DecodeTimings) -> std::result::Result<RgbImage, rawlib::RawError> {
+#[cfg(not(target_os = "macos"))]
+fn decode_preview(path: &Path, timings: &mut DecodeTimings) -> std::result::Result<RgbImage, String> {
+    let open_started = Instant::now();
+    let mut processor = RawProcessor::new().map_err(|error| error.to_string())?;
+    processor.open_file(path).map_err(|error| error.to_string())?;
+    timings.open += open_started.elapsed();
+    let pixels = processor
+        .unpack_thumb()
+        .and_then(|_| processor.get_thumbnail())
+        .map_err(|error| error.to_string())?;
+    drop(processor);
+    pixels_from_libraw(pixels)
+}
+
+#[cfg(target_os = "macos")]
+fn decode_preview(path: &Path, timings: &mut DecodeTimings) -> std::result::Result<RgbImage, String> {
+    let open_started = Instant::now();
+    let image = rawler::analyze::extract_preview_pixels(path, rawler::decoders::RawDecodeParams::default())
+        .map_err(|error| error.to_string())?;
+    timings.open += open_started.elapsed();
+    let rgb = image.into_rgb8();
+    RgbImage::from_raw(rgb.width(), rgb.height(), rgb.into_raw())
+        .ok_or_else(|| "Rawler preview length does not match its dimensions".to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn decode_fallback(path: &Path, timings: &mut DecodeTimings) -> std::result::Result<RgbImage, rawlib::RawError> {
     let open_started = Instant::now();
     let mut processor = RawProcessor::new()?;
     processor.open_file(path)?;
@@ -178,6 +192,20 @@ fn decode_half_size(path: &Path, timings: &mut DecodeTimings) -> std::result::Re
     pixels_from_libraw(pixels).map_err(|e| rawlib::RawError { code: -1, message: e })
 }
 
+#[cfg(target_os = "macos")]
+fn decode_fallback(
+    path: &Path,
+    timings: &mut DecodeTimings,
+) -> std::result::Result<RgbImage, rawler::RawlerError> {
+    let open_started = Instant::now();
+    let image = rawler::analyze::raw_to_srgb(path, rawler::decoders::RawDecodeParams::default())?;
+    timings.open += open_started.elapsed();
+    let rgb = image.into_rgb8();
+    RgbImage::from_raw(rgb.width(), rgb.height(), rgb.into_raw())
+        .ok_or_else(|| rawler::RawlerError::DecoderFailed("developed image length does not match its dimensions".into()))
+}
+
+#[cfg(not(target_os = "macos"))]
 fn pixels_from_libraw(data: ThumbnailData) -> std::result::Result<RgbImage, String> {
     match data.format {
         ImageFormat::Jpeg => image::load_from_memory(&data.data)
@@ -188,6 +216,7 @@ fn pixels_from_libraw(data: ThumbnailData) -> std::result::Result<RgbImage, Stri
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 fn bitmap_to_rgb(mut data: ThumbnailData) -> std::result::Result<RgbImage, String> {
     let width = u32::from(data.width);
     let height = u32::from(data.height);
@@ -260,8 +289,9 @@ fn resize_if_needed(image: &mut RgbImage, max_dim: Option<u32>, timings: &mut De
     timings.resize += started.elapsed();
 }
 
-fn raw_error(path: &Path, error: rawlib::RawError, fallback: RawErrorCode) -> MediaError {
-    let message = error.message.to_ascii_lowercase();
+fn raw_error(path: &Path, error: impl fmt::Display, fallback: RawErrorCode) -> MediaError {
+    let detail = error.to_string();
+    let message = detail.to_ascii_lowercase();
     let code = if message.contains("memory")
         || message.contains("allocation")
         || message.contains("too big")
@@ -281,7 +311,7 @@ fn raw_error(path: &Path, error: rawlib::RawError, fallback: RawErrorCode) -> Me
     };
     MediaError::Raw {
         code,
-        detail: format!("{}: {}", path.display(), error.message),
+        detail: format!("{}: {detail}", path.display()),
     }
 }
 
@@ -289,7 +319,7 @@ fn log_success(path: &Path, source_format: &str, method: DecodeMethod, image: &R
     tracing::info!(
         file = %path.display(),
         source_format,
-        decoder = "libraw",
+        decoder = RAW_DECODER,
         decode_method = method.as_str(),
         width = image.width(),
         height = image.height(),
@@ -319,6 +349,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "macos"))]
     fn converts_an_eight_bit_rgb_bitmap() {
         let data = ThumbnailData {
             format: ImageFormat::Bitmap,

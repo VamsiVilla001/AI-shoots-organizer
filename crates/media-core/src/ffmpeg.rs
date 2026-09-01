@@ -47,8 +47,11 @@ pub struct VideoInfo {
 
 impl Ffmpeg {
     /// Looks for FFmpeg next to an explicitly configured directory first, then
-    /// on `PATH`. Returns `None` when it is not installed — the application
-    /// stays usable for JPEG/PNG shoots without it.
+    /// on `PATH`, then in the standard macOS package-manager locations.
+    /// Finder-launched applications do not inherit the user's shell `PATH`, so
+    /// the final lookup is required to find a normal Homebrew installation.
+    /// Returns `None` when it is not installed — the application stays usable
+    /// for JPEG/PNG and camera-RAW shoots without it.
     pub fn discover(hint_dir: Option<&Path>) -> Option<Self> {
         let exe = |stem: &str| -> Option<PathBuf> {
             if let Some(dir) = hint_dir {
@@ -57,7 +60,17 @@ impl Ffmpeg {
                     return Some(candidate);
                 }
             }
-            which::which(stem).ok()
+            if let Ok(found) = which::which(stem) {
+                return Some(found);
+            }
+            #[cfg(target_os = "macos")]
+            for directory in ["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin"] {
+                let candidate = Path::new(directory).join(stem);
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+            None
         };
 
         let ffmpeg = exe("ffmpeg")?;

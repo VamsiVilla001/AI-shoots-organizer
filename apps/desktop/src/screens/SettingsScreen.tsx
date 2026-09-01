@@ -5,6 +5,7 @@
 
 import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { open } from '@tauri-apps/plugin-dialog'
 import type { AppSettings } from '@teo/shared-types'
 import * as api from '../api'
 import { formatBytes } from '../media'
@@ -117,6 +118,31 @@ export function SettingsScreen() {
           <div className="hint">
             FFmpeg: {info.data?.ffmpegAvailable ? (info.data.ffmpegVersion ?? 'found') : 'not found — HEIC and video need it'}
           </div>
+          <label className="field">
+            <span>FFmpeg directory</span>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <input
+                style={{ flex: 1 }}
+                value={draft.ffmpegDirectory ?? ''}
+                onChange={(event) => set('ffmpegDirectory', event.target.value.trim() || null)}
+                placeholder="Automatic (Homebrew, MacPorts, or PATH)"
+              />
+              <button
+                type="button"
+                onClick={async () => {
+                  const selected = await open({
+                    directory: true,
+                    multiple: false,
+                    title: 'Choose the folder containing ffmpeg and ffprobe',
+                  })
+                  if (typeof selected === 'string') set('ffmpegDirectory', selected)
+                }}
+              >
+                Browse…
+              </button>
+            </div>
+            <span className="hint">Only needed when FFmpeg is installed in a non-standard location.</span>
+          </label>
         </div>
 
         <div className="card">

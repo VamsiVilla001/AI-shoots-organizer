@@ -10,6 +10,7 @@
   "scripts": {
     "dev": "npm run tauri:dev -w @teo/desktop",
     "build": "npm run tauri:build -w @teo/desktop",
+    "package:mac": "bash scripts/build-macos.sh",
     "web:dev": "npm run dev -w @teo/desktop",
     "web:build": "npm run build -w @teo/desktop",
     "typecheck": "npm run typecheck --workspaces --if-present",

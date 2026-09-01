@@ -233,6 +233,7 @@ fn orientation_from_exif(exif: &exif::Exif) -> Option<u16> {
     (1..=8).contains(&orientation).then_some(orientation)
 }
 
+#[cfg(not(target_os = "macos"))]
 fn raw_preview_orientation(path: &Path) -> Option<u16> {
     let preview = rawlib::RawProcessor::extract_thumbnail(path).ok()?;
     if preview.format != rawlib::ImageFormat::Jpeg {
@@ -243,6 +244,16 @@ fn raw_preview_orientation(path: &Path) -> Option<u16> {
     orientation_from_exif(&exif)
 }
 
+#[cfg(target_os = "macos")]
+fn raw_preview_orientation(path: &Path) -> Option<u16> {
+    let analysed = rawler::analyze::analyze_metadata(path).ok()?;
+    let rawler::analyze::AnalyzerData::Metadata(metadata) = analysed.data? else {
+        return None;
+    };
+    metadata.raw_metadata.exif.orientation.filter(|orientation| (1..=8).contains(orientation))
+}
+
+#[cfg(not(target_os = "macos"))]
 fn read_libraw_metadata_into(path: &Path, meta: &mut Metadata) {
     // LibRaw identifies the real container here, so a renamed JPEG with a RAW
     // extension cannot silently enter the RAW pipeline.
@@ -279,6 +290,43 @@ fn read_libraw_metadata_into(path: &Path, meta: &mut Metadata) {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn read_libraw_metadata_into(path: &Path, meta: &mut Metadata) {
+    let Ok(analysed) = rawler::analyze::analyze_metadata(path) else {
+        return;
+    };
+    let Some(rawler::analyze::AnalyzerData::Metadata(metadata)) = analysed.data else {
+        return;
+    };
+
+    let params = metadata.raw_params;
+    let raw = metadata.raw_metadata;
+    let exif = raw.exif;
+    meta.width = u32::try_from(params.raw_width).ok().or(meta.width);
+    meta.height = u32::try_from(params.raw_height).ok().or(meta.height);
+    meta.camera_make = nonempty(raw.make).or_else(|| meta.camera_make.take());
+    meta.camera_model = nonempty(raw.model).or_else(|| meta.camera_model.take());
+    meta.lens = raw.lens.map(|lens| lens.lens_name).or_else(|| meta.lens.take());
+    meta.iso = exif.iso_speed.or_else(|| exif.iso_speed_ratings.map(u32::from)).or(meta.iso);
+    meta.shutter = exif.exposure_time.map(|value| value.to_string()).or_else(|| meta.shutter.take());
+    meta.aperture = exif.fnumber.map(|value| f64::from(value.as_f32())).or(meta.aperture);
+    meta.focal_length = exif.focal_length.map(|value| f64::from(value.as_f32())).or(meta.focal_length);
+    meta.captured_at = exif
+        .date_time_original
+        .as_deref()
+        .and_then(normalise_timestamp)
+        .or_else(|| meta.captured_at.take());
+    if let Some(orientation) = exif.orientation.filter(|orientation| (1..=8).contains(orientation)) {
+        meta.orientation = orientation;
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn nonempty(value: String) -> Option<String> {
+    (!value.trim().is_empty()).then_some(value)
+}
+
+#[cfg(not(target_os = "macos"))]
 fn parse_first_number(text: &str) -> Option<f64> {
     let number: String = text
         .chars()

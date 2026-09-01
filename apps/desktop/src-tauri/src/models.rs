@@ -4,8 +4,10 @@
 //! embedder dropped into the models folder can be selected; the pipeline only
 //! knows the [`FaceDetector`](teo_face_detection::FaceDetector) and
 //! [`FaceEmbedder`](teo_face_recognition::FaceEmbedder) traits. Models are not
-//! bundled — they are fetched by `scripts/fetch-models.ps1` — so this module
-//! also has to describe *absence* clearly enough for the UI to explain it.
+//! fetched by `scripts/fetch-models.*` during development; packaged builds can
+//! bundle them and [`seed_from_bundle`] installs them on first launch. This
+//! module also has to describe *absence* clearly enough for the UI to explain
+//! it when a build intentionally ships without models.
 
 use std::path::{Path, PathBuf};
 
@@ -48,6 +50,42 @@ pub fn classify(file_name: &str) -> ModelRole {
     } else {
         ModelRole::Unknown
     }
+}
+
+/// Copies bundled ONNX models into the app-data model folder without
+/// overwriting models the user has installed or replaced.
+///
+/// Development builds have no `models` resource directory, so absence is a
+/// normal no-op. Copy failures are logged and do not prevent the organiser
+/// from opening; manual grouping remains usable without face recognition.
+pub fn seed_from_bundle(source: &Path, target: &Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(source) else {
+        return 0;
+    };
+
+    let mut copied = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("onnx")) {
+            continue;
+        }
+
+        let destination = target.join(entry.file_name());
+        if destination.exists() {
+            continue;
+        }
+
+        match std::fs::copy(&path, &destination) {
+            Ok(bytes) => {
+                tracing::info!(model = %entry.file_name().to_string_lossy(), bytes, "installed a bundled model");
+                copied += 1;
+            }
+            Err(error) => {
+                tracing::warn!(path = %path.display(), %error, "could not install a bundled model");
+            }
+        }
+    }
+    copied
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -159,6 +197,30 @@ impl ModelRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bundled_models_are_installed_once_without_overwriting_user_models() {
+        let root = std::env::temp_dir().join(format!("teo-seed-{}", std::process::id()));
+        let bundle = root.join("bundle");
+        let app_data = root.join("models");
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(&bundle).unwrap();
+        std::fs::create_dir_all(&app_data).unwrap();
+
+        std::fs::write(bundle.join("det_10g.onnx"), b"detector").unwrap();
+        std::fs::write(bundle.join("w600k_r50.onnx"), b"embedder").unwrap();
+        std::fs::write(bundle.join("notes.txt"), b"not a model").unwrap();
+
+        assert_eq!(seed_from_bundle(&bundle, &app_data), 2);
+        assert!(!app_data.join("notes.txt").exists());
+
+        std::fs::write(app_data.join("det_10g.onnx"), b"user model").unwrap();
+        assert_eq!(seed_from_bundle(&bundle, &app_data), 0);
+        assert_eq!(std::fs::read(app_data.join("det_10g.onnx")).unwrap(), b"user model");
+        assert_eq!(seed_from_bundle(&root.join("missing"), &app_data), 0);
+
+        std::fs::remove_dir_all(root).ok();
+    }
 
     #[test]
     fn recognises_detector_filenames() {

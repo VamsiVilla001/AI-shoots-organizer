@@ -39,6 +39,13 @@ pub fn run() {
             init_logging(&paths);
             tracing::info!(version = env!("CARGO_PKG_VERSION"), data = %paths.root.display(), "starting");
 
+            // Release packages include the face models under Resources/models.
+            // Install them into app data once so the same model registry is
+            // used by packaged and development builds.
+            if let Ok(resources) = app.path().resource_dir() {
+                models::seed_from_bundle(&resources.join("models"), &paths.models);
+            }
+
             let db = Database::open(paths.database_file())
                 .map_err(|e| format!("could not open the database: {e}"))?;
             let settings = AppSettings::load(&db)

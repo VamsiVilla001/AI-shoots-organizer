@@ -12,13 +12,22 @@ thiserror = "2.0"
 serde = { version = "1.0", features = ["derive"] }
 chrono = "0.4"
 image = "0.25"
-rawlib = "0.7.1"
 kamadak-exif = "0.6"
 blake3 = "1.8"
 walkdir = "2.5"
 rayon = "1.12"
 tracing = "0.1"
 which = "8.0"
+
+# rawlib bundles a Windows-ready LibRaw archive, but its Unix build script
+# hard-codes Linux's libstdc++ and cannot produce a self-contained modern
+# macOS binary. Rawler provides the same preview-first/fallback decode path in
+# pure Rust on macOS, while Windows keeps the proven LibRaw implementation.
+[target.'cfg(target_os = "macos")'.dependencies]
+rawler = "0.6.0"
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+rawlib = "0.7.1"
 
 [dev-dependencies]
 tempfile = "3.27"

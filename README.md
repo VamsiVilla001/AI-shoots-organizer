@@ -39,8 +39,8 @@ docs/                    Architecture and development notes
 
 ## Getting started
 
-Prerequisites: Rust (stable, MSVC on Windows), Node 20+, FFmpeg on `PATH`
-(needed for videos and HEIC; camera RAW is decoded by bundled LibRaw on Windows).
+Prerequisites: Rust stable, Node 20+, and FFmpeg (needed for videos and HEIC;
+camera RAW is decoded by the built-in platform decoder).
 
 ```bash
 npm install
@@ -52,14 +52,23 @@ bash scripts/fetch-models.sh                                        # macOS
 # run in development
 npm run dev
 
-# package an installer
+# package a Windows installer (on Windows)
 npm run build
+
+# package a signed .app and .dmg with bundled face models (on macOS)
+npm run package:mac
 ```
 
 GPU acceleration is on by default: DirectML on Windows and CoreML on macOS are
 operating-system components, and ONNX Runtime falls back to the CPU provider
 when neither can start. Measured on an RTX 3070 Ti, that is ~2.6x on detection
 and ~7.9x on embedding. Force a provider from **Settings → Acceleration**.
+
+The macOS package command produces a native build for the Mac it runs on
+(Apple Silicon on an M-series Mac), bundles the two face models, and applies an
+ad-hoc signature when no Apple Developer identity is configured. See
+[deployment instructions](docs/deployment.md) for distribution and
+notarisation details.
 
 NVIDIA CUDA is opt-in, since it needs a toolkit installed separately:
 
@@ -68,8 +77,8 @@ npm run tauri:build -w @teo/desktop -- -- --features cuda
 ```
 
 If a shoot is analysing slowly, check that you are running a **release** build
-(`npm run build`) — `npm run dev` compiles for debugging and is several times
-slower.
+(`npm run package:mac` on macOS) — `npm run dev` compiles for debugging and is
+several times slower.
 
 ## Verifying the code
 
