@@ -50,7 +50,7 @@ pub struct ScanReport {
 /// Directories other tools scatter around a shoot that never contain originals.
 const IGNORED_DIRS: &[&str] = &[
     ".git", "node_modules", "__MACOSX", ".Trash", "$RECYCLE.BIN",
-    "Lightroom Catalog Previews.lrdata", ".thumbnails", "_teo_export",
+    "Lightroom Catalog Previews.lrdata", ".thumbnails", "_skwad_export",
 ];
 
 fn is_ignored_dir(name: &str) -> bool {

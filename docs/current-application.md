@@ -1,4 +1,4 @@
-# Esports AI Media Organiser — Current Application Documentation
+# SKWAD Media Organiser — Current Application Documentation
 
 **Application version:** 1.2.0 (development)
 
@@ -12,7 +12,7 @@ may contain ideas that are not implemented yet.
 
 ## 1. Product summary
 
-Esports AI Media Organiser is a desktop application for sorting large esports
+SKWAD Media Organiser is a desktop application for sorting large esports
 photo and video shoots by the people visible in them. It scans an existing
 shoot folder, detects and recognises faces locally, groups unknown people for
 review, generates virtual albums, and copies selected groups into organised
@@ -486,12 +486,12 @@ default.
 Managed data is stored under the Tauri application-data directory:
 
 ```text
-com.teorganiser.desktop/
+com.skwad.mediaorganiser/
 ├── database/media.db
 ├── thumbnails/
 ├── face_cache/
 ├── models/
-└── logs/teo.log
+└── logs/skwad.log
 ```
 
 On Windows this is normally under `%APPDATA%`; on macOS it is under
@@ -503,7 +503,7 @@ application event log. The event log stores identifiers and outcomes, not
 embedding blobs or image crops.
 
 The webview does not receive arbitrary filesystem access. Media is served by a
-custom `teomedia` protocol that resolves database media IDs and supports byte
+custom `skwadmedia` protocol that resolves database media IDs and supports byte
 ranges for video playback.
 
 ## 11. Data-management controls
@@ -655,7 +655,7 @@ SQLite databases and temporary directories.
 4. Use Resume after resolving a missing dependency.
 5. Use Reanalyse when changing models or thresholds and a complete rerun is
    intended.
-6. Check `logs/teo.log` for provider fallback or file-specific decode errors.
+6. Check `logs/skwad.log` for provider fallback or file-specific decode errors.
 
 ### The application becomes unresponsive
 

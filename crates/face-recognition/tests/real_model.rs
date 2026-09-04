@@ -4,7 +4,7 @@
 //! clean checkout has nothing to run against. Run it deliberately with
 //!
 //! ```text
-//! cargo test -p teo-face-recognition --test real_model -- --ignored --nocapture
+//! cargo test -p skwad-face-recognition --test real_model -- --ignored --nocapture
 //! ```
 //!
 //! Its job is to cover the two things unit tests cannot: that batching really
@@ -15,16 +15,16 @@
 use std::path::PathBuf;
 
 use image::RgbImage;
-use teo_face_detection::{Accelerator, Detection, Rect, SessionConfig};
-use teo_face_recognition::{ArcFaceEmbedder, FaceEmbedder};
+use skwad_face_detection::{Accelerator, Detection, Rect, SessionConfig};
+use skwad_face_recognition::{ArcFaceEmbedder, FaceEmbedder};
 
 /// Where the fetch scripts install the models.
 fn model_dir() -> Option<PathBuf> {
     let dir = if cfg!(windows) {
-        PathBuf::from(std::env::var("APPDATA").ok()?).join("com.teorganiser.desktop/models")
+        PathBuf::from(std::env::var("APPDATA").ok()?).join("com.skwad.mediaorganiser/models")
     } else {
         PathBuf::from(std::env::var("HOME").ok()?)
-            .join("Library/Application Support/com.teorganiser.desktop/models")
+            .join("Library/Application Support/com.skwad.mediaorganiser/models")
     };
     dir.is_dir().then_some(dir)
 }

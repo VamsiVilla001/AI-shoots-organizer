@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Esports AI Media Organiser",
+  "productName": "SKWAD Media Organiser",
   "version": "1.2.0",
-  "identifier": "com.teorganiser.desktop",
+  "identifier": "com.skwad.mediaorganiser",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Esports AI Media Organiser",
+        "title": "SKWAD Media Organiser",
         "width": 1440,
         "height": 900,
         "minWidth": 1024,
@@ -23,7 +23,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; img-src 'self' data: blob: http://teomedia.localhost teomedia: asset: http://asset.localhost; media-src 'self' blob: http://teomedia.localhost teomedia:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost",
+      "csp": "default-src 'self'; img-src 'self' data: blob: http://skwadmedia.localhost skwadmedia: asset: http://asset.localhost; media-src 'self' blob: http://skwadmedia.localhost skwadmedia:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost",
       "assetProtocol": {
         "enable": false,
         "scope": []

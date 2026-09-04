@@ -2,8 +2,8 @@
 //!
 //! The application is not bound to one model. Any ONNX detector and any ONNX
 //! embedder dropped into the models folder can be selected; the pipeline only
-//! knows the [`FaceDetector`](teo_face_detection::FaceDetector) and
-//! [`FaceEmbedder`](teo_face_recognition::FaceEmbedder) traits. Models are not
+//! knows the [`FaceDetector`](skwad_face_detection::FaceDetector) and
+//! [`FaceEmbedder`](skwad_face_recognition::FaceEmbedder) traits. Models are not
 //! bundled — they are fetched by `scripts/fetch-models.ps1` — so this module
 //! also has to describe *absence* clearly enough for the UI to explain it.
 
@@ -266,7 +266,7 @@ mod tests {
         impl TempHolder {
             pub fn new() -> Self {
                 let path = std::env::temp_dir().join(format!(
-                    "teo-models-{}-{}",
+                    "skwad-models-{}-{}",
                     std::process::id(),
                     COUNTER.fetch_add(1, Ordering::Relaxed)
                 ));

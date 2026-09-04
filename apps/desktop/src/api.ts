@@ -36,7 +36,7 @@ import type {
   Shoot,
   ShootSummary,
   VideoTimeline,
-} from '@teo/shared-types'
+} from '@skwad/shared-types'
 
 /** Backend errors arrive as `{ message }`; normalise to a throwable Error. */
 async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {

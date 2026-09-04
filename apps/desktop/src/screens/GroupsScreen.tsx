@@ -14,7 +14,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import type { Group, MediaType } from '@teo/shared-types'
+import type { Group, MediaType } from '@skwad/shared-types'
 import * as api from '../api'
 import { folderNameFor } from '../folders'
 import { formatCount } from '../media'

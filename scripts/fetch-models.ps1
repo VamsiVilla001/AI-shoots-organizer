@@ -15,7 +15,7 @@
 $ErrorActionPreference = 'Stop'
 
 $repoModels = Join-Path $PSScriptRoot '..\models' | Resolve-Path
-$appModels = Join-Path $env:APPDATA 'com.teorganiser.desktop\models'
+$appModels = Join-Path $env:APPDATA 'com.skwad.mediaorganiser\models'
 $zipUrl = 'https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip'
 $wanted = @('det_10g.onnx', 'w600k_r50.onnx')
 
@@ -23,7 +23,7 @@ $existing = $wanted | Where-Object { Test-Path (Join-Path $repoModels $_) }
 if ($existing.Count -eq $wanted.Count) {
     Write-Host "Models already present in $repoModels"
 } else {
-    $temp = Join-Path ([System.IO.Path]::GetTempPath()) "teo-models-$PID"
+    $temp = Join-Path ([System.IO.Path]::GetTempPath()) "skwad-models-$PID"
     New-Item -ItemType Directory -Force -Path $temp | Out-Null
     $zip = Join-Path $temp 'buffalo_l.zip'
 
@@ -52,7 +52,7 @@ if (Test-Path (Split-Path $appModels)) {
     Write-Host "Copied models into $appModels"
 } else {
     Write-Host "App data folder not found yet - run the app once, then re-run this script,"
-    Write-Host "or copy models\*.onnx into %APPDATA%\com.teorganiser.desktop\models manually."
+    Write-Host "or copy models\*.onnx into %APPDATA%\com.skwad.mediaorganiser\models manually."
 }
 
 Write-Host "Done."

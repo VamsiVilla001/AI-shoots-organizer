@@ -1,4 +1,4 @@
-import type { Media } from '@teo/shared-types'
+import type { Media } from '@skwad/shared-types'
 import { formatTime, thumbUrl } from '../media'
 import { useUi } from '../store'
 

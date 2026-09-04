@@ -18,13 +18,13 @@ rust-version = "1.82"
 license = "MIT"
 
 [workspace.dependencies]
-teo-clustering = { path = "crates/clustering" }
-teo-database = { path = "crates/database" }
-teo-export-engine = { path = "crates/export-engine" }
-teo-face-detection = { path = "crates/face-detection" }
-teo-face-recognition = { path = "crates/face-recognition" }
-teo-media-core = { path = "crates/media-core" }
-teo-video-analysis = { path = "crates/video-analysis" }
+skwad-clustering = { path = "crates/clustering" }
+skwad-database = { path = "crates/database" }
+skwad-export-engine = { path = "crates/export-engine" }
+skwad-face-detection = { path = "crates/face-detection" }
+skwad-face-recognition = { path = "crates/face-recognition" }
+skwad-media-core = { path = "crates/media-core" }
+skwad-video-analysis = { path = "crates/video-analysis" }
 
 [profile.release]
 opt-level = 3
@@ -41,17 +41,17 @@ strip = true
 [profile.dev.package."*"]
 opt-level = 3
 
-[profile.dev.package.teo-clustering]
+[profile.dev.package.skwad-clustering]
 opt-level = 3
-[profile.dev.package.teo-database]
+[profile.dev.package.skwad-database]
 opt-level = 3
-[profile.dev.package.teo-export-engine]
+[profile.dev.package.skwad-export-engine]
 opt-level = 3
-[profile.dev.package.teo-face-detection]
+[profile.dev.package.skwad-face-detection]
 opt-level = 3
-[profile.dev.package.teo-face-recognition]
+[profile.dev.package.skwad-face-recognition]
 opt-level = 3
-[profile.dev.package.teo-media-core]
+[profile.dev.package.skwad-media-core]
 opt-level = 3
-[profile.dev.package.teo-video-analysis]
+[profile.dev.package.skwad-video-analysis]
 opt-level = 3

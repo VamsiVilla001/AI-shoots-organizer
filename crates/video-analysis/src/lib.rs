@@ -13,7 +13,7 @@ use std::path::Path;
 use image::RgbImage;
 use serde::{Deserialize, Serialize};
 
-use teo_media_core::{Ffmpeg, MediaError};
+use skwad_media_core::{Ffmpeg, MediaError};
 
 pub use sampling::{plan_frames, FramePlan};
 
@@ -94,7 +94,7 @@ pub fn sample_frames(
 ) -> Vec<SampledFrame> {
     let mut out = Vec::with_capacity(plan.timestamps.len());
     for entry in &plan.timestamps {
-        match teo_media_core::decode::load_video_frame(
+        match skwad_media_core::decode::load_video_frame(
             path,
             entry.at,
             orientation,

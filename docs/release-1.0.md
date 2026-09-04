@@ -1,8 +1,8 @@
-# TE Organiser 1.0.0
+# SKWAD Media Organiser 1.0.0
 
 ## Release position
 
-Version 1.0.0 is the first stable product baseline for TE Organiser. It is a
+Version 1.0.0 is the first stable product baseline for SKWAD Media Organiser. It is a
 complete local desktop workflow for indexing an esports shoot, finding and
 grouping people, reviewing identity decisions, and copying originals into
 editor-ready folders.

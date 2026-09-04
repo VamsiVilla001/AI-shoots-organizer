@@ -10,12 +10,12 @@ use std::sync::Arc;
 use serde::Serialize;
 use tauri::{AppHandle, State};
 
-use teo_clustering::FaceMatcher;
-use teo_database::models::*;
-use teo_database::repo::{
+use skwad_clustering::FaceMatcher;
+use skwad_database::models::*;
+use skwad_database::repo::{
     albums, clusters, exports, faces, groups, jobs, logs, media as media_repo, people, shoots, video,
 };
-use teo_export_engine::ExportOptions;
+use skwad_export_engine::ExportOptions;
 
 use crate::events;
 use crate::models::{ModelRegistry, ModelStatus};
@@ -55,7 +55,7 @@ pub struct AppInfo {
     pub ffmpeg_available: bool,
     pub ffmpeg_version: Option<String>,
     pub models: ModelStatus,
-    pub accelerators: Vec<teo_face_detection::Accelerator>,
+    pub accelerators: Vec<skwad_face_detection::Accelerator>,
     pub cpu_cores: usize,
     pub supported_extensions: Vec<String>,
     pub cache_bytes: u64,
@@ -74,9 +74,9 @@ pub fn app_info(state: State<'_, Arc<AppState>>) -> Result<AppInfo> {
         ffmpeg_available: ffmpeg.is_some(),
         ffmpeg_version: ffmpeg.as_ref().and_then(|f| f.version()),
         models: registry.status(settings.detector_model.as_deref(), settings.embedder_model.as_deref()),
-        accelerators: teo_face_detection::available_accelerators(),
+        accelerators: skwad_face_detection::available_accelerators(),
         cpu_cores: num_cpus::get(),
-        supported_extensions: teo_media_core::formats::supported_extensions()
+        supported_extensions: skwad_media_core::formats::supported_extensions()
             .into_iter()
             .map(String::from)
             .collect(),
@@ -197,8 +197,8 @@ pub fn clear_selected_scanned_data(
             )?;
             for shoot_id in &shoot_ids {
                 let paths = statement
-                    .query_map(teo_database::rusqlite::params![shoot_id], |row| row.get::<_, String>(0))?
-                    .collect::<teo_database::rusqlite::Result<Vec<_>>>()?;
+                    .query_map(skwad_database::rusqlite::params![shoot_id], |row| row.get::<_, String>(0))?
+                    .collect::<skwad_database::rusqlite::Result<Vec<_>>>()?;
                 thumbnail_paths.extend(paths.into_iter().map(PathBuf::from));
             }
         }
@@ -218,7 +218,7 @@ pub fn clear_selected_scanned_data(
     for path in thumbnail_paths {
         let still_referenced: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM media WHERE thumbnail_path = ?1)",
-            teo_database::rusqlite::params![path.to_string_lossy().as_ref()],
+            skwad_database::rusqlite::params![path.to_string_lossy().as_ref()],
             |row| row.get(0),
         )?;
         if still_referenced || !path.starts_with(cache_root) || !path.is_file() {
@@ -721,10 +721,10 @@ pub fn add_media_to_group(
     let (group, added) = state.db.transaction(|conn| {
         let group = match (group_id, group_name.as_deref()) {
             (Some(id), _) => groups::get_by_id(conn, id)?
-                .ok_or_else(|| teo_database::DbError::other("that group no longer exists"))?,
+                .ok_or_else(|| skwad_database::DbError::other("that group no longer exists"))?,
             (None, Some(name)) => groups::get_or_create(conn, shoot_id, name, None)?,
             (None, None) => {
-                return Err(teo_database::DbError::other("choose a group or type a new name"))
+                return Err(skwad_database::DbError::other("choose a group or type a new name"))
             }
         };
         let added = if move_files {
@@ -811,12 +811,12 @@ pub fn group_from_album(
 ) -> Result<Group> {
     let group = state.db.transaction(|conn| {
         let album = albums::get_by_id(conn, album_id)?
-            .ok_or_else(|| teo_database::DbError::other("that album no longer exists"))?;
+            .ok_or_else(|| skwad_database::DbError::other("that album no longer exists"))?;
         let label = name.as_deref().map(str::trim).filter(|s| !s.is_empty()).unwrap_or(&album.name);
         let group = groups::get_or_create(conn, album.shoot_id, label, album.person_ids.first().copied())?;
         groups::add_media(conn, group.id, &albums::media_ids(conn, album_id, None)?)?;
         groups::get_by_id(conn, group.id)?
-            .ok_or_else(|| teo_database::DbError::other("that group no longer exists"))
+            .ok_or_else(|| skwad_database::DbError::other("that group no longer exists"))
     })?;
 
     events::shoot_changed(&app, group.shoot_id, "groups");
@@ -890,7 +890,7 @@ pub fn assign_faces(
         let person_id = match (person_id, person_name.as_deref()) {
             (Some(id), _) => id,
             (None, Some(name)) => people::get_or_create(conn, name, None)?.id,
-            (None, None) => return Err(teo_database::DbError::other("choose or name a player")),
+            (None, None) => return Err(skwad_database::DbError::other("choose or name a player")),
         };
         let n = faces::assign_many(conn, &face_ids, person_id)?;
         logs::record_quiet(
@@ -1008,7 +1008,7 @@ pub async fn add_manual_face(
                 Some("reviewer drew a missed face box"),
             );
             let face = faces::get_by_id(conn, face_id)?
-                .ok_or_else(|| teo_database::DbError::other("the new face could not be read back"))?;
+                .ok_or_else(|| skwad_database::DbError::other("the new face could not be read back"))?;
             Ok(ManualFaceResult { face, suggested_person })
         })?;
         Ok(result)
@@ -1052,7 +1052,7 @@ pub async fn name_face(
     let result = tauri::async_runtime::spawn_blocking(move || -> Result<NameFaceResult> {
         let (person, faces_named, shoot_id, appearances_before_matching) = state.db.transaction(|conn| {
             let face = faces::get_by_id(conn, face_id)?
-                .ok_or_else(|| teo_database::DbError::other("that face is no longer in the library"))?;
+                .ok_or_else(|| skwad_database::DbError::other("that face is no longer in the library"))?;
             let person = people::get_or_create(conn, &name, team.as_deref())?;
 
             // A cluster represents the same unknown person across files. Naming one
@@ -1074,7 +1074,7 @@ pub async fn name_face(
                 "SELECT COUNT(*) FROM faces
                   WHERE shoot_id = ?1 AND person_id = ?2
                     AND assignment IN ('suggested','confirmed')",
-                teo_database::rusqlite::params![face.shoot_id, person.id],
+                skwad_database::rusqlite::params![face.shoot_id, person.id],
                 |row| row.get::<_, i64>(0),
             )?;
             Ok((person, faces_named, face.shoot_id, appearances_before_matching))
@@ -1093,7 +1093,7 @@ pub async fn name_face(
                     "SELECT COUNT(*) FROM faces
                   WHERE shoot_id = ?1 AND person_id = ?2
                     AND assignment IN ('suggested','confirmed')",
-                    teo_database::rusqlite::params![shoot_id, person.id],
+                    skwad_database::rusqlite::params![shoot_id, person.id],
                     |row| row.get::<_, i64>(0),
                 )?;
                 let matches_found = appearances_after_matching
@@ -1110,7 +1110,7 @@ pub async fn name_face(
                     None => 0,
                 };
                 let group = groups::get_by_id(conn, group.id)?
-                    .ok_or_else(|| teo_database::DbError::other("that group no longer exists"))?;
+                    .ok_or_else(|| skwad_database::DbError::other("that group no longer exists"))?;
 
                 Ok(NameFaceResult {
                     person,
@@ -1263,7 +1263,7 @@ pub fn clear_thumbnail_cache(state: State<'_, Arc<AppState>>) -> Result<u64> {
     let removed = state.thumbnails.clear()?;
     let conn = state.db.conn()?;
     conn.execute("UPDATE media SET thumbnail_path = NULL", [])
-        .map_err(teo_database::DbError::from)?;
+        .map_err(skwad_database::DbError::from)?;
     Ok(removed)
 }
 

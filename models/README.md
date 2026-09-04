@@ -20,8 +20,8 @@ bash scripts/fetch-models.sh
 
 At runtime the application reads models from its **app data** folder:
 
-- Windows: `%APPDATA%\com.teorganiser.desktop\models`
-- macOS: `~/Library/Application Support/com.teorganiser.desktop/models`
+- Windows: `%APPDATA%\com.skwad.mediaorganiser\models`
+- macOS: `~/Library/Application Support/com.skwad.mediaorganiser/models`
 
 The fetch scripts copy models there automatically when the folder exists (i.e.
 after the app has been launched once).

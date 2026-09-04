@@ -1,17 +1,17 @@
 {
-  "name": "esports-media-ai",
+  "name": "skwad-media-organiser",
   "private": true,
   "version": "1.2.0",
-  "description": "Esports AI Media Organiser — local-first player-wise sorting for esports photo and video shoots",
+  "description": "SKWAD Media Organiser — local-first player-wise sorting for esports photo and video shoots",
   "workspaces": [
     "apps/*",
     "packages/*"
   ],
   "scripts": {
-    "dev": "npm run tauri:dev -w @teo/desktop",
-    "build": "npm run tauri:build -w @teo/desktop",
-    "web:dev": "npm run dev -w @teo/desktop",
-    "web:build": "npm run build -w @teo/desktop",
+    "dev": "npm run tauri:dev -w @skwad/desktop",
+    "build": "npm run tauri:build -w @skwad/desktop",
+    "web:dev": "npm run dev -w @skwad/desktop",
+    "web:build": "npm run build -w @skwad/desktop",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "lint": "npm run lint --workspaces --if-present",
     "rs:check": "cargo check --workspace --all-targets",

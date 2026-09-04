@@ -9,7 +9,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import type { Face } from '@teo/shared-types'
+import type { Face } from '@skwad/shared-types'
 import * as api from '../api'
 import { useUi } from '../store'
 

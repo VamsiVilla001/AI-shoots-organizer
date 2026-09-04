@@ -5,7 +5,7 @@
 
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import type { PersonSummary } from '@teo/shared-types'
+import type { PersonSummary } from '@skwad/shared-types'
 import * as api from '../api'
 import { formatCount } from '../media'
 import { Modal } from '../components/Modal'

@@ -5,7 +5,7 @@
  */
 
 import { create } from 'zustand'
-import type { ExportProgressEvent, NoticeEvent, ProgressEvent } from '@teo/shared-types'
+import type { ExportProgressEvent, NoticeEvent, ProgressEvent } from '@skwad/shared-types'
 
 export type Screen = 'shoots' | 'groups' | 'players' | 'albums' | 'review' | 'export' | 'settings'
 

@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tauri::AppHandle;
-use teo_database::models::{AlbumType, ExportStatus};
-use teo_database::repo::{albums, exports, groups as groups_repo, logs, media as media_repo, shoots};
-use teo_export_engine::{ExportGroup, ExportMode, ExportOptions, ExportPlan, SourceFile};
+use skwad_database::models::{AlbumType, ExportStatus};
+use skwad_database::repo::{albums, exports, groups as groups_repo, logs, media as media_repo, shoots};
+use skwad_export_engine::{ExportGroup, ExportMode, ExportOptions, ExportPlan, SourceFile};
 
 use crate::events;
 use crate::state::AppState;
@@ -15,9 +15,9 @@ use crate::state::AppState;
 #[derive(Debug, thiserror::Error)]
 pub enum ExportRunError {
     #[error(transparent)]
-    Database(#[from] teo_database::DbError),
+    Database(#[from] skwad_database::DbError),
     #[error(transparent)]
-    Engine(#[from] teo_export_engine::ExportError),
+    Engine(#[from] skwad_export_engine::ExportError),
     #[error("{0}")]
     Other(String),
 }
@@ -28,7 +28,7 @@ pub type Result<T> = std::result::Result<T, ExportRunError>;
 ///
 /// Whichever mode is in play, the rule is the same: the folder set the user can
 /// see in the app is the folder set that lands on disk.
-pub fn build_groups(db: &teo_database::Database, shoot_id: i64, options: &ExportOptions) -> Result<Vec<ExportGroup>> {
+pub fn build_groups(db: &skwad_database::Database, shoot_id: i64, options: &ExportOptions) -> Result<Vec<ExportGroup>> {
     match options.mode {
         ExportMode::Groups => build_from_manual_groups(db, shoot_id, options),
         ExportMode::AiAlbums => build_from_albums(db, shoot_id, options),
@@ -38,7 +38,7 @@ pub fn build_groups(db: &teo_database::Database, shoot_id: i64, options: &Export
 /// Reads a group's membership into the files the export will copy. Files that
 /// have gone missing from the source folder since the scan are skipped with a
 /// log line rather than failing the run.
-fn collect_files(conn: &teo_database::rusqlite::Connection, media_ids: &[i64]) -> Result<Vec<SourceFile>> {
+fn collect_files(conn: &skwad_database::rusqlite::Connection, media_ids: &[i64]) -> Result<Vec<SourceFile>> {
     let mut files = Vec::with_capacity(media_ids.len());
     for media_id in media_ids {
         let Some(item) = media_repo::get_by_id(conn, *media_id)? else {
@@ -62,7 +62,7 @@ fn collect_files(conn: &teo_database::rusqlite::Connection, media_ids: &[i64]) -
 /// The editor's own groups — the primary path (§34). The group's name (or its
 /// folder-name override) becomes the folder, in the order shown in the app.
 fn build_from_manual_groups(
-    db: &teo_database::Database,
+    db: &skwad_database::Database,
     shoot_id: i64,
     options: &ExportOptions,
 ) -> Result<Vec<ExportGroup>> {
@@ -87,7 +87,7 @@ fn build_from_manual_groups(
     Ok(out)
 }
 
-fn build_from_albums(db: &teo_database::Database, shoot_id: i64, options: &ExportOptions) -> Result<Vec<ExportGroup>> {
+fn build_from_albums(db: &skwad_database::Database, shoot_id: i64, options: &ExportOptions) -> Result<Vec<ExportGroup>> {
     let conn = db.conn()?;
     let all = albums::list(&conn, shoot_id)?;
     let mut groups = Vec::new();
@@ -125,7 +125,7 @@ fn build_from_albums(db: &teo_database::Database, shoot_id: i64, options: &Expor
 
 /// Builds the plan without writing anything, so the UI can preview the result.
 pub fn preview(
-    db: &teo_database::Database,
+    db: &skwad_database::Database,
     shoot_id: i64,
     destination: &Path,
     options: &ExportOptions,
@@ -136,14 +136,14 @@ pub fn preview(
             .map(|s| PathBuf::from(s.source_path))
             .ok_or_else(|| ExportRunError::Other(format!("shoot {shoot_id} not found")))?
     };
-    teo_export_engine::validate_destination(destination, std::slice::from_ref(&source_root))?;
+    skwad_export_engine::validate_destination(destination, std::slice::from_ref(&source_root))?;
 
     let groups = build_groups(db, shoot_id, options)?;
-    Ok(teo_export_engine::plan(&groups, options))
+    Ok(skwad_export_engine::plan(&groups, options))
 }
 
 /// Starts an export on a background thread and returns its record id
-/// immediately. Progress arrives as `teo://export-progress` events.
+/// immediately. Progress arrives as `skwad://export-progress` events.
 pub fn start(
     app: AppHandle,
     state: Arc<AppState>,
@@ -174,7 +174,7 @@ pub fn start(
     };
 
     std::thread::Builder::new()
-        .name("teo-export".into())
+        .name("skwad-export".into())
         .spawn(move || run(app, state, export_id, shoot_id, destination, plan, options))
         .map_err(|e| ExportRunError::Other(format!("could not start the export thread: {e}")))?;
 
@@ -198,7 +198,7 @@ fn run(
 
     let progress_app = app.clone();
     let progress_state = Arc::clone(&state);
-    let result = teo_export_engine::execute(
+    let result = skwad_export_engine::execute(
         &plan,
         &destination,
         &options,
@@ -231,7 +231,7 @@ fn run(
 
     let (status, error) = match &result {
         Ok(_) => (ExportStatus::Completed, None),
-        Err(teo_export_engine::ExportError::Cancelled) => (ExportStatus::Cancelled, None),
+        Err(skwad_export_engine::ExportError::Cancelled) => (ExportStatus::Cancelled, None),
         Err(e) => (ExportStatus::Failed, Some(e.to_string())),
     };
 
@@ -280,9 +280,9 @@ fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use teo_database::models::{BoundingBox, MediaType, NewFace, NewMedia};
-    use teo_database::repo::{faces, people};
-    use teo_database::Database;
+    use skwad_database::models::{BoundingBox, MediaType, NewFace, NewMedia};
+    use skwad_database::repo::{faces, people};
+    use skwad_database::Database;
 
     /// A shoot with two players and real files on disk.
     fn seed(dir: &Path) -> (Database, i64) {
@@ -341,7 +341,7 @@ mod tests {
     struct Scratch(PathBuf);
     impl Scratch {
         fn new(tag: &str) -> Self {
-            let path = std::env::temp_dir().join(format!("teo-export-{tag}-{}", std::process::id()));
+            let path = std::env::temp_dir().join(format!("skwad-export-{tag}-{}", std::process::id()));
             std::fs::remove_dir_all(&path).ok();
             std::fs::create_dir_all(&path).unwrap();
             Scratch(path)
@@ -422,7 +422,7 @@ mod tests {
         let result = preview(&db, shoot_id, scratch.path(), &album_options());
         assert!(matches!(
             result,
-            Err(ExportRunError::Engine(teo_export_engine::ExportError::DestinationInsideSource))
+            Err(ExportRunError::Engine(skwad_export_engine::ExportError::DestinationInsideSource))
         ));
     }
 
@@ -439,7 +439,7 @@ mod tests {
 
             let all: Vec<i64> = media_repo::query(
                 &conn,
-                &teo_database::models::MediaQuery {
+                &skwad_database::models::MediaQuery {
                     shoot_id: Some(shoot_id),
                     ..Default::default()
                 },
@@ -496,7 +496,7 @@ mod tests {
             let conn = db.conn().unwrap();
             let all: Vec<i64> = media_repo::query(
                 &conn,
-                &teo_database::models::MediaQuery { shoot_id: Some(shoot_id), ..Default::default() },
+                &skwad_database::models::MediaQuery { shoot_id: Some(shoot_id), ..Default::default() },
             )
             .unwrap()
             .into_iter()
@@ -512,14 +512,14 @@ mod tests {
         let options = ExportOptions::default();
         let plan = preview(&db, shoot_id, destination.path(), &options).unwrap();
         let progress =
-            teo_export_engine::execute(&plan, destination.path(), &options, || true, |_| {}).unwrap();
+            skwad_export_engine::execute(&plan, destination.path(), &options, || true, |_| {}).unwrap();
         assert_eq!(progress.files_done, 3);
 
         // The names became folders — with the colon sanitised out, since a
         // Windows path cannot hold one.
         assert!(destination.path().join("Jonathan").join("Photos").is_dir());
         assert!(destination.path().join("Mavi_ Day 2").join("Videos").is_dir());
-        assert!(destination.path().join(teo_export_engine::MANIFEST_FILENAME).is_file());
+        assert!(destination.path().join(skwad_export_engine::MANIFEST_FILENAME).is_file());
 
         // The source folder is untouched: same entries, no new subfolders.
         let after: Vec<String> = std::fs::read_dir(scratch.path())
@@ -533,7 +533,7 @@ mod tests {
 
         // Re-running is cheap and does not duplicate anything.
         let again =
-            teo_export_engine::execute(&plan, destination.path(), &options, || true, |_| {}).unwrap();
+            skwad_export_engine::execute(&plan, destination.path(), &options, || true, |_| {}).unwrap();
         assert_eq!(again.files_done, 0);
         assert_eq!(again.files_skipped, 3);
     }
@@ -550,7 +550,7 @@ mod tests {
             groups_repo::update(&conn, group.id, Some("01_Jonathan"), None).unwrap();
             let all: Vec<i64> = media_repo::query(
                 &conn,
-                &teo_database::models::MediaQuery {
+                &skwad_database::models::MediaQuery {
                     shoot_id: Some(shoot_id),
                     ..Default::default()
                 },

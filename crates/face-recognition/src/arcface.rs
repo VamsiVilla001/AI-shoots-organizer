@@ -11,8 +11,8 @@ use image::RgbImage;
 use ort::session::Session;
 use ort::value::Tensor;
 
-use teo_face_detection::runtime::{build_session, SessionConfig};
-use teo_face_detection::Detection;
+use skwad_face_detection::runtime::{build_session, SessionConfig};
+use skwad_face_detection::Detection;
 
 use crate::align::ALIGNED_SIZE;
 use crate::{prepare_face, EmbedError, Embedding, FaceEmbedder, Result};
@@ -75,7 +75,7 @@ impl ArcFaceEmbedder {
             .to_string();
 
         let max_batch = match session_config.accelerator {
-            teo_face_detection::Accelerator::Cpu => CPU_MAX_BATCH,
+            skwad_face_detection::Accelerator::Cpu => CPU_MAX_BATCH,
             _ => GPU_MAX_BATCH,
         };
 

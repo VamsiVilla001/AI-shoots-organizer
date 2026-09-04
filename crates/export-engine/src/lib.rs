@@ -308,7 +308,7 @@ pub fn write_manifest(plan: &ExportPlan, destination: &Path) -> std::io::Result<
     use std::fmt::Write as _;
 
     let mut report = String::new();
-    let _ = writeln!(report, "Esports AI Media Organiser — sorting report");
+    let _ = writeln!(report, "SKWAD Media Organiser — sorting report");
     let _ = writeln!(report, "Destination : {}", destination.display());
     let _ = writeln!(report, "Folders     : {}", plan.folders.len());
     let _ = writeln!(report, "Files       : {}", plan.items.len());

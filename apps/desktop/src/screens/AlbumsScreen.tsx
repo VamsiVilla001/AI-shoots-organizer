@@ -5,7 +5,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { GROUP_SIZE_CAP, type Album, type ClusterSummary, type MediaType } from '@teo/shared-types'
+import { GROUP_SIZE_CAP, type Album, type ClusterSummary, type MediaType } from '@skwad/shared-types'
 import * as api from '../api'
 import { formatConfidence, formatCount, groupSizeName, thumbUrl } from '../media'
 import { FaceCrop } from '../components/FaceCrop'

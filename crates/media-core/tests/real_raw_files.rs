@@ -1,26 +1,26 @@
-//! Opt-in tests against real camera files. Set `TEO_RAW_FILE` to one RAW path.
+//! Opt-in tests against real camera files. Set `SKWAD_RAW_FILE` to one RAW path.
 
 use std::path::{Path, PathBuf};
 
-use teo_media_core::decode::{self, DecodeMethod};
-use teo_media_core::formats::{self, Decoder, MediaKind};
+use skwad_media_core::decode::{self, DecodeMethod};
+use skwad_media_core::formats::{self, Decoder, MediaKind};
 
 fn sample() -> Option<PathBuf> {
-    std::env::var_os("TEO_RAW_FILE")
+    std::env::var_os("SKWAD_RAW_FILE")
         .map(PathBuf::from)
         .filter(|path| path.is_file())
 }
 
 #[test]
-#[ignore = "set TEO_RAW_FILE to a real camera RAW"]
+#[ignore = "set SKWAD_RAW_FILE to a real camera RAW"]
 fn raw_is_verified_and_decoded_without_ffmpeg() {
     let Some(path) = sample() else {
-        eprintln!("TEO_RAW_FILE is not set to a readable file");
+        eprintln!("SKWAD_RAW_FILE is not set to a readable file");
         return;
     };
     assert_eq!(formats::classify(&path), Some((MediaKind::Photo, Decoder::LibRaw)));
 
-    let metadata = teo_media_core::metadata::read(&path, MediaKind::Photo, Decoder::LibRaw, None);
+    let metadata = skwad_media_core::metadata::read(&path, MediaKind::Photo, Decoder::LibRaw, None);
     let decoded = decode::decode_image(&path, metadata.orientation, Some(1600), None)
         .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
 
@@ -30,13 +30,13 @@ fn raw_is_verified_and_decoded_without_ffmpeg() {
         decoded.decode_method,
         DecodeMethod::LibRawEmbeddedPreview | DecodeMethod::LibRawHalfSizeDemosaic
     ));
-    let quality = teo_media_core::quality::analyse(&decoded.image);
+    let quality = skwad_media_core::quality::analyse(&decoded.image);
     assert!((0.0..=1.0).contains(&quality.overall));
     assert!((0.0..=1.0).contains(&quality.sharpness));
     assert!((0.0..=1.0).contains(&quality.exposure));
 
     let cache_dir = tempfile::tempdir().unwrap();
-    let cache = teo_media_core::ThumbnailCache::new(cache_dir.path());
+    let cache = skwad_media_core::ThumbnailCache::new(cache_dir.path());
     let first = cache
         .ensure(&path, "real-raw-cache-key", metadata.orientation, None, None)
         .expect("RAW thumbnail generation must not need FFmpeg");

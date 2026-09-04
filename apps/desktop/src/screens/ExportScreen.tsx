@@ -10,7 +10,7 @@
 import { useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { open } from '@tauri-apps/plugin-dialog'
-import type { ExportOptions, ExportPreview } from '@teo/shared-types'
+import type { ExportOptions, ExportPreview } from '@skwad/shared-types'
 import * as api from '../api'
 import { folderNameFor } from '../folders'
 import { formatBytes, formatCount } from '../media'

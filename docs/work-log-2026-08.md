@@ -11,7 +11,7 @@ what was first built came apart.
 
 **Branch:** `feat/server-extraction` (14 commits, on top of three inherited from
 `V1`)
-**Base:** `cae09d8` "Esports AI Media Organiser: local-first player-wise shoot
+**Base:** `cae09d8` "SKWAD Media Organiser: local-first player-wise shoot
 sorting", v0.1.0
 **Machine it ran on:** Windows 10 Pro, 16 logical cores, DirectML available,
 FFmpeg on PATH, a real 297-file shoot on `\\TESS-CREATIVE-12bay`
@@ -136,9 +136,9 @@ Phases 0–4 of the task list are done; 5–7 are not started.
         HTTP to loopback      HTTP to a NAS
         + native dialog       + jailed fs browser
                         │
-                   teo-server  (58 routes, SSE, media, auth)
+                   skwad-server  (58 routes, SSE, media, auth)
                         │
-                   teo-app-core  (state · settings · worker · pipeline ·
+                   skwad-app-core  (state · settings · worker · pipeline ·
                                   stages · export · models · paths · media)
                         │
    database · media-core · face-detection · face-recognition ·
@@ -175,7 +175,7 @@ re-enqueues it; `/api/jobs/summary` is new because no command matches it; and
 the grouping commands postdate the task list's table.
 
 - **Media.** The id lookup, HEIC/raw render and `Range` arithmetic moved into
-  `teo_app_core::media`, so `teomedia://` and `/media/{id}/…` are two adapters
+  `skwad_app_core::media`, so `skwadmedia://` and `/media/{id}/…` are two adapters
   over one implementation. Ids remain the only thing either accepts.
 - **Events.** `/api/events` is SSE over a broadcast channel. A lagging
   subscriber drops the gap, because every payload is a snapshot, not a delta.
@@ -187,7 +187,7 @@ the grouping commands postdate the task list's table.
   (`/media` read-only, `/output` writable) and a path check cannot see through a
   bind mount. Unix only — Windows has no stable file index outside nightly.
 - **Auth.** One bearer token over `/api/*` and `/media/*`, constant-time
-  compared, from `TEO_TOKEN` or generated to `<data>/token` at `0600`.
+  compared, from `SKWAD_TOKEN` or generated to `<data>/token` at `0600`.
 
 ### Phase 3: one bundle, two transports (`ec3c7f2`)
 
@@ -198,7 +198,7 @@ server's route list for diffing.
 
 - `nullOn404` marks the few commands that return `T | null` on the desktop where
   the server answers 404.
-- Media URLs differ in *shape*, not just prefix (`teomedia://thumb/7` against
+- Media URLs differ in *shape*, not just prefix (`skwadmedia://thumb/7` against
   `/media/7/stream`), so `media.ts` asks the transport for "the thumbnail of
   this id".
 - `pickFolder`'s absence is how `PathPicker` knows to open the server's jailed
@@ -212,13 +212,13 @@ server's route list for diffing.
 three commands (`server_status`, `reveal_in_folder`, `open_path`). The Tauri
 command layer is deleted — Phase 2's deliberate duplication is resolved — and the
 shell binary fell from **32 MB to 5.7 MB** because it no longer links the
-database, the AI crates or ONNX Runtime. That weight is now `teo-server.exe`
+database, the AI crates or ONNX Runtime. That weight is now `skwad-server.exe`
 (27.5 MB); the installer ships both.
 
-The supervisor spawns `teo-server` on `127.0.0.1:0` with a token generated per
+The supervisor spawns `skwad-server` on `127.0.0.1:0` with a token generated per
 launch and never written to disk, learns the bound port through `--port-file`
 (a parent that asked for port 0 has no other way, and pre-picking one would
-race), forwards the child's output into `logs/teo.log`, restarts it if it dies,
+race), forwards the child's output into `logs/skwad.log`, restarts it if it dies,
 and kills it when the window closes.
 
 **The webview keeps loading the embedded bundle**, so a first paint never waits
@@ -318,7 +318,7 @@ and 7 (multi-user hardening).
   a modal open on the user's machine. The code path is type-checked and present.
 - **The NSIS installer since the server split.** The last full installer was
   built before the shell/server split, so its measured contents (192 MB) predate
-  `teo-server.exe` being part of it. `npm run package:win` stages everything;
+  `skwad-server.exe` being part of it. `npm run package:win` stages everything;
   it needs one clean run, with the app closed.
 - **Anything on a Synology.**
 
@@ -351,12 +351,12 @@ npm run typecheck && npm run web:build
 npm run rs:test && npm run rs:check && npm run rs:clippy
 
 # run the desktop app (server sidecar included)
-cargo build --release -p teo-server
+cargo build --release -p skwad-server
 node scripts/stage-sidecar.mjs
-npm run tauri:build -w @teo/desktop -- --no-bundle --config src-tauri/tauri.sidecar.conf.json
+npm run tauri:build -w @skwad/desktop -- --no-bundle --config src-tauri/tauri.sidecar.conf.json
 
 # run the browser edition against a throwaway data directory
-./target/release/teo-server.exe --bind 127.0.0.1:8420 --data-dir ./.teo \
+./target/release/skwad-server.exe --bind 127.0.0.1:8420 --data-dir ./.skwad \
   --media-roots D:\shoots --output-roots D:\sorted --token dev --web-dir apps/desktop/dist
 
 # a shippable Windows installer (close the app first — it holds both binaries)
@@ -398,7 +398,7 @@ usage limit and resumed.
 | 2 | *"Build the changes into app and launch it"* | Two bugs surfaced before it ran: `cargo build --release` produces a *dev* Tauri app, and the manual-grouping migration collided with `V1`'s migration 2 (§4). After fixing both, the app ran on the real library. |
 | 3 | *"launch the tauri and the inbuilt is chromium based"* | Took the hint: attached to the WebView2 instance over the Chrome DevTools Protocol, which became the verification method for every later phase — reading the real DOM instead of asserting a build succeeded. |
 | 4 | *"Now give me a way to deploy it for others to use. I need a mac studio version"* | CI workflow building macOS (Apple Silicon) and Windows, a Mac build script, signing and notarisation documented, models and the DirectML redistributable bundled, and a Windows installer built and inspected (§5). Stated plainly that no macOS build could be produced or tested from this machine. |
-| 5 | Dropped `TASKS-server-refactor.md` — a seven-phase plan for "one core, two front doors" — with *"Start with it"* | Read the plan and the reference docs it names, then worked phases 0–1: extracted `teo-app-core`, replaced Tauri events with `ProgressSink` (§6). |
+| 5 | Dropped `TASKS-server-refactor.md` — a seven-phase plan for "one core, two front doors" — with *"Start with it"* | Read the plan and the reference docs it names, then worked phases 0–1: extracted `skwad-app-core`, replaced Tauri events with `ProgressSink` (§6). |
 | 6 | *"start with Phase 2"* | The HTTP server: 62 commands ported one-to-one, SSE, media routes, a jailed filesystem browser, bearer auth. Driven end to end with `curl` against a real shoot. |
 | 7 | *"Start phase 3"* | One React bundle, two transports. Verified by driving the browser edition in an actual browser — creating a shoot through the jailed folder picker, watching it process, sorting, exporting. |
 | 8 | *"Phase 4 start"* | The desktop shell became a client of its own loopback server; `src-tauri` fell to 601 lines and 5.7 MB. Cross-origin realities (CORS, `SameSite`) only appeared here, because only here is the page a different origin from the API. |

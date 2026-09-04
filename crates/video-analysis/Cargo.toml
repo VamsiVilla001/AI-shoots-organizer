@@ -1,5 +1,5 @@
 [package]
-name = "teo-video-analysis"
+name = "skwad-video-analysis"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,7 +7,7 @@ license.workspace = true
 description = "Scene detection and frame sampling for video face recognition"
 
 [dependencies]
-teo-media-core = { path = "../media-core" }
+skwad-media-core = { path = "../media-core" }
 serde = { version = "1.0", features = ["derive"] }
 image = "0.25"
 tracing = "0.1"

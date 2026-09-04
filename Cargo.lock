@@ -4408,6 +4408,124 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
 
 [[package]]
+name = "skwad-clustering"
+version = "1.2.0"
+dependencies = [
+ "rayon",
+ "serde",
+ "tracing",
+]
+
+[[package]]
+name = "skwad-database"
+version = "1.2.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "r2d2",
+ "r2d2_sqlite",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tracing",
+]
+
+[[package]]
+name = "skwad-desktop"
+version = "1.2.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "image",
+ "num_cpus",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "skwad-clustering",
+ "skwad-database",
+ "skwad-export-engine",
+ "skwad-face-detection",
+ "skwad-face-recognition",
+ "skwad-media-core",
+ "skwad-video-analysis",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tauri-plugin-opener",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "skwad-export-engine"
+version = "1.2.0"
+dependencies = [
+ "filetime",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tracing",
+]
+
+[[package]]
+name = "skwad-face-detection"
+version = "1.2.0"
+dependencies = [
+ "image",
+ "num_cpus",
+ "ort",
+ "serde",
+ "thiserror 2.0.20",
+ "tracing",
+]
+
+[[package]]
+name = "skwad-face-recognition"
+version = "1.2.0"
+dependencies = [
+ "image",
+ "ort",
+ "serde",
+ "skwad-face-detection",
+ "thiserror 2.0.20",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "skwad-media-core"
+version = "1.2.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "chrono",
+ "image",
+ "kamadak-exif",
+ "rawlib",
+ "rayon",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tracing",
+ "walkdir",
+ "which",
+]
+
+[[package]]
+name = "skwad-video-analysis"
+version = "1.2.0"
+dependencies = [
+ "image",
+ "serde",
+ "skwad-media-core",
+ "thiserror 2.0.20",
+ "tracing",
+]
+
+[[package]]
 name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4982,124 +5100,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5fed54709c5b3a53d09bb1c113ea4f5ceafd1e772ddcb0030a82e1d56c087b08"
 dependencies = [
  "new_debug_unreachable",
-]
-
-[[package]]
-name = "teo-clustering"
-version = "1.2.0"
-dependencies = [
- "rayon",
- "serde",
- "tracing",
-]
-
-[[package]]
-name = "teo-database"
-version = "1.2.0"
-dependencies = [
- "anyhow",
- "chrono",
- "r2d2",
- "r2d2_sqlite",
- "rusqlite",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
- "tracing",
-]
-
-[[package]]
-name = "teo-desktop"
-version = "1.2.0"
-dependencies = [
- "anyhow",
- "chrono",
- "image",
- "num_cpus",
- "parking_lot",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tauri-plugin-opener",
- "tempfile",
- "teo-clustering",
- "teo-database",
- "teo-export-engine",
- "teo-face-detection",
- "teo-face-recognition",
- "teo-media-core",
- "teo-video-analysis",
- "thiserror 2.0.20",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "teo-export-engine"
-version = "1.2.0"
-dependencies = [
- "filetime",
- "serde",
- "tempfile",
- "thiserror 2.0.20",
- "tracing",
-]
-
-[[package]]
-name = "teo-face-detection"
-version = "1.2.0"
-dependencies = [
- "image",
- "num_cpus",
- "ort",
- "serde",
- "thiserror 2.0.20",
- "tracing",
-]
-
-[[package]]
-name = "teo-face-recognition"
-version = "1.2.0"
-dependencies = [
- "image",
- "ort",
- "serde",
- "teo-face-detection",
- "thiserror 2.0.20",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "teo-media-core"
-version = "1.2.0"
-dependencies = [
- "anyhow",
- "blake3",
- "chrono",
- "image",
- "kamadak-exif",
- "rawlib",
- "rayon",
- "serde",
- "tempfile",
- "thiserror 2.0.20",
- "tracing",
- "walkdir",
- "which",
-]
-
-[[package]]
-name = "teo-video-analysis"
-version = "1.2.0"
-dependencies = [
- "image",
- "serde",
- "teo-media-core",
- "thiserror 2.0.20",
- "tracing",
 ]
 
 [[package]]

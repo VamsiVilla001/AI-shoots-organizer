@@ -4,7 +4,7 @@
 set -euo pipefail
 
 repo_models="$(cd "$(dirname "$0")/../models" && pwd)"
-app_models="${HOME}/Library/Application Support/com.teorganiser.desktop/models"
+app_models="${HOME}/Library/Application Support/com.skwad.mediaorganiser/models"
 zip_url="https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip"
 wanted=(det_10g.onnx w600k_r50.onnx)
 

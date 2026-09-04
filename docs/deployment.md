@@ -7,8 +7,8 @@ Two installers come out of a release:
 
 | Platform | Artefact | Built where |
 | --- | --- | --- |
-| macOS 11+, Apple Silicon (Mac Studio, M-series) | `Esports AI Media Organiser_<version>_aarch64.dmg` | a Mac, or a `macos-14` CI runner |
-| Windows 10/11 x64 | `Esports AI Media Organiser_<version>_x64-setup.exe` | Windows, or a `windows-latest` CI runner |
+| macOS 11+, Apple Silicon (Mac Studio, M-series) | `SKWAD Media Organiser_<version>_aarch64.dmg` | a Mac, or a `macos-14` CI runner |
+| Windows 10/11 x64 | `SKWAD Media Organiser_<version>_x64-setup.exe` | Windows, or a `windows-latest` CI runner |
 
 **A macOS app cannot be built on Windows.** It needs Apple's toolchain and
 `codesign`. Use CI (path A) or the Mac itself (path B) — there is no
@@ -16,7 +16,7 @@ cross-compile shortcut.
 
 ## What ships inside, and what does not
 
-- **The frontend, the shell binary, and `teo-server`** — always. The desktop app
+- **The frontend, the shell binary, and `skwad-server`** — always. The desktop app
   is a client of a private server it starts on loopback, so the installer ships
   both binaries; without the sidecar the app opens, says the local server did not
   start, and can do nothing else. `npm run package:win` builds and stages it.
@@ -85,7 +85,7 @@ powershell -ExecutionPolicy Bypass -File scripts/fetch-models.ps1
 npm run package:win
 ```
 
-`package:win` builds `teo-server`, stages it and `DirectML.dll`, then builds with
+`package:win` builds `skwad-server`, stages it and `DirectML.dll`, then builds with
 the config overlays. **Close the app first** — a running copy holds both
 binaries, and the staging step cannot overwrite a file that is in use.
 The installer lands in `target/release/bundle/nsis/` and is ~192 MB: the binary,
@@ -93,8 +93,8 @@ the DirectML redistributable and the two models. Verified contents of a build
 made this way:
 
 ```
-teo-desktop.exe          6.0 MB   the shell: a window and a supervisor
-teo-server.exe          27.5 MB   the application itself
+skwad-desktop.exe          6.0 MB   the shell: a window and a supervisor
+skwad-server.exe          27.5 MB   the application itself
 DirectML.dll            18.5 MB
 models/det_10g.onnx     16.9 MB
 models/w600k_r50.onnx  174.4 MB
@@ -103,7 +103,7 @@ models/w600k_r50.onnx  174.4 MB
 The shell shrank from 32 MB to 6 MB when it stopped linking the database and
 ONNX Runtime; that work moved into the server, not away.
 
-`npm run tauri:build -w @teo/desktop` on its own produces a ~32 MB installer
+`npm run tauri:build -w @skwad/desktop` on its own produces a ~32 MB installer
 with none of those extras — fine for someone who will fetch models themselves.
 
 The DLL is staged into `dist-resources/` rather than referenced inside
@@ -138,7 +138,7 @@ fine, right-click instead".
 Without a signature, Gatekeeper blocks the app. The recipient needs one of:
 
 - right-click the app in Applications → **Open** → **Open** again, or
-- `xattr -dr com.apple.quarantine "/Applications/Esports AI Media Organiser.app"`
+- `xattr -dr com.apple.quarantine "/Applications/SKWAD Media Organiser.app"`
 
 To sign and notarise properly you need the Apple Developer Program ($99/yr), a
 **Developer ID Application** certificate, and an app-specific password. Tauri
@@ -168,14 +168,33 @@ Trusted Signing is the cheaper modern route). Configure it under
 
 - **Nothing is uploaded.** Everything runs locally; the source folder is only
   ever read from.
-- **Their data lives in** `~/Library/Application Support/com.teorganiser.desktop`
-  (macOS) or `%APPDATA%\com.teorganiser.desktop` (Windows): the index, the
+- **Their data lives in** `~/Library/Application Support/com.skwad.mediaorganiser`
+  (macOS) or `%APPDATA%\com.skwad.mediaorganiser` (Windows): the index, the
   thumbnails, the models. Deleting it loses the sorting, never the footage.
 - **NAS shoots need the share mounted** before the folder picker can see it —
   Finder → Go → Connect to Server on macOS, a mapped drive or UNC path on
   Windows. The app needs read on the source and write on the destination.
 - **First launch of a large shoot indexes in the background.** Sorting into
   groups works while it does.
+
+### Upgrading from a build called TE Organiser
+
+The application used to identify itself as `com.teorganiser.desktop`, and the
+data directory is derived from that identifier — so the rename to SKWAD Media
+Organiser moved the whole library: the database, both caches, the downloaded
+models and the logs.
+
+The first launch of a renamed build brings it across on its own. It moves the
+old folder onto the new path where it can (instant, whatever the library
+weighs) and copies it where it cannot — for instance if the new folder already
+exists, or the two sit on different volumes. It leaves a note behind at the old
+location saying where the library went.
+
+Three things it deliberately will not do: overwrite a library already at the
+new path (an established install wins over older history next door), delete
+anything, or refuse to start. If the migration fails the app opens on an empty
+library and says so in `logs/skwad.log`; the old folder is still there to copy
+by hand.
 
 ## Updating an installed copy
 

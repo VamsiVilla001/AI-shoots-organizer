@@ -8,8 +8,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tauri::AppHandle;
-use teo_database::models::{Job, JobKind, JobState, ProcessingStatus};
-use teo_database::repo::{jobs, logs, media as media_repo};
+use skwad_database::models::{Job, JobKind, JobState, ProcessingStatus};
+use skwad_database::repo::{jobs, logs, media as media_repo};
 
 use crate::events;
 use crate::pipeline::{Engine, PipelineError};
@@ -51,7 +51,7 @@ impl WorkerPool {
             let has_io_worker = worker_count > 1;
             handles.push(
                 std::thread::Builder::new()
-                    .name(format!("teo-worker-{index}"))
+                    .name(format!("skwad-worker-{index}"))
                     .spawn(move || worker_loop(index, has_io_worker, app, state))
                     .expect("failed to spawn worker thread"),
             );
@@ -61,7 +61,7 @@ impl WorkerPool {
         let monitor_state = Arc::clone(&state);
         handles.push(
             std::thread::Builder::new()
-                .name("teo-monitor".into())
+                .name("skwad-monitor".into())
                 .spawn(move || monitor_loop(monitor_app, monitor_state))
                 .expect("failed to spawn monitor thread"),
         );
@@ -195,7 +195,7 @@ fn run_job(
     job: &Job,
     engine: &mut Option<Engine>,
     engine_version: &mut u64,
-    ffmpeg: Option<&teo_media_core::Ffmpeg>,
+    ffmpeg: Option<&skwad_media_core::Ffmpeg>,
 ) -> JobOutcome {
     let Some(kind) = JobKind::parse(&job.kind) else {
         return JobOutcome::Failed(format!("unknown job kind '{}'", job.kind));
@@ -289,7 +289,7 @@ fn run_job(
 }
 
 /// Loads the media row a per-file job refers to.
-fn load_media(state: &Arc<AppState>, job: &Job) -> std::result::Result<teo_database::models::Media, JobOutcome> {
+fn load_media(state: &Arc<AppState>, job: &Job) -> std::result::Result<skwad_database::models::Media, JobOutcome> {
     let Some(media_id) = job.media_id else {
         return Err(JobOutcome::Failed("job has no media id".into()));
     };
@@ -307,7 +307,7 @@ fn run_media_job(
     job: &Job,
     engine: &mut Option<Engine>,
     engine_version: &mut u64,
-    action: impl FnOnce(&mut Engine, &teo_database::Database, &teo_database::models::Media) -> crate::pipeline::Result<()>,
+    action: impl FnOnce(&mut Engine, &skwad_database::Database, &skwad_database::models::Media) -> crate::pipeline::Result<()>,
 ) -> JobOutcome {
     let item = match load_media(state, job) {
         Ok(item) => item,
@@ -351,7 +351,7 @@ fn run_media_job(
     }
 }
 
-fn indexing_incomplete(item: &teo_database::models::Media) -> bool {
+fn indexing_incomplete(item: &skwad_database::models::Media) -> bool {
     item.processing_status == ProcessingStatus::Pending.as_str()
 }
 
@@ -363,7 +363,7 @@ fn analysis_outstanding(state: &Arc<AppState>, shoot_id: i64) -> bool {
             "SELECT COUNT(*) FROM jobs
               WHERE shoot_id = ?1 AND state IN ('queued','running')
                 AND kind IN ('scan','thumbnail','analysePhoto','analyseVideo')",
-            teo_database::rusqlite::params![shoot_id],
+            skwad_database::rusqlite::params![shoot_id],
             |r| r.get(0),
         )
         .unwrap_or(0);
@@ -430,10 +430,10 @@ fn finish_job(app: &AppHandle, state: &Arc<AppState>, job: &Job, outcome: JobOut
 }
 
 /// Returns a job to the queue without charging it an attempt.
-fn requeue_without_attempt(conn: &teo_database::rusqlite::Connection, job_id: i64) {
+fn requeue_without_attempt(conn: &skwad_database::rusqlite::Connection, job_id: i64) {
     let _ = conn.execute(
         "UPDATE jobs SET state = 'queued', started_at = NULL, attempts = MAX(attempts - 1, 0) WHERE id = ?1",
-        teo_database::rusqlite::params![job_id],
+        skwad_database::rusqlite::params![job_id],
     );
 }
 
@@ -484,9 +484,9 @@ fn monitor_loop(app: AppHandle, state: Arc<AppState>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use teo_database::models::MediaType;
-    use teo_database::repo::shoots;
-    use teo_database::Database;
+    use skwad_database::models::MediaType;
+    use skwad_database::repo::shoots;
+    use skwad_database::Database;
 
     #[test]
     fn analysis_jobs_block_the_finishing_stages() {
@@ -496,7 +496,7 @@ mod tests {
 
         let media_id = media_repo::upsert(
             &conn,
-            &teo_database::models::NewMedia {
+            &skwad_database::models::NewMedia {
                 shoot_id: shoot.id,
                 path: "C:\\s\\a.jpg".into(),
                 filename: "a.jpg".into(),
@@ -524,7 +524,7 @@ mod tests {
             .query_row(
                 "SELECT COUNT(*) FROM jobs WHERE shoot_id = ?1 AND state IN ('queued','running')
                    AND kind IN ('scan','thumbnail','analysePhoto','analyseVideo')",
-                teo_database::rusqlite::params![shoot.id],
+                skwad_database::rusqlite::params![shoot.id],
                 |r| r.get(0),
             )
             .unwrap();
@@ -537,7 +537,7 @@ mod tests {
             .query_row(
                 "SELECT COUNT(*) FROM jobs WHERE shoot_id = ?1 AND state IN ('queued','running')
                    AND kind IN ('scan','thumbnail','analysePhoto','analyseVideo')",
-                teo_database::rusqlite::params![shoot.id],
+                skwad_database::rusqlite::params![shoot.id],
                 |r| r.get(0),
             )
             .unwrap();
@@ -556,7 +556,7 @@ mod tests {
             assert_eq!(job.id, id);
             conn.execute(
                 "UPDATE jobs SET state = 'queued', started_at = NULL, attempts = MAX(attempts - 1, 0) WHERE id = ?1",
-                teo_database::rusqlite::params![id],
+                skwad_database::rusqlite::params![id],
             )
             .unwrap();
         }
@@ -572,7 +572,7 @@ mod tests {
         let shoot = shoots::create(&conn, "S", "C:\\s").unwrap();
         let media_id = media_repo::upsert(
             &conn,
-            &teo_database::models::NewMedia {
+            &skwad_database::models::NewMedia {
                 shoot_id: shoot.id,
                 path: "C:\\s\\rotated.jpg".into(),
                 filename: "rotated.jpg".into(),

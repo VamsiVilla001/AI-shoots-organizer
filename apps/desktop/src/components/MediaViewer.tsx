@@ -11,7 +11,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import type { BoundingBox } from '@teo/shared-types'
+import type { BoundingBox } from '@skwad/shared-types'
 import * as api from '../api'
 import { FaceTagger } from './FaceTagger'
 import { formatConfidence, formatCount, formatTime, fullUrl, videoUrl } from '../media'

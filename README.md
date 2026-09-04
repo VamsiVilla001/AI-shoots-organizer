@@ -1,4 +1,4 @@
-# Esports AI Media Organiser
+# SKWAD Media Organiser
 
 A local-first desktop application that sorts esports photo/video shoots into
 per-person folders. Point it at a raw footage folder, let on-device face
@@ -64,7 +64,7 @@ and ~7.9x on embedding. Force a provider from **Settings → Acceleration**.
 NVIDIA CUDA is opt-in, since it needs a toolkit installed separately:
 
 ```bash
-npm run tauri:build -w @teo/desktop -- -- --features cuda
+npm run tauri:build -w @skwad/desktop -- -- --features cuda
 ```
 
 If a shoot is analysing slowly, check that you are running a **release** build

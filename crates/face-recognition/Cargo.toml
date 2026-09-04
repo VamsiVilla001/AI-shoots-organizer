@@ -1,5 +1,5 @@
 [package]
-name = "teo-face-recognition"
+name = "skwad-face-recognition"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,7 +7,7 @@ license.workspace = true
 description = "Face alignment and ArcFace-compatible embedding over ONNX Runtime"
 
 [dependencies]
-teo-face-detection = { path = "../face-detection" }
+skwad-face-detection = { path = "../face-detection" }
 thiserror = "2.0"
 serde = { version = "1.0", features = ["derive"] }
 image = "0.25"
@@ -27,6 +27,6 @@ tracing-subscriber = "0.3"
 
 [features]
 default = []
-directml = ["teo-face-detection/directml", "ort/directml"]
-coreml = ["teo-face-detection/coreml", "ort/coreml"]
-cuda = ["teo-face-detection/cuda", "ort/cuda"]
+directml = ["skwad-face-detection/directml", "ort/directml"]
+coreml = ["skwad-face-detection/coreml", "ort/coreml"]
+cuda = ["skwad-face-detection/cuda", "ort/cuda"]

@@ -1,5 +1,5 @@
 {
-  "name": "@teo/desktop",
+  "name": "@skwad/desktop",
   "version": "1.2.0",
   "private": true,
   "type": "module",
@@ -17,7 +17,7 @@
     "@tauri-apps/api": "^2.9.0",
     "@tauri-apps/plugin-dialog": "^2.4.0",
     "@tauri-apps/plugin-opener": "^2.5.0",
-    "@teo/shared-types": "*",
+    "@skwad/shared-types": "*",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "zustand": "^5.0.2"

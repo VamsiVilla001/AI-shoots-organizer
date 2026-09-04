@@ -27,7 +27,7 @@ decisions, bugs found, what was verified against real data — see
 ```text
         ┌──────────────────────────┐        ┌────────────────────────┐
 Tauri ─▶│                          │        │  TauriProgressSink     │
-command │       teo-app-core       │──emit─▶│  (SseProgressSink)     │
+command │       skwad-app-core       │──emit─▶│  (SseProgressSink)     │
 layer   │                          │        │  NullProgressSink      │
         │  state    settings       │        │  RecordingProgressSink │
 HTTP ──▶│  worker   pipeline       │        └────────────────────────┘
@@ -41,8 +41,8 @@ routes  │  stages   export  models │
 
 Crates added:
 
-- **`crates/app-core` (`teo-app-core`)** — the application minus its front door.
-- **`crates/server` (`teo-server`)** — the HTTP front door: routes, SSE, media,
+- **`crates/app-core` (`skwad-app-core`)** — the application minus its front door.
+- **`crates/server` (`skwad-server`)** — the HTTP front door: routes, SSE, media,
   filesystem browser, auth, static bundle. Configured entirely from flags and
   environment.
 
@@ -72,20 +72,20 @@ Three seams were cut:
 
    The sink lives on `AppState`, so the worker pool, the monitor and the export
    runner reach it through `state.sink()` instead of carrying a handle. Event
-   names and payload structs are unchanged — `teo://progress`,
-   `teo://shoot-changed`, `teo://library-changed`, `teo://job-failed`,
-   `teo://export-progress`, `teo://notice` — because the React side listens on
+   names and payload structs are unchanged — `skwad://progress`,
+   `skwad://shoot-changed`, `skwad://library-changed`, `skwad://job-failed`,
+   `skwad://export-progress`, `skwad://notice` — because the React side listens on
    them and Phase 3 switches transport without touching handlers.
    `NullProgressSink` and `RecordingProgressSink` are the test doubles.
 
 2. **Paths.** `AppState::new` takes an explicit `AppPaths`. Nothing in the core
    asks a path resolver where the data directory is; the desktop shell resolves
-   it from Tauri and passes it in, and the server will read `TEO_DATA_DIR`.
+   it from Tauri and passes it in, and the server will read `SKWAD_DATA_DIR`.
 
 3. **Signatures.** `WorkerPool::start(state)` and `export::start(state, …)` lost
    their `AppHandle` parameters, as did every command that only held one to emit
    with. `media_url_base` stays on `AppState` as a plain string: the desktop
-   passes the `teomedia://` base, the server will pass an HTTP prefix.
+   passes the `skwadmedia://` base, the server will pass an HTTP prefix.
 
 The resource policy is untouched, deliberately: two workers at most, worker 0
 owning the single detector/embedder pair and the shoot-wide finishing stages,
@@ -95,7 +95,7 @@ CPU reserved, lazy model load, 30-second idle unload, rebuild on
 
 `apps/desktop/src-tauri` now contains only `commands.rs`, `protocol.rs`,
 `sink.rs` and the app wiring in `lib.rs`. It re-exports the core's modules under
-their old names (`pub use teo_app_core::{events, export, …}`) so the command
+their old names (`pub use skwad_app_core::{events, export, …}`) so the command
 layer's `crate::state::AppState`-style paths keep working — the command bodies
 are unchanged apart from where they emit.
 
@@ -110,8 +110,8 @@ packaged desktop app launching and driving a real shoot.
 same job queue, same worker policy. `boot()` opens the database, starts the
 worker pool and returns the state; `serve()` binds and runs the router.
 
-Configuration is flags first, environment second: `TEO_BIND`, `TEO_DATA_DIR`,
-`TEO_MEDIA_ROOTS`, `TEO_OUTPUT_ROOTS`, `TEO_TOKEN`, `TEO_WEB_DIR`.
+Configuration is flags first, environment second: `SKWAD_BIND`, `SKWAD_DATA_DIR`,
+`SKWAD_MEDIA_ROOTS`, `SKWAD_OUTPUT_ROOTS`, `SKWAD_TOKEN`, `SKWAD_WEB_DIR`.
 
 ### Routes
 
@@ -135,8 +135,8 @@ machine the person is sitting at.
 
 ### Media
 
-`/media/{id}/{thumb,full,stream}` replaces `teomedia://`. The lookup, the
-HEIC/raw render and the `Range` arithmetic moved into `teo_app_core::media`, so
+`/media/{id}/{thumb,full,stream}` replaces `skwadmedia://`. The lookup, the
+HEIC/raw render and the `Range` arithmetic moved into `skwad_app_core::media`, so
 the protocol handler and the HTTP routes share one implementation rather than
 drifting apart. `stream` answers `206` with `Content-Range` for a ranged request
 and `200` otherwise, and ids remain the only thing either front door accepts —
@@ -172,7 +172,7 @@ on Unix catches it for the destination and every ancestor of it. Windows has no
 stable file index, so the path check stands alone there, as it always has on the
 desktop.
 
-On top of that the server confines destinations to `TEO_OUTPUT_ROOTS` (falling
+On top of that the server confines destinations to `SKWAD_OUTPUT_ROOTS` (falling
 back to the media roots). With neither configured — a loopback server behind the
 desktop app, where a native picker chose the folder — any path is allowed and the
 engine's own guard is the only check, which is exactly the desktop's position.
@@ -180,7 +180,7 @@ engine's own guard is the only check, which is exactly the desktop's position.
 ### Auth
 
 One shared bearer token over every `/api/*` and `/media/*` route, compared in
-constant time, taken from `TEO_TOKEN` or generated into `<data>/token` (`0600`
+constant time, taken from `SKWAD_TOKEN` or generated into `<data>/token` (`0600`
 on Unix; Windows has no mode bits, so the directory is the thing to lock down).
 `POST /api/auth/session` trades the token for an `HttpOnly`, `SameSite=Strict`
 cookie, because `<img>` and `<video>` cannot send headers and media has to load
@@ -194,7 +194,7 @@ three real photos:
 - no token → `401`; wrong token → `401`; correct token → `200`
 - `C:\Windows` and a `..` escape → `403`, from both the browser and shoot creation
 - shoot created → `scanning` → `analysing` → `complete`, 11 faces over 3 photos
-- 37 SSE events arrived while it ran: 32 `teo://progress`, 4 `teo://shoot-changed`, 1 `teo://notice`
+- 37 SSE events arrived while it ran: 32 `skwad://progress`, 4 `skwad://shoot-changed`, 1 `skwad://notice`
 - `/media/{id}/thumb` → `200 image/jpeg`, 27,666 bytes, valid JPEG magic
 - group two files → export → `2/2 completed`, folders and `_sorting-report.txt`
   on disk, source folder unchanged
@@ -205,7 +205,7 @@ three real photos:
 ## Phase 3 — one front end, two transports
 
 The same React bundle now runs inside the Tauri window and in a browser talking
-to `teo-server`. Four files used to import `@tauri-apps` directly; one does now,
+to `skwad-server`. Four files used to import `@tauri-apps` directly; one does now,
 and that one is a transport implementation.
 
 ```text
@@ -231,7 +231,7 @@ Three details that mattered:
 - **`nullOn404`.** A few commands return `T | null` on the desktop where the
   server answers `404` (`get_shoot`, `get_media`). The route table marks them
   rather than making every caller handle both.
-- **Media URLs differ in shape**, not just in prefix: `teomedia://thumb/7`
+- **Media URLs differ in shape**, not just in prefix: `skwadmedia://thumb/7`
   against `/media/7/stream`. `media.ts` asks the transport for "the thumbnail of
   this id" instead of concatenating a base.
 - **`pickFolder` is optional by design.** Its absence is how `PathPicker` knows
@@ -263,7 +263,7 @@ plus the report, source folder unchanged. A reload reconnected silently from the
 saved connection. The export picker offered only the writable root.
 
 Then the packaged desktop build: `hasTauri` true, `mediaUrlBase`
-`http://teomedia.localhost`, thumbnails loading over the protocol handler, the
+`http://skwadmedia.localhost`, thumbnails loading over the protocol handler, the
 existing 253-file shoot intact, and a backend event arriving through
 `TauriProgressSink` as `{"reason":"albums","shootId":1}`.
 
@@ -271,21 +271,21 @@ existing 253-file shoot intact, and a backend event arriving through
 
 `apps/desktop/src-tauri` is now 528 lines: a window, a log, a supervisor and
 three commands. The duplication Phase 2 introduced deliberately is gone — the
-Tauri command layer was deleted, and both editions run the one in `teo-server`.
+Tauri command layer was deleted, and both editions run the one in `skwad-server`.
 
 The shell binary went from 32 MB to **6 MB**, because it no longer links the
-database, the AI crates or ONNX Runtime. That weight moved to `teo-server.exe`
+database, the AI crates or ONNX Runtime. That weight moved to `skwad-server.exe`
 (27.5 MB); the installer ships both.
 
 ### How it runs
 
-`Supervisor::start` spawns `teo-server` with `--bind 127.0.0.1:0`, a token
+`Supervisor::start` spawns `skwad-server` with `--bind 127.0.0.1:0`, a token
 generated per launch and passed on the command line, and `--port-file`. Port 0
 means the OS picks a free port, so two launches never fight over one; the child
 writes the address it actually bound and the parent reads it, because a parent
 that asked for port 0 has no other way to learn it and pre-picking one would race
 with everything else on the machine. The child's stdout and stderr are forwarded
-into `logs/teo.log`, so one log tells the whole story.
+into `logs/skwad.log`, so one log tells the whole story.
 
 The token is never written to disk in this mode. The file-based token exists for
 the NAS case, where a person has to read it.
@@ -305,7 +305,7 @@ which surfaced two things a same-origin browser test could never have shown:
 1. **CORS.** The server now allows the Tauri webview origins and the Vite dev
    server explicitly, with credentials. A wildcard is invalid once credentials
    are involved and wrong regardless; anything else goes in
-   `TEO_ALLOWED_ORIGINS`.
+   `SKWAD_ALLOWED_ORIGINS`.
 2. **`SameSite` cookies are never sent cross-site**, so the session cookie
    cannot authenticate `EventSource` or an `<img>`. Those carry `?token=…`
    instead, which the middleware accepts as a third option after the header and
@@ -318,12 +318,12 @@ which surfaced two things a same-origin browser test could never have shown:
 A restart means a new port, so the desktop transport retries any request that
 fails to *connect* once, after re-asking the shell where the server went, and
 moves live event subscriptions onto the new connection. It then fires
-`teo:endpoint-changed`, which Boot turns into a full query invalidation: anything
+`skwad:endpoint-changed`, which Boot turns into a full query invalidation: anything
 fetched through the old connection has to be fetched again.
 
 ### Upgrading from 0.1.0
 
-The data layout is untouched — `com.teorganiser.desktop/{database, thumbnails,
+The data layout is untouched — `com.skwad.mediaorganiser/{database, thumbnails,
 face_cache, models, logs}` — because the server is pointed at the same directory
 the shell used to use. An existing install opens its existing `media.db` and
 continues from whatever migration it was on.
@@ -400,8 +400,8 @@ is visible before the name is typed.
   diff to the command layer down to the emit sites.
 - **`serde_json::Value` at the boundary.** The trait cannot be generic and stay
   object-safe. Payload structs remain typed; only the last step is dynamic.
-- **`teomedia://` stays in the desktop shell**, but its body moved. The Tauri
-  file is now an adapter over `teo_app_core::media`; the HTTP routes are a
+- **`skwadmedia://` stays in the desktop shell**, but its body moved. The Tauri
+  file is now an adapter over `skwad_app_core::media`; the HTTP routes are a
   second adapter. Two transports, one implementation of "id in, bytes out".
 - **Handlers wrap database work in `blocking`.** The core is synchronous by
   design — pooled SQLite, rayon, std threads — so a handler that called it

@@ -5,8 +5,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use parking_lot::{Mutex, RwLock};
-use teo_database::Database;
-use teo_media_core::ThumbnailCache;
+use skwad_database::Database;
+use skwad_media_core::ThumbnailCache;
 
 use crate::paths::AppPaths;
 use crate::settings::AppSettings;
@@ -56,7 +56,7 @@ impl AppState {
     }
 
     /// Replaces the settings and signals workers to reload.
-    pub fn update_settings(&self, next: AppSettings) -> teo_database::Result<AppSettings> {
+    pub fn update_settings(&self, next: AppSettings) -> skwad_database::Result<AppSettings> {
         let next = next.sanitised();
         next.save(&self.db)?;
         *self.settings.write() = next.clone();
@@ -119,13 +119,13 @@ mod tests {
     use super::*;
 
     fn state() -> AppState {
-        let temp = std::env::temp_dir().join(format!("teo-state-{}", std::process::id()));
+        let temp = std::env::temp_dir().join(format!("skwad-state-{}", std::process::id()));
         let paths = AppPaths::create(&temp).unwrap();
         AppState::new(
             Database::open_in_memory().unwrap(),
             paths,
             AppSettings::default(),
-            "teomedia://localhost".into(),
+            "skwadmedia://localhost".into(),
         )
     }
 

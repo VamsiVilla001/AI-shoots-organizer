@@ -1,10 +1,10 @@
 [package]
-name = "teo-database"
+name = "skwad-database"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "SQLite storage layer for the Esports AI Media Organiser"
+description = "SQLite storage layer for the SKWAD Media Organiser"
 
 [dependencies]
 anyhow = "1.0"

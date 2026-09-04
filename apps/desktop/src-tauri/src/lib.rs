@@ -1,4 +1,4 @@
-//! Esports AI Media Organiser — application wiring.
+//! SKWAD Media Organiser — application wiring.
 
 pub mod commands;
 pub mod events;
@@ -15,7 +15,7 @@ pub mod worker;
 use std::sync::Arc;
 
 use tauri::Manager;
-use teo_database::Database;
+use skwad_database::Database;
 
 use crate::paths::AppPaths;
 use crate::settings::AppSettings;
@@ -34,9 +34,33 @@ pub fn run() {
                 .path()
                 .app_data_dir()
                 .map_err(|e| format!("could not resolve the application data directory: {e}"))?;
+            // Before anything creates directories here: the rename to SKWAD
+            // changed the bundle identifier, and with it the data directory, so
+            // an existing library has to be brought across or it looks lost.
+            // A failure is not fatal — the app still starts, on an empty
+            // library, which is recoverable; refusing to start is not. Held to
+            // be reported once logging exists, a few lines below.
+            let migration = paths::migrate_legacy_data_dir(&data_dir);
+
             let paths = AppPaths::create(&data_dir)?;
 
             init_logging(&paths);
+
+            match migration {
+                Ok(paths::Migration::NotNeeded) => {}
+                Ok(paths::Migration::Moved(from)) => tracing::info!(
+                    from = %from.display(), to = %data_dir.display(),
+                    "moved the library from the pre-rename data directory"
+                ),
+                Ok(paths::Migration::Copied(from)) => tracing::info!(
+                    from = %from.display(), to = %data_dir.display(),
+                    "copied the library from the pre-rename data directory"
+                ),
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    "could not migrate the pre-rename data directory; starting with an empty library"
+                ),
+            }
             tracing::info!(version = env!("CARGO_PKG_VERSION"), data = %paths.root.display(), "starting");
 
             let db = Database::open(paths.database_file())
@@ -158,7 +182,7 @@ use parking_lot::Mutex;
 fn init_logging(paths: &AppPaths) {
     use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
-    let filter = EnvFilter::try_from_env("TEO_LOG").unwrap_or_else(|_| EnvFilter::new("info,teo=debug"));
+    let filter = EnvFilter::try_from_env("SKWAD_LOG").unwrap_or_else(|_| EnvFilter::new("info,skwad=debug"));
 
     let file_layer = std::fs::OpenOptions::new()
         .create(true)
