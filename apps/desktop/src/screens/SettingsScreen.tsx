@@ -117,12 +117,18 @@ export function SettingsScreen() {
           <div className="hint">
             FFmpeg: {info.data?.ffmpegAvailable ? (info.data.ffmpegVersion ?? 'found') : 'not found — HEIC and video need it'}
           </div>
+          <div className="hint">
+            GStreamer: {info.data?.gstreamerAvailable ? (info.data.gstreamerVersion ?? 'found') : 'not found — video proxies need it'}
+          </div>
+          <div className="hint">
+            Video tracking: {info.data?.videoTrackingBackend ?? 'checking…'}
+          </div>
         </div>
 
         <div className="card">
           <h2>Recognition</h2>
-          {number('Recognition threshold', 'recognitionThreshold', 0.01, 'Similarity a face needs to be suggested as a known player. Lower catches more, errs more.')}
-          {number('Ambiguity margin', 'recognitionMargin', 0.01, 'How far ahead of the runner-up a match must be.')}
+          {number('Recognition threshold', 'recognitionThreshold', 0.01, 'Similarity a face needs to be suggested as a known player. The conservative default is 0.55; lower catches more but also mixes more faces.')}
+          {number('Ambiguity margin', 'recognitionMargin', 0.01, 'How far ahead of the runner-up a match must be. The default is 0.10.')}
           {number('Auto-confirm above', 'autoConfirmAbove', 0.01, '1.0 disables auto-confirmation — everything waits for review.')}
           <label className="checkbox-row">
             <input
@@ -156,7 +162,7 @@ export function SettingsScreen() {
           <div className="hint mono">{info.data?.paths.root}</div>
           <div className="hint">Cache size: {formatBytes(info.data?.cacheBytes ?? 0)}</div>
           <button className="small" onClick={() => clearThumbs.mutate()}>
-            Clear thumbnail cache
+            Clear thumbnail and proxy cache
           </button>
 
           <h2 style={{ marginTop: 8 }}>Privacy</h2>

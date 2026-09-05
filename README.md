@@ -14,7 +14,7 @@ destination.
 > once in the app and every file you put in it lands in a folder of that name.
 
 **Platforms:** Windows 10/11 · macOS (Apple Silicon)
-**Stack:** Tauri 2 · React + TypeScript · Rust · ONNX Runtime · LibRaw · FFmpeg · SQLite
+**Stack:** Tauri 2 · React + TypeScript · Rust · ONNX Runtime · LibRaw · FFmpeg · GStreamer · optional OpenCV tracking · SQLite
 
 Everything runs locally. No cloud APIs, no uploads; the source folder is only
 ever read — every export copies originals into a new destination.
@@ -40,7 +40,9 @@ docs/                    Architecture and development notes
 ## Getting started
 
 Prerequisites: Rust (stable, MSVC on Windows), Node 20+, FFmpeg on `PATH`
-(needed for videos and HEIC; camera RAW is decoded by bundled LibRaw on Windows).
+(needed for video analysis and HEIC), and the GStreamer 1.0 runtime (needed for
+full-duration 512px video proxies). Camera RAW is decoded by bundled LibRaw on
+Windows.
 
 ```bash
 npm install
@@ -55,6 +57,18 @@ npm run dev
 # package an installer
 npm run build
 ```
+
+To test the Windows OpenCV-assisted video path, download its project-local SDK
+and launch the feature build. The normal command above remains the
+detector-only fallback and does not require OpenCV.
+
+```powershell
+npm run dev:opencv
+```
+
+OpenCV optical-flow and feature tracking only propose missed face locations between sampled video
+frames. SCRFD still detects faces and ArcFace must verify every proposed crop
+before it is stored, so tracking cannot directly assign a player's identity.
 
 GPU acceleration is on by default: DirectML on Windows and CoreML on macOS are
 operating-system components, and ONNX Runtime falls back to the CPU provider

@@ -19,6 +19,10 @@ use crate::settings::AppSettings;
 /// Bound each SQLite write transaction so UI reads and progress updates get a
 /// regular chance to run during very large imports.
 const SCAN_DB_BATCH_SIZE: usize = 200;
+/// Tiny/background faces make unstable identity references. Always retain the
+/// best confirmed sample for a player, then admit only useful-quality extras.
+const MIN_REFERENCE_QUALITY: f64 = 0.55;
+const MAX_REFERENCE_SAMPLES_PER_PERSON: usize = 8;
 
 /// Job priorities. Lower numbers run first, so the queue naturally moves
 /// through indexing, then per-file AI, then the shoot-wide stages.
@@ -30,6 +34,8 @@ pub mod priority {
     pub const RECOGNISE: i64 = 300;
     pub const CLUSTER: i64 = 400;
     pub const ALBUMS: i64 = 500;
+    /// Full-duration proxies are useful but must never delay indexing or AI.
+    pub const PROXY: i64 = 600;
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -64,8 +70,7 @@ pub fn scan_shoot(
 ) -> Result<ScanSummary> {
     let shoot = {
         let conn = db.conn()?;
-        shoots::get_by_id(&conn, shoot_id)?
-            .ok_or_else(|| StageError::Other(format!("shoot {shoot_id} not found")))?
+        shoots::get_by_id(&conn, shoot_id)?.ok_or_else(|| StageError::Other(format!("shoot {shoot_id} not found")))?
     };
 
     {
@@ -73,8 +78,16 @@ pub fn scan_shoot(
         shoots::set_status(&conn, shoot_id, ShootStatus::Scanning)?;
     }
 
-    let options = ScanOptions { recursive: settings.scan_recursive, ..Default::default() };
-    let report = scan(std::path::Path::new(&shoot.source_path), &options, cancel, &mut on_progress)?;
+    let options = ScanOptions {
+        recursive: settings.scan_recursive,
+        ..Default::default()
+    };
+    let report = scan(
+        std::path::Path::new(&shoot.source_path),
+        &options,
+        cancel,
+        &mut on_progress,
+    )?;
 
     let mut summary = ScanSummary {
         photos: report.photos,
@@ -133,12 +146,22 @@ pub fn scan_shoot(
                     continue;
                 }
                 added += 1;
-                jobs::enqueue(conn, shoot_id, JobKind::Thumbnail, Some(*media_id), priority::INDEX, None)?;
+                jobs::enqueue(
+                    conn,
+                    shoot_id,
+                    JobKind::Thumbnail,
+                    Some(*media_id),
+                    priority::INDEX,
+                    None,
+                )?;
                 let (job_kind, job_priority) = match kind {
                     MediaKind::Photo => (JobKind::AnalysePhoto, priority::ANALYSE_PHOTO),
                     MediaKind::Video => (JobKind::AnalyseVideo, priority::ANALYSE_VIDEO),
                 };
                 jobs::enqueue(conn, shoot_id, job_kind, Some(*media_id), job_priority, None)?;
+                if *kind == MediaKind::Video {
+                    jobs::enqueue(conn, shoot_id, JobKind::Proxy, Some(*media_id), priority::PROXY, None)?;
+                }
             }
             Ok(added)
         })?;
@@ -190,7 +213,11 @@ pub struct RecogniseReport {
 pub fn recognise_shoot(db: &Database, shoot_id: i64, settings: &AppSettings) -> Result<RecogniseReport> {
     let (library, unassigned) = {
         let conn = db.conn()?;
-        (faces::library_vectors(&conn)?, faces::unassigned_vectors(&conn, shoot_id)?)
+        faces::clear_suggestions_for_shoot(&conn, shoot_id)?;
+        (
+            select_reference_vectors(faces::library_vectors(&conn)?),
+            faces::unassigned_vectors(&conn, shoot_id)?,
+        )
     };
 
     let matcher = FaceMatcher::build(
@@ -212,18 +239,24 @@ pub fn recognise_shoot(db: &Database, shoot_id: i64, settings: &AppSettings) -> 
         return Ok(report);
     }
 
-    // Group by image so each frame is resolved as a whole.
-    let mut by_media: std::collections::BTreeMap<i64, Vec<teo_database::repo::faces::FaceVector>> =
+    // Group by actual frame so each timestamp in a video is resolved
+    // independently. Grouping only by media id incorrectly treated an entire
+    // video as one group photo and prevented the same player from matching at
+    // more than one sampled timestamp.
+    let mut by_frame: std::collections::BTreeMap<(i64, Option<u64>), Vec<teo_database::repo::faces::FaceVector>> =
         std::collections::BTreeMap::new();
     for vector in unassigned {
-        by_media.entry(vector.media_id).or_default().push(vector);
+        by_frame
+            .entry((vector.media_id, vector.frame_time.map(f64::to_bits)))
+            .or_default()
+            .push(vector);
     }
 
     let config = settings.matcher_config();
     let auto_confirm = settings.auto_confirm_above;
 
     db.transaction(|conn| {
-        for (_, group) in by_media {
+        for (_, group) in by_frame {
             let embeddings: Vec<Vec<f32>> = group.iter().map(|v| v.embedding.clone()).collect();
             for (vector, matched) in group.iter().zip(matcher.match_frame(&embeddings, &config)) {
                 let Some(matched) = matched else { continue };
@@ -255,6 +288,33 @@ pub fn recognise_shoot(db: &Database, shoot_id: i64, settings: &AppSettings) -> 
     }
 
     Ok(report)
+}
+
+fn select_reference_vectors(
+    vectors: Vec<teo_database::repo::faces::FaceVector>,
+) -> Vec<teo_database::repo::faces::FaceVector> {
+    let mut by_person = std::collections::BTreeMap::<i64, Vec<_>>::new();
+    for vector in vectors {
+        if let Some(person_id) = vector.person_id {
+            by_person.entry(person_id).or_default().push(vector);
+        }
+    }
+
+    let mut selected = Vec::new();
+    for (_, mut samples) in by_person {
+        samples.sort_by(|a, b| b.quality.total_cmp(&a.quality).then_with(|| a.face_id.cmp(&b.face_id)));
+        let mut accepted = 0usize;
+        for (index, sample) in samples.into_iter().enumerate() {
+            if index == 0 || sample.quality >= MIN_REFERENCE_QUALITY {
+                selected.push(sample);
+                accepted += 1;
+                if accepted >= MAX_REFERENCE_SAMPLES_PER_PERSON {
+                    break;
+                }
+            }
+        }
+    }
+    selected
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -376,9 +436,7 @@ pub fn queue_pending_work(db: &Database, shoot_id: i64) -> Result<usize> {
     let queued = db.transaction(|conn| {
         let mut count = 0;
         for item in &pending {
-            if item.processing_status == ProcessingStatus::Pending.as_str()
-                || item.thumbnail_path.is_none()
-            {
+            if item.processing_status == ProcessingStatus::Pending.as_str() || item.thumbnail_path.is_none() {
                 jobs::enqueue_unique(conn, shoot_id, JobKind::Thumbnail, Some(item.id), priority::INDEX)?;
             }
             let kind = if item.media_type == MediaType::Video.as_str() {
@@ -392,6 +450,11 @@ pub fn queue_pending_work(db: &Database, shoot_id: i64) -> Result<usize> {
                 priority::ANALYSE_PHOTO
             };
             if jobs::enqueue_unique(conn, shoot_id, kind, Some(item.id), job_priority)?.is_some() {
+                count += 1;
+            }
+            if item.media_type == MediaType::Video.as_str()
+                && jobs::enqueue_unique(conn, shoot_id, JobKind::Proxy, Some(item.id), priority::PROXY)?.is_some()
+            {
                 count += 1;
             }
         }
@@ -439,7 +502,12 @@ mod tests {
             &teo_database::models::NewFace {
                 media_id,
                 shoot_id,
-                bbox: BoundingBox { x: 0.1, y: 0.1, w: 0.2, h: 0.2 },
+                bbox: BoundingBox {
+                    x: 0.1,
+                    y: 0.1,
+                    w: 0.2,
+                    h: 0.2,
+                },
                 landmarks: None,
                 detection_confidence: 0.95,
                 embedding: Some(embedding),
@@ -450,6 +518,49 @@ mod tests {
         )
         .unwrap();
         (media_id, face_id)
+    }
+
+    fn add_video_faces(db: &Database, shoot_id: i64, filename: &str, samples: &[(f64, Vec<f32>)]) -> Vec<i64> {
+        let conn = db.conn().unwrap();
+        let media_id = media_repo::upsert(
+            &conn,
+            &NewMedia {
+                shoot_id,
+                path: format!("C:\\shoot\\{filename}"),
+                filename: filename.to_string(),
+                media_type: MediaType::Video,
+                extension: "mp4".into(),
+                file_size: 1,
+                content_key: filename.to_string(),
+                captured_at: None,
+            },
+        )
+        .unwrap();
+        samples
+            .iter()
+            .map(|(frame_time, embedding)| {
+                faces::insert(
+                    &conn,
+                    &teo_database::models::NewFace {
+                        media_id,
+                        shoot_id,
+                        bbox: BoundingBox {
+                            x: 0.1,
+                            y: 0.1,
+                            w: 0.2,
+                            h: 0.2,
+                        },
+                        landmarks: None,
+                        detection_confidence: 0.95,
+                        embedding: Some(embedding.clone()),
+                        quality: Some(0.7),
+                        frame_time: Some(*frame_time),
+                        crop_path: None,
+                    },
+                )
+                .unwrap()
+            })
+            .collect()
     }
 
     fn unit(v: Vec<f32>) -> Vec<f32> {
@@ -511,6 +622,32 @@ mod tests {
     }
 
     #[test]
+    fn the_same_player_can_match_at_multiple_video_sample_times() {
+        let db = Database::open_in_memory().unwrap();
+        let shoot_id = seed_shoot(&db);
+        let (_, reference) = add_face(&db, shoot_id, "reference.jpg", unit(vec![1.0, 0.0, 0.0]));
+        {
+            let conn = db.conn().unwrap();
+            let person = people::get_or_create(&conn, "Jonathan", None).unwrap();
+            faces::assign(&conn, reference, person.id, Some(1.0)).unwrap();
+        }
+        let samples = add_video_faces(
+            &db,
+            shoot_id,
+            "interview.mp4",
+            &[(0.0, unit(vec![0.99, 0.02, 0.0])), (5.0, unit(vec![0.98, 0.05, 0.0]))],
+        );
+
+        let report = recognise_shoot(&db, shoot_id, &AppSettings::default()).unwrap();
+        assert_eq!(report.faces_matched, 2);
+        let conn = db.conn().unwrap();
+        assert!(samples.into_iter().all(|face_id| {
+            let face = faces::get_by_id(&conn, face_id).unwrap().unwrap();
+            face.person_id.is_some() && face.assignment == "suggested"
+        }));
+    }
+
+    #[test]
     fn auto_confirm_applies_above_its_threshold() {
         let db = Database::open_in_memory().unwrap();
         let shoot_id = seed_shoot(&db);
@@ -522,12 +659,76 @@ mod tests {
         }
         let (_, new_face) = add_face(&db, shoot_id, "new.jpg", unit(vec![0.999, 0.02, 0.0]));
 
-        let settings = AppSettings { auto_confirm_above: 0.9, ..Default::default() };
+        let settings = AppSettings {
+            auto_confirm_above: 0.9,
+            ..Default::default()
+        };
         let report = recognise_shoot(&db, shoot_id, &settings).unwrap();
         assert_eq!(report.faces_auto_confirmed, 1);
 
         let conn = db.conn().unwrap();
-        assert_eq!(faces::get_by_id(&conn, new_face).unwrap().unwrap().assignment, "confirmed");
+        assert_eq!(
+            faces::get_by_id(&conn, new_face).unwrap().unwrap().assignment,
+            "confirmed"
+        );
+    }
+
+    #[test]
+    fn a_stricter_rerun_removes_a_stale_suggestion() {
+        let db = Database::open_in_memory().unwrap();
+        let shoot_id = seed_shoot(&db);
+        let (_, known_face) = add_face(&db, shoot_id, "known.jpg", unit(vec![1.0, 0.0]));
+        let (_, borderline) = add_face(&db, shoot_id, "borderline.jpg", unit(vec![0.6, 0.8]));
+        {
+            let conn = db.conn().unwrap();
+            let person = people::get_or_create(&conn, "Jonathan", None).unwrap();
+            faces::assign(&conn, known_face, person.id, Some(1.0)).unwrap();
+        }
+
+        let permissive = AppSettings {
+            recognition_threshold: 0.5,
+            recognition_margin: 0.0,
+            ..Default::default()
+        };
+        assert_eq!(recognise_shoot(&db, shoot_id, &permissive).unwrap().faces_matched, 1);
+
+        let strict = AppSettings {
+            recognition_threshold: 0.8,
+            recognition_margin: 0.0,
+            ..Default::default()
+        };
+        assert_eq!(recognise_shoot(&db, shoot_id, &strict).unwrap().faces_matched, 0);
+        let conn = db.conn().unwrap();
+        let face = faces::get_by_id(&conn, borderline).unwrap().unwrap();
+        assert_eq!(face.assignment, "unassigned");
+        assert_eq!(face.person_id, None);
+    }
+
+    #[test]
+    fn reference_selection_keeps_the_best_and_caps_good_extras() {
+        let samples = (0..12)
+            .map(|face_id| teo_database::repo::faces::FaceVector {
+                face_id,
+                media_id: face_id,
+                frame_time: None,
+                person_id: Some(7),
+                embedding: vec![1.0, 0.0],
+                quality: if face_id == 11 { 0.95 } else { 0.7 },
+            })
+            .chain(std::iter::once(teo_database::repo::faces::FaceVector {
+                face_id: 99,
+                media_id: 99,
+                frame_time: None,
+                person_id: Some(8),
+                embedding: vec![0.0, 1.0],
+                quality: 0.2,
+            }))
+            .collect();
+
+        let selected = select_reference_vectors(samples);
+        assert_eq!(selected.iter().filter(|v| v.person_id == Some(7)).count(), 8);
+        assert_eq!(selected.iter().filter(|v| v.person_id == Some(8)).count(), 1);
+        assert!(selected.iter().any(|v| v.face_id == 11));
     }
 
     #[test]
@@ -547,10 +748,20 @@ mod tests {
         let shoot_id = seed_shoot(&db);
 
         for i in 0..5 {
-            add_face(&db, shoot_id, &format!("a{i}.jpg"), unit(vec![1.0, 0.02 * i as f32, 0.0]));
+            add_face(
+                &db,
+                shoot_id,
+                &format!("a{i}.jpg"),
+                unit(vec![1.0, 0.02 * i as f32, 0.0]),
+            );
         }
         for i in 0..3 {
-            add_face(&db, shoot_id, &format!("b{i}.jpg"), unit(vec![0.0, 0.02 * i as f32, 1.0]));
+            add_face(
+                &db,
+                shoot_id,
+                &format!("b{i}.jpg"),
+                unit(vec![0.0, 0.02 * i as f32, 1.0]),
+            );
         }
 
         let report = cluster_shoot(&db, shoot_id, &AppSettings::default()).unwrap();
@@ -569,7 +780,12 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let shoot_id = seed_shoot(&db);
         for i in 0..5 {
-            add_face(&db, shoot_id, &format!("a{i}.jpg"), unit(vec![1.0, 0.02 * i as f32, 0.0]));
+            add_face(
+                &db,
+                shoot_id,
+                &format!("a{i}.jpg"),
+                unit(vec![1.0, 0.02 * i as f32, 0.0]),
+            );
         }
 
         cluster_shoot(&db, shoot_id, &AppSettings::default()).unwrap();
@@ -586,9 +802,11 @@ mod tests {
         cluster_shoot(&db, shoot_id, &AppSettings::default()).unwrap();
 
         let conn = db.conn().unwrap();
-        let cluster = clusters::get_by_id(&conn, named_id).unwrap().expect("named cluster survives");
+        let cluster = clusters::get_by_id(&conn, named_id)
+            .unwrap()
+            .expect("named cluster survives");
         assert_eq!(cluster.status, "named");
-        assert_eq!(faces::library_vectors(&conn).unwrap().len(), 5);
+        assert_eq!(faces::library_vectors(&conn).unwrap().len(), 1);
     }
 
     #[test]
@@ -620,7 +838,11 @@ mod tests {
         reset_analysis(&db, shoot_id).unwrap();
 
         let conn = db.conn().unwrap();
-        assert_eq!(media_repo::count_for_shoot(&conn, shoot_id).unwrap(), 1, "the file index survives");
+        assert_eq!(
+            media_repo::count_for_shoot(&conn, shoot_id).unwrap(),
+            1,
+            "the file index survives"
+        );
         assert!(faces::for_media(&conn, 1).unwrap().is_empty());
         assert!(albums::list(&conn, shoot_id).unwrap().is_empty());
         assert!(clusters::list_summaries(&conn, shoot_id, true).unwrap().is_empty());

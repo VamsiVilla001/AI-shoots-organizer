@@ -21,6 +21,9 @@ apps/desktop/src-tauri/gen/
 *.db-wal
 *.db-shm
 /.scratch/
+/\.opencv/
+/output/
+/tmp/
 /tests/fixtures/media/
 
 # OS

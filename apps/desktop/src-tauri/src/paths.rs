@@ -4,6 +4,7 @@
 //! AppData/
 //! ├── database/media.db
 //! ├── thumbnails/
+//! ├── proxies/
 //! ├── face_cache/
 //! ├── models/
 //! └── logs/
@@ -22,6 +23,7 @@ pub struct AppPaths {
     pub root: PathBuf,
     pub database: PathBuf,
     pub thumbnails: PathBuf,
+    pub proxies: PathBuf,
     pub face_cache: PathBuf,
     pub models: PathBuf,
     pub logs: PathBuf,
@@ -34,6 +36,7 @@ impl AppPaths {
         let paths = Self {
             database: root.join("database"),
             thumbnails: root.join("thumbnails"),
+            proxies: root.join("proxies"),
             face_cache: root.join("face_cache"),
             models: root.join("models"),
             logs: root.join("logs"),
@@ -43,6 +46,7 @@ impl AppPaths {
         for dir in [
             &paths.database,
             &paths.thumbnails,
+            &paths.proxies,
             &paths.face_cache,
             &paths.models,
             &paths.logs,
@@ -69,7 +73,7 @@ impl AppPaths {
 
     /// Total bytes used by the caches, for the Settings screen.
     pub fn cache_size(&self) -> u64 {
-        [&self.thumbnails, &self.face_cache]
+        [&self.thumbnails, &self.proxies, &self.face_cache]
             .iter()
             .map(|dir| directory_size(dir))
             .sum()
@@ -102,6 +106,7 @@ mod tests {
         let paths = AppPaths::create(&temp).unwrap();
         assert!(paths.database.is_dir());
         assert!(paths.thumbnails.is_dir());
+        assert!(paths.proxies.is_dir());
         assert!(paths.face_cache.is_dir());
         assert!(paths.models.is_dir());
         assert!(paths.logs.is_dir());
@@ -119,6 +124,7 @@ mod tests {
             root: PathBuf::from("/data"),
             database: PathBuf::from("/data/database"),
             thumbnails: PathBuf::from("/data/thumbnails"),
+            proxies: PathBuf::from("/data/proxies"),
             face_cache: PathBuf::from("/data/face_cache"),
             models: PathBuf::from("/data/models"),
             logs: PathBuf::from("/data/logs"),

@@ -28,10 +28,11 @@ pub struct MatcherConfig {
 impl Default for MatcherConfig {
     fn default() -> Self {
         Self {
-            // Tuned for ArcFace-family embeddings, where same-person pairs
-            // typically score above 0.5 and different-person pairs below 0.3.
-            threshold: 0.42,
-            margin: 0.05,
+            // Conservative defaults: a false positive is much more expensive
+            // here than a missed suggestion because player albums feed the
+            // sorting workflow. Editors can still lower these in Settings.
+            threshold: 0.55,
+            margin: 0.10,
             unique_per_frame: true,
         }
     }
@@ -96,7 +97,11 @@ impl FaceMatcher {
             .map(|(person_id, samples)| {
                 let refs: Vec<&[f32]> = samples.iter().map(|s| s.as_slice()).collect();
                 let centroid = centroid(&refs);
-                PersonProfile { person_id, samples, centroid }
+                PersonProfile {
+                    person_id,
+                    samples,
+                    centroid,
+                }
             })
             .collect();
 
@@ -149,7 +154,11 @@ impl FaceMatcher {
             }
         }
 
-        Some(Match { person_id, similarity, runner_up })
+        Some(Match {
+            person_id,
+            similarity,
+            runner_up,
+        })
     }
 
     /// Matches every face in one frame at once.
@@ -163,49 +172,29 @@ impl FaceMatcher {
             return embeddings.iter().map(|e| self.match_one(e, config)).collect();
         }
 
-        // Every (face, player) pair that clears the threshold, best first.
-        let mut candidates: Vec<(usize, i64, f32, Option<f32>)> = Vec::new();
-        for (face_index, embedding) in embeddings.iter().enumerate() {
-            let ranked = self.rank(embedding);
-            let runner_up = ranked.get(1).map(|(_, s)| *s);
-            for (person_id, similarity) in ranked.iter().take(3) {
-                if *similarity >= config.threshold {
-                    candidates.push((face_index, *person_id, *similarity, runner_up));
-                }
-            }
-        }
-        candidates.sort_by(|a, b| b.2.total_cmp(&a.2));
+        // A face may only claim its independently valid top identity. The old
+        // global candidate list allowed a second face to fall through to its
+        // second- or third-ranked player merely because its best player was
+        // already present in the frame. That manufactured false identities in
+        // group photos even though match_one() would have rejected them.
+        let mut candidates: Vec<(usize, Match)> = embeddings
+            .iter()
+            .enumerate()
+            .filter_map(|(face_index, embedding)| {
+                self.match_one(embedding, config).map(|matched| (face_index, matched))
+            })
+            .collect();
+        candidates.sort_by(|a, b| b.1.similarity.total_cmp(&a.1.similarity));
 
         let mut results: Vec<Option<Match>> = vec![None; embeddings.len()];
         let mut taken_people: Vec<i64> = Vec::new();
 
-        for (face_index, person_id, similarity, runner_up) in candidates {
-            if results[face_index].is_some() || taken_people.contains(&person_id) {
+        for (face_index, matched) in candidates {
+            if taken_people.contains(&matched.person_id) {
                 continue;
             }
-            // The margin still applies, but only against players still free —
-            // otherwise a strong second face would suppress a correct first one.
-            if let Some(second) = runner_up {
-                if similarity - second < config.margin && !taken_people.is_empty() {
-                    // Recompute the margin ignoring players already assigned.
-                    let contenders: Vec<f32> = self
-                        .rank(&embeddings[face_index])
-                        .into_iter()
-                        .filter(|(id, _)| *id != person_id && !taken_people.contains(id))
-                        .map(|(_, s)| s)
-                        .collect();
-                    if let Some(best_free) = contenders.first() {
-                        if similarity - best_free < config.margin {
-                            continue;
-                        }
-                    }
-                } else if similarity - second < config.margin {
-                    continue;
-                }
-            }
-
-            results[face_index] = Some(Match { person_id, similarity, runner_up });
-            taken_people.push(person_id);
+            taken_people.push(matched.person_id);
+            results[face_index] = Some(matched);
         }
 
         results
@@ -224,10 +213,10 @@ mod tests {
     /// Three well-separated identities in a 4-dimensional space.
     fn library() -> FaceMatcher {
         FaceMatcher::build(vec![
-            (1, unit(vec![1.0, 0.0, 0.0, 0.0])),   // Jonathan
+            (1, unit(vec![1.0, 0.0, 0.0, 0.0])), // Jonathan
             (1, unit(vec![0.95, 0.1, 0.0, 0.0])),
-            (2, unit(vec![0.0, 1.0, 0.0, 0.0])),   // Mavi
-            (3, unit(vec![0.0, 0.0, 1.0, 0.0])),   // Jelly
+            (2, unit(vec![0.0, 1.0, 0.0, 0.0])), // Mavi
+            (3, unit(vec![0.0, 0.0, 1.0, 0.0])), // Jelly
         ])
     }
 
@@ -251,20 +240,26 @@ mod tests {
     fn an_empty_library_matches_nothing() {
         let matcher = FaceMatcher::default();
         assert!(matcher.is_empty());
-        assert!(matcher.match_one(&unit(vec![1.0, 0.0]), &MatcherConfig::default()).is_none());
+        assert!(matcher
+            .match_one(&unit(vec![1.0, 0.0]), &MatcherConfig::default())
+            .is_none());
     }
 
     #[test]
     fn the_margin_suppresses_ambiguous_matches() {
         // Two players whose samples sit almost on top of each other.
-        let matcher = FaceMatcher::build(vec![
-            (1, unit(vec![1.0, 0.0])),
-            (2, unit(vec![0.999, 0.045])),
-        ]);
+        let matcher = FaceMatcher::build(vec![(1, unit(vec![1.0, 0.0])), (2, unit(vec![0.999, 0.045]))]);
         let probe = unit(vec![1.0, 0.02]);
 
-        let strict = MatcherConfig { threshold: 0.3, margin: 0.2, unique_per_frame: false };
-        assert!(matcher.match_one(&probe, &strict).is_none(), "ambiguity should be reported as unknown");
+        let strict = MatcherConfig {
+            threshold: 0.3,
+            margin: 0.2,
+            unique_per_frame: false,
+        };
+        assert!(
+            matcher.match_one(&probe, &strict).is_none(),
+            "ambiguity should be reported as unknown"
+        );
 
         let permissive = MatcherConfig { margin: 0.0, ..strict };
         assert!(matcher.match_one(&probe, &permissive).is_some());
@@ -274,8 +269,16 @@ mod tests {
     fn threshold_is_respected() {
         let matcher = library();
         let probe = unit(vec![0.7, 0.7, 0.0, 0.0]); // halfway between two players
-        let low = MatcherConfig { threshold: 0.1, margin: 0.0, unique_per_frame: false };
-        let high = MatcherConfig { threshold: 0.95, margin: 0.0, unique_per_frame: false };
+        let low = MatcherConfig {
+            threshold: 0.1,
+            margin: 0.0,
+            unique_per_frame: false,
+        };
+        let high = MatcherConfig {
+            threshold: 0.95,
+            margin: 0.0,
+            unique_per_frame: false,
+        };
         assert!(matcher.match_one(&probe, &low).is_some());
         assert!(matcher.match_one(&probe, &high).is_none());
     }
@@ -286,11 +289,18 @@ mod tests {
         // Two faces that both look most like Jonathan; the weaker one must not
         // also be labelled Jonathan.
         let faces = vec![unit(vec![1.0, 0.0, 0.0, 0.0]), unit(vec![0.9, 0.15, 0.0, 0.0])];
-        let config = MatcherConfig { threshold: 0.3, margin: 0.0, unique_per_frame: true };
+        let config = MatcherConfig {
+            threshold: 0.3,
+            margin: 0.0,
+            unique_per_frame: true,
+        };
 
         let results = matcher.match_frame(&faces, &config);
         let assigned: Vec<i64> = results.iter().flatten().map(|m| m.person_id).collect();
-        assert_eq!(assigned.len(), assigned.iter().collect::<std::collections::HashSet<_>>().len());
+        assert_eq!(
+            assigned.len(),
+            assigned.iter().collect::<std::collections::HashSet<_>>().len()
+        );
         assert_eq!(results[0].unwrap().person_id, 1, "the strongest pairing wins");
     }
 
@@ -302,7 +312,11 @@ mod tests {
             unit(vec![0.0, 1.0, 0.0, 0.0]),
             unit(vec![0.0, 0.0, 1.0, 0.0]),
         ];
-        let config = MatcherConfig { threshold: 0.4, margin: 0.05, unique_per_frame: true };
+        let config = MatcherConfig {
+            threshold: 0.4,
+            margin: 0.05,
+            unique_per_frame: true,
+        };
         let results = matcher.match_frame(&faces, &config);
 
         assert_eq!(results[0].unwrap().person_id, 1);
@@ -311,10 +325,32 @@ mod tests {
     }
 
     #[test]
+    fn a_taken_best_identity_does_not_force_a_face_onto_its_runner_up() {
+        let matcher = FaceMatcher::build(vec![(1, unit(vec![1.0, 0.0])), (2, unit(vec![0.8, 0.6]))]);
+        let faces = vec![unit(vec![1.0, 0.0]), unit(vec![0.98, 0.2])];
+        let config = MatcherConfig {
+            threshold: 0.55,
+            margin: 0.05,
+            unique_per_frame: true,
+        };
+
+        let results = matcher.match_frame(&faces, &config);
+        assert_eq!(results[0].unwrap().person_id, 1);
+        assert!(
+            results[1].is_none(),
+            "the second face is not independently a match for player 2"
+        );
+    }
+
+    #[test]
     fn adding_samples_improves_coverage() {
         // A correction adds a sample; the previously unmatched pose now matches.
         let awkward_pose = unit(vec![0.6, 0.0, 0.0, 0.8]);
-        let config = MatcherConfig { threshold: 0.7, margin: 0.0, unique_per_frame: false };
+        let config = MatcherConfig {
+            threshold: 0.7,
+            margin: 0.0,
+            unique_per_frame: false,
+        };
 
         let before = library();
         assert!(before.match_one(&awkward_pose, &config).is_none());

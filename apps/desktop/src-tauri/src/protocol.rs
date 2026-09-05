@@ -9,6 +9,9 @@
 //!   * `thumb/<media id>` — the cached thumbnail
 //!   * `full/<media id>`  — a web-safe rendering of the original, which is also
 //!     how HEIC and camera raw become viewable at all
+//!   * `frame/<media id>?t=<seconds>` — one analysed video sample frame, used
+//!     by the reviewer to click and name the faces detected at that timestamp
+//!   * `preview-video/<media id>` — a cached, grid-sized H.264 hover preview
 //!   * `video/<media id>` — the original video, with range support so the
 //!     player can seek to a detection timestamp (§9)
 
@@ -26,6 +29,10 @@ pub const SCHEME: &str = "teomedia";
 /// Longest edge for the `full` rendering. Enough to inspect a face crop at
 /// 100%, small enough to send over IPC without a stall.
 const FULL_MAX_DIM: u32 = 2048;
+
+/// Matches the video analysis working size, keeping face boxes pixel-for-pixel
+/// consistent while avoiding a fresh 4K image in the webview.
+const VIDEO_FRAME_MAX_DIM: u32 = 1280;
 
 /// Chunk returned for a video range request that does not specify an end.
 const VIDEO_CHUNK: u64 = 2 * 1024 * 1024;
@@ -55,7 +62,11 @@ fn route(app: &AppHandle, request: &Request<Vec<u8>>) -> Response<Vec<u8>> {
     let path = request.uri().path().trim_start_matches('/').to_string();
     let mut parts = path.splitn(2, '/');
     let kind = parts.next().unwrap_or_default();
-    let id: i64 = match parts.next().and_then(|v| v.split('?').next()).and_then(|v| v.parse().ok()) {
+    let id: i64 = match parts
+        .next()
+        .and_then(|v| v.split('?').next())
+        .and_then(|v| v.parse().ok())
+    {
         Some(id) => id,
         None => return error(StatusCode::BAD_REQUEST, "expected /<kind>/<id>"),
     };
@@ -73,6 +84,8 @@ fn route(app: &AppHandle, request: &Request<Vec<u8>>) -> Response<Vec<u8>> {
     match kind {
         "thumb" => serve_thumbnail(&media),
         "full" => serve_full(&state, &media),
+        "frame" => serve_video_frame(&state, request, &media),
+        "preview-video" => serve_video_preview(&state, request, &media),
         "video" => serve_video(request, &media),
         _ => error(StatusCode::NOT_FOUND, "unknown route"),
     }
@@ -126,16 +139,100 @@ fn serve_full(state: &Arc<AppState>, media: &teo_database::models::Media) -> Res
     }
 }
 
+/// Recreates one of the frames used during video analysis. Analysis stores the
+/// timestamp and normalised face coordinates rather than another copy of the
+/// footage, so this remains storage-efficient and always shows the source
+/// pixels the recorded boxes refer to.
+fn serve_video_frame(
+    state: &Arc<AppState>,
+    request: &Request<Vec<u8>>,
+    media: &teo_database::models::Media,
+) -> Response<Vec<u8>> {
+    if media.media_type != teo_database::models::MediaType::Video.as_str() {
+        return error(StatusCode::BAD_REQUEST, "sample frames are only available for videos");
+    }
+    let Some(timestamp) = request.uri().query().and_then(parse_frame_timestamp) else {
+        return error(StatusCode::BAD_REQUEST, "expected a finite t=<seconds> query");
+    };
+    let path = Path::new(&media.path);
+    if !path.is_file() {
+        return error(StatusCode::NOT_FOUND, "the original file has moved or been deleted");
+    }
+    let Some(ffmpeg) = crate::pipeline::discover_ffmpeg(&state.settings()) else {
+        return error(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "FFmpeg is required for video sample frames",
+        );
+    };
+    let orientation = media.orientation.clamp(1, 8) as u16;
+    match teo_media_core::decode::load_video_frame(path, timestamp, orientation, Some(VIDEO_FRAME_MAX_DIM), &ffmpeg) {
+        Ok(image) => {
+            let mut buffer = Vec::new();
+            match image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buffer, 90).encode_image(&image) {
+                Ok(()) => ok(buffer, "image/jpeg", true),
+                Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+            }
+        }
+        Err(e) => error(StatusCode::UNSUPPORTED_MEDIA_TYPE, &e.to_string()),
+    }
+}
+
+/// Serves the complete 512px H.264 proxy generated during import. A one-time
+/// fallback creates it for shoots indexed by an older build. The original
+/// remains read-only.
+fn serve_video_preview(
+    state: &Arc<AppState>,
+    request: &Request<Vec<u8>>,
+    media: &teo_database::models::Media,
+) -> Response<Vec<u8>> {
+    if media.media_type != teo_database::models::MediaType::Video.as_str() {
+        return error(StatusCode::BAD_REQUEST, "previews are only available for videos");
+    }
+    let source = Path::new(&media.path);
+    if !source.is_file() {
+        return error(StatusCode::NOT_FOUND, "the original file has moved or been deleted");
+    }
+
+    let target = state.proxies.path_for(&media.content_key);
+    if !target.is_file() {
+        let Some(gstreamer) = teo_media_core::Gstreamer::discover() else {
+            return error(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "GStreamer is required for video proxies",
+            );
+        };
+        let orientation = media.orientation.clamp(1, 8) as u16;
+        if let Err(preview_error) = gstreamer.create_video_proxy(source, &target, orientation) {
+            return error(StatusCode::UNSUPPORTED_MEDIA_TYPE, &preview_error.to_string());
+        }
+    }
+
+    serve_video_path(request, &target, "video/mp4", true)
+}
+
+fn parse_frame_timestamp(query: &str) -> Option<f64> {
+    let value = query.split('&').find_map(|part| {
+        part.split_once('=')
+            .filter(|(key, _)| *key == "t")
+            .map(|(_, value)| value)
+    })?;
+    let timestamp = value.parse::<f64>().ok()?;
+    (timestamp.is_finite() && timestamp >= 0.0).then_some(timestamp)
+}
+
 /// Serves a video, honouring `Range` so the player can seek. Without range
 /// support the `<video>` element refuses to scrub, which would break jumping
 /// to a detection timestamp.
 fn serve_video(request: &Request<Vec<u8>>, media: &teo_database::models::Media) -> Response<Vec<u8>> {
     let path = Path::new(&media.path);
+    serve_video_path(request, path, video_mime(&media.extension), false)
+}
+
+fn serve_video_path(request: &Request<Vec<u8>>, path: &Path, mime: &'static str, cacheable: bool) -> Response<Vec<u8>> {
     let Ok(metadata) = std::fs::metadata(path) else {
         return error(StatusCode::NOT_FOUND, "the original file has moved or been deleted");
     };
     let total = metadata.len();
-    let mime = video_mime(&media.extension);
 
     let range = request
         .headers()
@@ -145,11 +242,7 @@ fn serve_video(request: &Request<Vec<u8>>, media: &teo_database::models::Media) 
 
     let Some((start, end)) = range else {
         return match std::fs::read(path) {
-            Ok(bytes) => Response::builder()
-                .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, mime)
-                .header(header::ACCEPT_RANGES, "bytes")
-                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+            Ok(bytes) => video_response_builder(StatusCode::OK, mime, cacheable)
                 .body(bytes)
                 .unwrap_or_else(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "response build failed")),
             Err(e) => error(StatusCode::NOT_FOUND, &e.to_string()),
@@ -157,17 +250,25 @@ fn serve_video(request: &Request<Vec<u8>>, media: &teo_database::models::Media) 
     };
 
     match read_range(path, start, end) {
-        Ok(bytes) => Response::builder()
-            .status(StatusCode::PARTIAL_CONTENT)
-            .header(header::CONTENT_TYPE, mime)
-            .header(header::ACCEPT_RANGES, "bytes")
+        Ok(bytes) => video_response_builder(StatusCode::PARTIAL_CONTENT, mime, cacheable)
             .header(header::CONTENT_RANGE, format!("bytes {start}-{end}/{total}"))
             .header(header::CONTENT_LENGTH, bytes.len().to_string())
-            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
             .body(bytes)
             .unwrap_or_else(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "response build failed")),
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
+}
+
+fn video_response_builder(status: StatusCode, mime: &'static str, cacheable: bool) -> tauri::http::response::Builder {
+    let mut builder = Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, mime)
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*");
+    if cacheable {
+        builder = builder.header(header::CACHE_CONTROL, "max-age=86400, immutable");
+    }
+    builder
 }
 
 fn read_range(path: &Path, start: u64, end: u64) -> std::io::Result<Vec<u8>> {
@@ -298,6 +399,20 @@ mod tests {
         assert_eq!(video_mime("mov"), "video/quicktime");
         assert_eq!(video_mime("mkv"), "video/x-matroska");
         assert_eq!(video_mime("xyz"), "application/octet-stream");
+    }
+
+    #[test]
+    fn sample_frame_timestamp_is_finite_and_non_negative() {
+        assert_eq!(parse_frame_timestamp("t=12.500"), Some(12.5));
+        assert_eq!(parse_frame_timestamp("mode=review&t=0"), Some(0.0));
+        assert_eq!(parse_frame_timestamp("t=-1"), None);
+        assert_eq!(parse_frame_timestamp("t=NaN"), None);
+        assert_eq!(parse_frame_timestamp("x=1"), None);
+    }
+
+    #[test]
+    fn hover_proxies_stay_at_thumbnail_scale() {
+        assert_eq!(teo_media_core::VIDEO_PROXY_WIDTH, teo_media_core::THUMBNAIL_MAX_DIM);
     }
 
     #[test]

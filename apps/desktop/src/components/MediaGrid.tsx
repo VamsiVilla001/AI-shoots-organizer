@@ -1,5 +1,6 @@
-import type { Media } from '@teo/shared-types'
-import { formatTime, thumbUrl } from '../media'
+import { useEffect, useRef, useState } from 'react'
+import type { Media, MediaPickState } from '@teo/shared-types'
+import { formatTime, thumbUrl, videoPreviewUrl } from '../media'
 import { useUi } from '../store'
 
 /**
@@ -24,10 +25,29 @@ export function MediaGrid(props: {
   onDragMedia?: (mediaId: number) => void
   /** Extra per-tile label, e.g. the album's match confidence. */
   cornerLabels?: ReadonlyMap<number, string>
+  /** Persists stars and pick/reject flags. The focused tile is used unless it
+   *  belongs to the current selection, in which case the whole selection is updated. */
+  onEditorial?: (args: {
+    mediaIds: number[]
+    rating?: number
+    pickState?: MediaPickState
+  }) => void
+  editorialBusy?: boolean
   emptyTitle?: string
   emptyHint?: string
 }) {
   const openViewer = useUi((s) => s.openViewer)
+  const [previewingVideoId, setPreviewingVideoId] = useState<number | null>(null)
+  const previewTimer = useRef<number | null>(null)
+
+  const cancelPreviewTimer = () => {
+    if (previewTimer.current !== null) {
+      window.clearTimeout(previewTimer.current)
+      previewTimer.current = null
+    }
+  }
+
+  useEffect(() => cancelPreviewTimer, [])
 
   if (props.media.length === 0) {
     return (
@@ -47,6 +67,24 @@ export function MediaGrid(props: {
           <div
             key={item.id}
             className={`media-tile${isSelected ? ' selected' : ''}`}
+            tabIndex={0}
+            role="button"
+            onMouseEnter={() => {
+              if (item.mediaType !== 'video') return
+              cancelPreviewTimer()
+              // Avoid starting FFmpeg work while the pointer is merely passing
+              // across the grid. This still feels immediate once a tile is
+              // intentionally hovered, like a video-library thumbnail.
+              previewTimer.current = window.setTimeout(() => {
+                setPreviewingVideoId(item.id)
+                previewTimer.current = null
+              }, 300)
+            }}
+            onMouseLeave={() => {
+              if (item.mediaType !== 'video') return
+              cancelPreviewTimer()
+              setPreviewingVideoId((current) => (current === item.id ? null : current))
+            }}
             draggable={props.onDragMedia !== undefined}
             onDragStart={(e) => {
               props.onDragMedia?.(item.id)
@@ -66,11 +104,36 @@ export function MediaGrid(props: {
               }
             }}
             onDoubleClick={() => props.selectMode && openViewer(item.id)}
+            onKeyDown={(event) => {
+              if (!props.onEditorial || props.editorialBusy) return
+              const mediaIds = isSelected && props.selected?.size ? [...props.selected] : [item.id]
+              if (/^[0-5]$/.test(event.key)) {
+                event.preventDefault()
+                props.onEditorial({ mediaIds, rating: Number(event.key) })
+                return
+              }
+              const key = event.key.toLowerCase()
+              if (key === 'p') {
+                event.preventDefault()
+                props.onEditorial({
+                  mediaIds,
+                  pickState: item.pickState === 'pick' ? 'none' : 'pick',
+                })
+              } else if (key === 'x') {
+                event.preventDefault()
+                props.onEditorial({
+                  mediaIds,
+                  pickState: item.pickState === 'reject' ? 'none' : 'reject',
+                })
+              }
+            }}
             title={`${item.filename}\n${item.path}${
               chips.length > 0 ? `\nIn: ${chips.join(', ')}` : ''
-            }`}
+            }\nShortcuts: 1–5 stars · 0 clears · P pick · X reject`}
           >
-            {item.thumbnailPath ? (
+            {previewingVideoId === item.id ? (
+              <VideoHoverPreview media={item} />
+            ) : item.thumbnailPath ? (
               <img src={thumbUrl(item.id)} alt={item.filename} loading="lazy" />
             ) : (
               <div className="placeholder">
@@ -81,7 +144,7 @@ export function MediaGrid(props: {
               <span className="corner confidence">{props.cornerLabels.get(item.id)}</span>
             )}
             {item.mediaType === 'video' && (
-              <span className="corner">▶ {item.duration ? formatTime(item.duration) : 'video'}</span>
+              <span className="corner">{item.duration ? formatTime(item.duration) : 'video'}</span>
             )}
             {item.faceCount > 0 && item.mediaType === 'photo' && (
               <span className="corner">
@@ -99,6 +162,13 @@ export function MediaGrid(props: {
                 <span className="quality-badge">Quality {Math.round(item.qualityScore * 100)}</span>
               </div>
             )}
+            {(item.rating > 0 || item.pickState !== 'none') && (
+              <div className="editorial-badges">
+                {item.rating > 0 && <span>{'★'.repeat(item.rating)}</span>}
+                {item.pickState === 'pick' && <span className="pick">PICK</span>}
+                {item.pickState === 'reject' && <span className="reject">REJECT</span>}
+              </div>
+            )}
             {chips.length > 0 && (
               <div className="group-chips">
                 {chips.slice(0, 2).map((name) => (
@@ -114,5 +184,79 @@ export function MediaGrid(props: {
         )
       })}
     </div>
+  )
+}
+
+/**
+ * Smooth hover playback from a complete local 512px proxy. GStreamer creates
+ * it once during import; subsequent hovers use WebView2's normal hardware
+ * video decoder. Only one instance is mounted by MediaGrid.
+ */
+function VideoHoverPreview({ media }: { media: Media }) {
+  const [progress, setProgress] = useState(0)
+  const [attempt, setAttempt] = useState(0)
+  const [failed, setFailed] = useState(false)
+  const [ready, setReady] = useState(false)
+  const retryTimer = useRef<number | null>(null)
+
+  useEffect(
+    () => () => {
+      if (retryTimer.current !== null) window.clearTimeout(retryTimer.current)
+    },
+    [],
+  )
+
+  if (failed) {
+    return media.thumbnailPath ? (
+      <img src={thumbUrl(media.id)} alt={`${media.filename} preview`} />
+    ) : (
+      <div className="placeholder">preview unavailable</div>
+    )
+  }
+
+  return (
+    <>
+      {media.thumbnailPath ? (
+        <img
+          className="video-hover-poster"
+          src={thumbUrl(media.id)}
+          alt={`${media.filename} preview`}
+        />
+      ) : (
+        <div className="placeholder">video</div>
+      )}
+      <video
+        key={attempt}
+        className={`video-hover-player${ready ? ' ready' : ''}`}
+        src={videoPreviewUrl(media.id, media.contentKey, attempt)}
+        muted
+        loop
+        playsInline
+        autoPlay
+        preload="auto"
+        onCanPlay={(event) => {
+          setReady(true)
+          event.currentTarget.play().catch(() => {})
+        }}
+        onTimeUpdate={(event) => {
+          const video = event.currentTarget
+          setProgress(video.duration > 0 ? video.currentTime / video.duration : 0)
+        }}
+        onError={() => {
+          setReady(false)
+          if (attempt >= 7) {
+            setFailed(true)
+            return
+          }
+          if (retryTimer.current !== null) window.clearTimeout(retryTimer.current)
+          retryTimer.current = window.setTimeout(() => setAttempt((value) => value + 1), 900)
+        }}
+      />
+      {ready && (
+        <div className="video-hover-timeline" aria-hidden="true">
+          <span style={{ width: `${Math.min(1, Math.max(0, progress)) * 100}%` }} />
+        </div>
+      )}
+    </>
   )
 }

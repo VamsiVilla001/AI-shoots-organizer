@@ -89,6 +89,7 @@ fn worker_loop(index: usize, has_io_worker: bool, app: AppHandle, state: Arc<App
     // indexing works with no models installed.
     let mut tools_version = state.settings_version();
     let mut ffmpeg = crate::pipeline::discover_ffmpeg(&state.settings());
+    let mut gstreamer = teo_media_core::Gstreamer::discover();
 
     while !state.is_shutting_down() {
         if state.is_paused() {
@@ -143,11 +144,23 @@ fn worker_loop(index: usize, has_io_worker: bool, app: AppHandle, state: Arc<App
                 engine_last_used = None;
             }
             ffmpeg = crate::pipeline::discover_ffmpeg(&state.settings());
+            gstreamer = teo_media_core::Gstreamer::discover();
             tools_version = state.settings_version();
         }
 
-        let outcome = run_job(&app, &state, &job, &mut engine, &mut engine_version, ffmpeg.as_ref());
-        if matches!(JobKind::parse(&job.kind), Some(JobKind::AnalysePhoto | JobKind::AnalyseVideo)) {
+        let outcome = run_job(
+            &app,
+            &state,
+            &job,
+            &mut engine,
+            &mut engine_version,
+            ffmpeg.as_ref(),
+            gstreamer.as_ref(),
+        );
+        if matches!(
+            JobKind::parse(&job.kind),
+            Some(JobKind::AnalysePhoto | JobKind::AnalyseVideo)
+        ) {
             engine_last_used = Some(Instant::now());
         }
         finish_job(&app, &state, &job, outcome);
@@ -196,6 +209,7 @@ fn run_job(
     engine: &mut Option<Engine>,
     engine_version: &mut u64,
     ffmpeg: Option<&teo_media_core::Ffmpeg>,
+    gstreamer: Option<&teo_media_core::Gstreamer>,
 ) -> JobOutcome {
     let Some(kind) = JobKind::parse(&job.kind) else {
         return JobOutcome::Failed(format!("unknown job kind '{}'", job.kind));
@@ -233,12 +247,24 @@ fn run_job(
         // Indexing runs without the engine on purpose — thumbnails and
         // metadata must work on a machine with no models installed.
         JobKind::Thumbnail => match load_media(state, job) {
-            Ok(item) => {
-                match crate::pipeline::index_media(&state.db, &state.thumbnails, ffmpeg, &item) {
+            Ok(item) => match crate::pipeline::index_media(&state.db, &state.thumbnails, ffmpeg, &item) {
+                Ok(()) => JobOutcome::Done,
+                Err(e) => JobOutcome::Failed(e.to_string()),
+            },
+            Err(outcome) => outcome,
+        },
+
+        JobKind::Proxy => match load_media(state, job) {
+            Ok(item) => match gstreamer {
+                Some(runtime) => match crate::pipeline::generate_video_proxy(&state.proxies, runtime, &item) {
                     Ok(()) => JobOutcome::Done,
-                    Err(e) => JobOutcome::Failed(e.to_string()),
+                    Err(error) => JobOutcome::Failed(error.to_string()),
+                },
+                None => {
+                    tracing::warn!(file = %item.path, "GStreamer is unavailable; skipped video proxy");
+                    JobOutcome::Done
                 }
-            }
+            },
             Err(outcome) => outcome,
         },
 
@@ -328,7 +354,11 @@ fn run_media_job(
         let version = state.settings_version();
         match Engine::new(&state.paths, &state.settings()) {
             Ok(built) => {
-                tracing::info!(detector = built.detector_name(), embedder = built.embedder_name(), "models loaded");
+                tracing::info!(
+                    detector = built.detector_name(),
+                    embedder = built.embedder_name(),
+                    "models loaded"
+                );
                 *engine = Some(built);
                 *engine_version = version;
             }
@@ -455,7 +485,9 @@ fn monitor_loop(app: AppHandle, state: Arc<AppState>) {
         let active: Vec<i64> = conn
             .prepare("SELECT DISTINCT shoot_id FROM jobs WHERE state IN ('queued','running')")
             .and_then(|mut stmt| {
-                let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?.collect::<Result<Vec<_>, _>>()?;
+                let rows = stmt
+                    .query_map([], |r| r.get::<_, i64>(0))?
+                    .collect::<Result<Vec<_>, _>>()?;
                 Ok(rows)
             })
             .unwrap_or_default();
@@ -472,7 +504,10 @@ fn monitor_loop(app: AppHandle, state: Arc<AppState>) {
                 events::emit(
                     &app,
                     events::PROGRESS,
-                    events::ProgressEvent { progress, paused: state.is_paused() },
+                    events::ProgressEvent {
+                        progress,
+                        paused: state.is_paused(),
+                    },
                 );
             }
         }

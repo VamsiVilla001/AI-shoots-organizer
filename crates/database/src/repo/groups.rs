@@ -555,4 +555,47 @@ mod tests {
         assert_eq!(files_again, 0);
         assert_eq!(get_by_id(&conn, group.id).unwrap().unwrap().media_count, 3);
     }
+
+    #[test]
+    fn a_named_video_sample_puts_the_complete_video_in_the_player_group() {
+        use crate::models::{BoundingBox, NewFace};
+        use crate::repo::{albums, faces, people};
+
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+        let (shoot_id, source_ids) = seed(&conn);
+        let video_id = source_ids[2];
+        let person = people::get_or_create(&conn, "Jonathan", None).unwrap();
+        let face_id = faces::insert(
+            &conn,
+            &NewFace {
+                media_id: video_id,
+                shoot_id,
+                bbox: BoundingBox {
+                    x: 0.2,
+                    y: 0.1,
+                    w: 0.2,
+                    h: 0.3,
+                },
+                landmarks: None,
+                detection_confidence: 0.95,
+                embedding: Some(vec![1.0, 0.0]),
+                quality: Some(0.8),
+                frame_time: Some(15.0),
+                crop_path: None,
+            },
+        )
+        .unwrap();
+        faces::assign(&conn, face_id, person.id, Some(1.0)).unwrap();
+
+        albums::regenerate(&conn, shoot_id).unwrap();
+        let (_, files) = seed_from_player_albums(&conn, shoot_id).unwrap();
+        let group = find_by_name(&conn, shoot_id, "Jonathan").unwrap().unwrap();
+
+        assert_eq!(files, 1);
+        assert_eq!(group.media_count, 1);
+        assert_eq!(group.photo_count, 0);
+        assert_eq!(group.video_count, 1);
+        assert_eq!(media_ids(&conn, group.id, Some("video")).unwrap(), vec![video_id]);
+    }
 }

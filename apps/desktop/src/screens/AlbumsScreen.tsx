@@ -5,7 +5,13 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { GROUP_SIZE_CAP, type Album, type ClusterSummary, type MediaType } from '@teo/shared-types'
+import {
+  GROUP_SIZE_CAP,
+  type Album,
+  type ClusterSummary,
+  type MediaPickState,
+  type MediaType,
+} from '@teo/shared-types'
 import * as api from '../api'
 import { formatConfidence, formatCount, groupSizeName, thumbUrl } from '../media'
 import { FaceCrop } from '../components/FaceCrop'
@@ -413,10 +419,16 @@ function AlbumDetail(props: {
   // "Jonathan's solo shots". Redundant inside a size album, so hidden there.
   const [sizeFilter, setSizeFilter] = useState<number | null>(null)
   const [qualityFilter, setQualityFilter] = useState<'all' | 'best' | 'duplicates'>('all')
-  const [mediaSort, setMediaSort] = useState<'capturedAt' | 'quality' | 'filename'>('capturedAt')
+  const [editorialFilter, setEditorialFilter] = useState<'all' | MediaPickState>('all')
+  const [minRating, setMinRating] = useState(0)
+  const [mediaSort, setMediaSort] = useState<'capturedAt' | 'quality' | 'rating' | 'filename'>(
+    'capturedAt',
+  )
   const showSizeFilter = album.albumType !== 'groupSize'
   const personId = album.albumType === 'player' ? (album.personIds[0] ?? null) : null
   const openExport = useUi((s) => s.openExport)
+  const pushNotice = useUi((s) => s.pushNotice)
+  const queryClient = useQueryClient()
 
   const media = useQuery({
     queryKey: [
@@ -427,6 +439,8 @@ function AlbumDetail(props: {
       typeFilter,
       sizeFilter,
       qualityFilter,
+      editorialFilter,
+      minRating,
       mediaSort,
     ],
     queryFn: () =>
@@ -437,6 +451,8 @@ function AlbumDetail(props: {
         groupSize: sizeFilter,
         onlyBestShots: qualityFilter === 'best',
         onlyDuplicates: qualityFilter === 'duplicates',
+        pickState: editorialFilter === 'all' ? null : editorialFilter,
+        minRating: minRating || null,
         sort: mediaSort,
         limit: 2000,
       }),
@@ -466,6 +482,15 @@ function AlbumDetail(props: {
     }
     return labels
   }, [matchedFaces.data, personId])
+
+  const setEditorial = useMutation({
+    mutationFn: api.setMediaEditorial,
+    onSuccess: (changed) => {
+      pushNotice({ level: 'success', message: `${formatCount(changed)} file(s) updated.` })
+      queryClient.invalidateQueries({ queryKey: ['media', album.shootId] })
+    },
+    onError: (e) => pushNotice({ level: 'error', message: String(e instanceof Error ? e.message : e) }),
+  })
 
   return (
     <>
@@ -530,7 +555,31 @@ function AlbumDetail(props: {
           >
             <option value="capturedAt">Capture time</option>
             <option value="quality">Best quality</option>
+            <option value="rating">Rating</option>
             <option value="filename">Filename</option>
+          </select>
+        </label>
+        <label className="checkbox-row">
+          <span className="hint">Flag</span>
+          <select
+            value={editorialFilter}
+            onChange={(event) => setEditorialFilter(event.target.value as typeof editorialFilter)}
+          >
+            <option value="all">All</option>
+            <option value="pick">Picks</option>
+            <option value="reject">Rejects</option>
+            <option value="none">Unflagged</option>
+          </select>
+        </label>
+        <label className="checkbox-row">
+          <span className="hint">Stars</span>
+          <select value={minRating} onChange={(event) => setMinRating(Number(event.target.value))}>
+            <option value={0}>Any</option>
+            {[1, 2, 3, 4, 5].map((rating) => (
+              <option key={rating} value={rating}>
+                {rating}+ ★
+              </option>
+            ))}
           </select>
         </label>
       </div>
@@ -552,7 +601,16 @@ function AlbumDetail(props: {
             : 'Duplicate groups use a local perceptual fingerprint; review before excluding any alternative.'}
         </div>
       )}
-      <MediaGrid media={media.data ?? []} cornerLabels={confidenceLabels} />
+      <MediaGrid
+        media={media.data ?? []}
+        cornerLabels={confidenceLabels}
+        onEditorial={(args) => setEditorial.mutate(args)}
+        editorialBusy={setEditorial.isPending}
+      />
+      <div className="hint media-shortcuts-hint">
+        Focus a thumbnail, then press 1–5 to rate, 0 to clear stars, P to toggle Pick, or X to
+        toggle Reject.
+      </div>
     </>
   )
 }

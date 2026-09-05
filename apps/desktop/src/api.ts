@@ -26,6 +26,7 @@ import type {
   ManualFaceResult,
   Media,
   MediaGroupLink,
+  MediaPickState,
   MediaQuery,
   ModelStatus,
   NameFaceResult,
@@ -83,6 +84,16 @@ export const listFailedJobs = (shootId: number) => call<Job[]>('list_failed_jobs
 export const listMedia = (query: MediaQuery) => call<Media[]>('list_media', { query })
 export const getMedia = (mediaId: number) => call<Media | null>('get_media', { mediaId })
 export const mediaFaces = (mediaId: number) => call<Face[]>('media_faces', { mediaId })
+export const setMediaEditorial = (args: {
+  mediaIds: number[]
+  rating?: number | null
+  pickState?: MediaPickState | null
+}) =>
+  call<number>('set_media_editorial', {
+    mediaIds: args.mediaIds,
+    rating: args.rating ?? null,
+    pickState: args.pickState ?? null,
+  })
 export const revealInFolder = (path: string) => call<void>('reveal_in_folder', { path })
 export const openPath = (path: string) => call<void>('open_path', { path })
 
@@ -166,8 +177,8 @@ export const assignFaces = (
 ) => call<number>('assign_faces', { faceIds, personId, personName })
 export const ignoreFaces = (faceIds: number[]) => call<number>('ignore_faces', { faceIds })
 /** Embeds a reviewer-drawn face box and compares it with confirmed named faces. */
-export const addManualFace = (mediaId: number, bbox: BoundingBox) =>
-  call<ManualFaceResult>('add_manual_face', { mediaId, bbox })
+export const addManualFace = (mediaId: number, bbox: BoundingBox, frameTime?: number | null) =>
+  call<ManualFaceResult>('add_manual_face', { mediaId, bbox, frameTime: frameTime ?? null })
 /** Names a face's person and gathers all currently known appearances into their group. */
 export const nameFace = (faceId: number, name: string, team?: string | null) =>
   call<NameFaceResult>('name_face', { faceId, name, team: team ?? null })
@@ -175,6 +186,7 @@ export const nameFace = (faceId: number, name: string, team?: string | null) =>
 // --- video -----------------------------------------------------------------
 
 export const videoTimelines = (mediaId: number) => call<VideoTimeline[]>('video_timelines', { mediaId })
+export const videoSampleFrames = (mediaId: number) => call<number[]>('video_sample_frames', { mediaId })
 
 // --- export ----------------------------------------------------------------
 

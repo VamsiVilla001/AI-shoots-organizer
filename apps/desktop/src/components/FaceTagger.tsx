@@ -38,6 +38,8 @@ export function FaceTagger(props: {
     // regenerated from assignments, and the group chips read membership.
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ['media-faces', props.mediaId] }),
+      queryClient.invalidateQueries({ queryKey: ['video-timelines', props.mediaId] }),
+      queryClient.invalidateQueries({ queryKey: ['media-item', props.mediaId] }),
       queryClient.invalidateQueries({ queryKey: ['faces'] }),
       queryClient.invalidateQueries({ queryKey: ['people'] }),
       queryClient.invalidateQueries({ queryKey: ['clusters'] }),

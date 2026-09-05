@@ -95,6 +95,7 @@ string_enum!(AlbumType {
 string_enum!(JobKind {
     Scan => "scan",
     Thumbnail => "thumbnail",
+    Proxy => "proxy",
     AnalysePhoto => "analysePhoto",
     AnalyseVideo => "analyseVideo",
     Recognise => "recognise",
@@ -186,6 +187,10 @@ pub struct Media {
     pub duplicate_group_id: Option<i64>,
     pub duplicate_count: i64,
     pub is_best_shot: bool,
+    /// Human editor rating (0 means unrated; 1..=5 are stars).
+    pub rating: i64,
+    /// Human editor flag: none | pick | reject.
+    pub pick_state: String,
     pub error: Option<String>,
 }
 
@@ -494,7 +499,11 @@ pub struct MediaQuery {
     pub only_best_shots: bool,
     /// Show only photos that belong to a near-duplicate group.
     pub only_duplicates: bool,
-    /// capturedAt (default) | quality | filename.
+    /// Human rating floor. Zero or `None` does not filter.
+    pub min_rating: Option<i64>,
+    /// none | pick | reject. `None` does not filter.
+    pub pick_state: Option<String>,
+    /// capturedAt (default) | quality | rating | filename.
     pub sort: Option<String>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,

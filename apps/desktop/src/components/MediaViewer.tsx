@@ -14,7 +14,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { BoundingBox } from '@teo/shared-types'
 import * as api from '../api'
 import { FaceTagger } from './FaceTagger'
-import { formatConfidence, formatCount, formatTime, fullUrl, videoUrl } from '../media'
+import { formatConfidence, formatCount, formatTime, fullUrl, videoFrameUrl, videoPreviewUrl } from '../media'
 import { useUi } from '../store'
 
 export function MediaViewer(props: { mediaId: number }) {
@@ -26,6 +26,7 @@ export function MediaViewer(props: { mediaId: number }) {
   const [taggingId, setTaggingId] = useState<number | null>(null)
   const [drawingFace, setDrawingFace] = useState(false)
   const [draftBox, setDraftBox] = useState<BoundingBox | null>(null)
+  const [videoReviewTime, setVideoReviewTime] = useState<number | null>(null)
   const drawStart = useRef<{ point: { x: number; y: number }; clientX: number; clientY: number } | null>(null)
   const frameRef = useRef<HTMLDivElement>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
@@ -43,10 +44,21 @@ export function MediaViewer(props: { mediaId: number }) {
     queryFn: () => api.videoTimelines(props.mediaId),
     enabled: media.data?.mediaType === 'video',
   })
+  const sampleFrames = useQuery({
+    queryKey: ['video-sample-frames', props.mediaId],
+    queryFn: () => api.videoSampleFrames(props.mediaId),
+    enabled: media.data?.mediaType === 'video',
+  })
   const people = useQuery({ queryKey: ['people'], queryFn: () => api.listPeople(null) })
+  const item = media.data
 
   const addFace = useMutation({
-    mutationFn: (bbox: BoundingBox) => api.addManualFace(props.mediaId, bbox),
+    mutationFn: (bbox: BoundingBox) =>
+      api.addManualFace(
+        props.mediaId,
+        bbox,
+        media.data?.mediaType === 'video' ? videoReviewTime : null,
+      ),
     onSuccess: async (result) => {
       await Promise.all([
         faces.refetch(),
@@ -70,8 +82,26 @@ export function MediaViewer(props: { mediaId: number }) {
     },
   })
 
+  const setEditorial = useMutation({
+    mutationFn: api.setMediaEditorial,
+    onSuccess: async () => {
+      await Promise.all([
+        media.refetch(),
+        queryClient.invalidateQueries({ queryKey: ['media'] }),
+      ])
+    },
+    onError: (error) =>
+      pushNotice({ level: 'error', message: String(error instanceof Error ? error.message : error) }),
+  })
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null
+      const typing =
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        target instanceof HTMLSelectElement ||
+        target?.isContentEditable
       // Escape backs out of tagging first; a second press closes the viewer, so
       // the key never does two things at once.
       if (e.key === 'Escape') {
@@ -89,13 +119,32 @@ export function MediaViewer(props: { mediaId: number }) {
         })
       }
       // Not while typing a name into the tagger.
-      if (e.key === 'b' && !(e.target instanceof HTMLInputElement)) setShowBoxes((v) => !v)
+      if (e.key === 'b' && !typing) setShowBoxes((v) => !v)
+      if (!item || typing || taggingId !== null || setEditorial.isPending) return
+      if (/^[0-5]$/.test(e.key)) {
+        e.preventDefault()
+        setEditorial.mutate({ mediaIds: [item.id], rating: Number(e.key) })
+        return
+      }
+      const key = e.key.toLowerCase()
+      if (key === 'p') {
+        e.preventDefault()
+        setEditorial.mutate({
+          mediaIds: [item.id],
+          pickState: item.pickState === 'pick' ? 'none' : 'pick',
+        })
+      } else if (key === 'x') {
+        e.preventDefault()
+        setEditorial.mutate({
+          mediaIds: [item.id],
+          pickState: item.pickState === 'reject' ? 'none' : 'reject',
+        })
+      }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [addFace.isPending, closeViewer, drawingFace])
+  }, [addFace.isPending, closeViewer, drawingFace, item, setEditorial, taggingId])
 
-  const item = media.data
   if (!item) return null
 
   const personName = (personId: number | null) =>
@@ -104,6 +153,35 @@ export function MediaViewer(props: { mediaId: number }) {
   const visibleFaces = (faces.data ?? []).filter((f) => f.assignment !== 'ignored')
   const unnamedCount = visibleFaces.filter((f) => f.personId == null).length
   const taggingFace = visibleFaces.find((face) => face.id === taggingId) ?? null
+  const detectedFrameTimes = (faces.data ?? [])
+    .filter((face) => face.frameTime != null)
+    .map((face) => face.frameTime!)
+  const videoFrameTimes = Array.from(
+    new Set(
+      [...(sampleFrames.data ?? []), ...detectedFrameTimes].map((timestamp) =>
+        Number(timestamp.toFixed(3)),
+      ),
+    ),
+  ).sort((a, b) => a - b)
+  const videoFrameFaces = visibleFaces.filter(
+    (face) =>
+      videoReviewTime != null &&
+      face.frameTime != null &&
+      Math.abs(face.frameTime - videoReviewTime) < 0.01,
+  )
+  const reviewingVideoFrame = item.mediaType === 'video' && videoReviewTime != null
+
+  const openVideoReview = () => {
+    videoRef.current?.pause()
+    const unnamedFrame = visibleFaces.find(
+      (face) => face.frameTime != null && face.personId == null,
+    )?.frameTime
+    setVideoReviewTime(unnamedFrame ?? videoFrameTimes[0] ?? null)
+    setShowBoxes(true)
+    setDrawingFace(false)
+    setDraftBox(null)
+    setTaggingId(null)
+  }
 
   const pointInFrame = (event: ReactPointerEvent<HTMLDivElement>) => {
     const rect = frameRef.current?.getBoundingClientRect()
@@ -190,6 +268,8 @@ export function MediaViewer(props: { mediaId: number }) {
           <span className="hint">
             {item.width && item.height ? `${item.width}×${item.height}` : ''}
             {item.cameraModel ? ` · ${item.cameraModel}` : ''}
+            {` · ${item.rating > 0 ? '★'.repeat(item.rating) : 'unrated'}`}
+            {item.pickState !== 'none' ? ` · ${item.pickState}` : ''}
           </span>
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
@@ -210,6 +290,45 @@ export function MediaViewer(props: { mediaId: number }) {
               <button className="small" onClick={() => setShowBoxes((v) => !v)}>
                 {showBoxes ? 'Hide faces (b)' : 'Show faces (b)'}
               </button>
+            </>
+          )}
+          {item.mediaType === 'video' && (
+            <>
+              <button
+                className={`small${reviewingVideoFrame ? ' primary' : ''}`}
+                disabled={videoFrameTimes.length === 0}
+                onClick={() => {
+                  if (reviewingVideoFrame) {
+                    setVideoReviewTime(null)
+                    setDrawingFace(false)
+                    setDraftBox(null)
+                    setTaggingId(null)
+                  } else {
+                    openVideoReview()
+                  }
+                }}
+              >
+                {reviewingVideoFrame ? 'Back to video' : 'Tag sampled faces'}
+              </button>
+              {reviewingVideoFrame && (
+                <>
+                  <button
+                    className={`small${drawingFace ? ' primary' : ''}`}
+                    disabled={addFace.isPending}
+                    onClick={() => {
+                      setDrawingFace((current) => !current)
+                      setDraftBox(null)
+                      setTaggingId(null)
+                      setShowBoxes(true)
+                    }}
+                  >
+                    {drawingFace ? 'Cancel marking (Esc)' : 'Add missed face'}
+                  </button>
+                  <button className="small" onClick={() => setShowBoxes((value) => !value)}>
+                    {showBoxes ? 'Hide faces (b)' : 'Show faces (b)'}
+                  </button>
+                </>
+              )}
             </>
           )}
           <button className="small" onClick={() => api.revealInFolder(item.path)}>
@@ -292,8 +411,60 @@ export function MediaViewer(props: { mediaId: number }) {
                 />
               )}
             </>
+          ) : reviewingVideoFrame ? (
+            <>
+              <img
+                key={videoReviewTime}
+                src={videoFrameUrl(item.id, videoReviewTime)}
+                alt={`${item.filename} at ${formatTime(videoReviewTime)}`}
+              />
+              {showBoxes &&
+                videoFrameFaces.map((face) => (
+                  <div
+                    key={face.id}
+                    className={`face-box taggable${taggingId === face.id ? ' tagging' : ''}${
+                      face.personId == null ? ' unnamed' : ''
+                    }`}
+                    style={{
+                      left: `${face.bbox.x * 100}%`,
+                      top: `${face.bbox.y * 100}%`,
+                      width: `${face.bbox.w * 100}%`,
+                      height: `${face.bbox.h * 100}%`,
+                    }}
+                    title={personName(face.personId) ? 'Click to change who this is' : 'Click to name this person'}
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      setDrawingFace(false)
+                      setDraftBox(null)
+                      setTaggingId((current) => (current === face.id ? null : face.id))
+                    }}
+                  >
+                    <span>
+                      {personName(face.personId) ?? 'Tap to name'}
+                      {face.recognitionConfidence != null &&
+                        ` ${formatConfidence(face.recognitionConfidence)}`}
+                    </span>
+                  </div>
+                ))}
+              {draftBox && (
+                <div
+                  className="manual-face-box"
+                  style={{
+                    left: `${draftBox.x * 100}%`,
+                    top: `${draftBox.y * 100}%`,
+                    width: `${draftBox.w * 100}%`,
+                    height: `${draftBox.h * 100}%`,
+                  }}
+                />
+              )}
+            </>
           ) : (
-            <video ref={videoRef} src={videoUrl(item.id)} controls autoPlay />
+            <video
+              ref={videoRef}
+              src={videoPreviewUrl(item.id, item.contentKey)}
+              controls
+              autoPlay
+            />
           )}
         </div>
       </div>
@@ -305,6 +476,48 @@ export function MediaViewer(props: { mediaId: number }) {
           mediaId={item.id}
           onClose={() => setTaggingId(null)}
         />
+      )}
+
+      {reviewingVideoFrame && videoFrameTimes.length > 0 && (
+        <div className="video-sample-nav" aria-label="Analysed video samples">
+          <span className="hint">Sample frames</span>
+          {videoFrameTimes.map((timestamp, index) => {
+            const frameFaces = visibleFaces.filter(
+              (face) => face.frameTime != null && Math.abs(face.frameTime - timestamp) < 0.01,
+            )
+            const unnamed = frameFaces.filter((face) => face.personId == null).length
+            return (
+              <button
+                key={timestamp}
+                className={`chip${Math.abs(timestamp - videoReviewTime) < 0.01 ? ' active' : ''}`}
+                onClick={() => {
+                  setVideoReviewTime(timestamp)
+                  setDrawingFace(false)
+                  setDraftBox(null)
+                  setTaggingId(null)
+                }}
+                title={`${frameFaces.length} detected face(s), ${unnamed} unnamed`}
+              >
+                {index + 1}. {formatTime(timestamp)}{unnamed > 0 ? ` · ${unnamed} to name` : ''}
+              </button>
+            )
+          })}
+        </div>
+      )}
+
+      {reviewingVideoFrame && !drawingFace && (
+        <div className="viewer-prompt">
+          Analysed sample at {formatTime(videoReviewTime)} · {formatCount(videoFrameFaces.length)} face
+          {videoFrameFaces.length === 1 ? '' : 's'} — click a face to name and group the complete video.
+        </div>
+      )}
+
+      {reviewingVideoFrame && drawingFace && (
+        <div className="viewer-prompt manual-face-prompt">
+          {addFace.isPending
+            ? 'Reading the marked face and comparing it with named faces…'
+            : 'Click the centre of a missed face, or drag a tight box around it.'}
+        </div>
       )}
 
       {item.mediaType === 'video' && timelines.data && timelines.data.length > 0 && (

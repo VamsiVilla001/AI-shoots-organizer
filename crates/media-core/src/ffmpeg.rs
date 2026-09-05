@@ -15,6 +15,15 @@ use crate::{MediaError, Result};
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+#[cfg(windows)]
+const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x0000_4000;
+
+/// FFmpeg otherwise creates one decoder worker per logical CPU and can occupy
+/// the whole machine on 4K intraframe footage. Two threads keep background
+/// processing useful while leaving the UI and the editor's other applications
+/// responsive.
+const DECODE_THREADS: &str = "2";
+const FILTER_THREADS: &str = "1";
 
 /// Suppresses the console window that would otherwise flash up on Windows for
 /// every single invocation.
@@ -24,7 +33,7 @@ fn command(program: &Path) -> Command {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        cmd.creation_flags(CREATE_NO_WINDOW);
+        cmd.creation_flags(CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS);
     }
     cmd
 }
@@ -52,7 +61,11 @@ impl Ffmpeg {
     pub fn discover(hint_dir: Option<&Path>) -> Option<Self> {
         let exe = |stem: &str| -> Option<PathBuf> {
             if let Some(dir) = hint_dir {
-                let candidate = dir.join(if cfg!(windows) { format!("{stem}.exe") } else { stem.to_string() });
+                let candidate = dir.join(if cfg!(windows) {
+                    format!("{stem}.exe")
+                } else {
+                    stem.to_string()
+                });
                 if candidate.is_file() {
                     return Some(candidate);
                 }
@@ -61,11 +74,8 @@ impl Ffmpeg {
         };
 
         let ffmpeg = exe("ffmpeg")?;
-        let ffprobe = exe("ffprobe").unwrap_or_else(|| ffmpeg.with_file_name(if cfg!(windows) {
-            "ffprobe.exe"
-        } else {
-            "ffprobe"
-        }));
+        let ffprobe = exe("ffprobe")
+            .unwrap_or_else(|| ffmpeg.with_file_name(if cfg!(windows) { "ffprobe.exe" } else { "ffprobe" }));
 
         Some(Self { ffmpeg, ffprobe })
     }
@@ -87,12 +97,15 @@ impl Ffmpeg {
     pub fn probe(&self, path: &Path) -> Result<VideoInfo> {
         let out = command(&self.ffprobe)
             .args([
-                "-v", "error",
-                "-select_streams", "v:0",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
                 "-show_entries",
                 "stream=width,height,duration,r_frame_rate:stream_tags=rotate:\
                  stream_side_data=rotation:format=duration:format_tags=creation_time",
-                "-of", "default=noprint_wrappers=1",
+                "-of",
+                "default=noprint_wrappers=1",
             ])
             .arg(path)
             .stdin(Stdio::null())
@@ -109,7 +122,9 @@ impl Ffmpeg {
 
         let mut info = VideoInfo::default();
         for line in String::from_utf8_lossy(&out.stdout).lines() {
-            let Some((key, value)) = line.split_once('=') else { continue };
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
             let value = value.trim();
             if value.is_empty() || value == "N/A" {
                 continue;
@@ -136,26 +151,84 @@ impl Ffmpeg {
     /// Decodes a still image FFmpeg understands but the `image` crate does not
     /// (HEIC, AVIF, camera raw), optionally downscaling on the way out.
     pub fn decode_still(&self, path: &Path, max_dim: Option<u32>) -> Result<RgbImage> {
-        let mut cmd = command(&self.ffmpeg);
-        cmd.args(["-v", "error", "-i"]).arg(path);
-        if let Some(max) = max_dim {
-            // `force_original_aspect_ratio=decrease` never upscales a small source.
-            cmd.args(["-vf", &format!("scale={max}:{max}:force_original_aspect_ratio=decrease")]);
-        }
-        cmd.args(["-frames:v", "1", "-f", "image2pipe", "-vcodec", "png", "-"]);
-        self.run_to_image(cmd, path)
+        self.decode_image(path, None, max_dim)
     }
 
     /// Pulls a single frame at `timestamp`. Seeking before `-i` makes this a
     /// keyframe seek rather than a decode from the start of the file.
     pub fn extract_frame(&self, path: &Path, timestamp: f64, max_dim: Option<u32>) -> Result<RgbImage> {
-        let mut cmd = command(&self.ffmpeg);
-        cmd.args(["-v", "error", "-ss", &format!("{timestamp:.3}"), "-i"]).arg(path);
-        if let Some(max) = max_dim {
-            cmd.args(["-vf", &format!("scale={max}:{max}:force_original_aspect_ratio=decrease")]);
+        self.decode_image(path, Some(timestamp), max_dim)
+    }
+
+    fn decode_image(&self, path: &Path, timestamp: Option<f64>, max_dim: Option<u32>) -> Result<RgbImage> {
+        let hardware = self.image_command(path, timestamp, max_dim, true);
+        match self.run_to_image(hardware, path) {
+            Ok(image) => Ok(image),
+            Err(hardware_error) => {
+                // Hardware decoding varies by codec, bit depth, driver and GPU.
+                // Retry safely with the resource-capped software path instead
+                // of making an otherwise supported file fail analysis.
+                tracing::debug!(file = %path.display(), error = %hardware_error, "hardware video decode unavailable; using limited software decode");
+                let software = self.image_command(path, timestamp, max_dim, false);
+                self.run_to_image(software, path)
+            }
         }
-        cmd.args(["-frames:v", "1", "-f", "image2pipe", "-vcodec", "png", "-"]);
-        self.run_to_image(cmd, path)
+    }
+
+    fn image_command(
+        &self,
+        path: &Path,
+        timestamp: Option<f64>,
+        max_dim: Option<u32>,
+        hardware_acceleration: bool,
+    ) -> Command {
+        let mut cmd = self.constrained_command(hardware_acceleration);
+        cmd.args(["-v", "error"]);
+        if let Some(timestamp) = timestamp {
+            cmd.args(["-ss", &format!("{timestamp:.3}")]);
+        }
+        cmd.arg("-i").arg(path);
+        if let Some(max) = max_dim {
+            // `force_original_aspect_ratio=decrease` never upscales a small source.
+            cmd.args([
+                "-vf",
+                &format!("scale={max}:{max}:force_original_aspect_ratio=decrease"),
+            ]);
+        }
+        // PPM is an uncompressed RGB stream. It removes the expensive PNG
+        // encoder/decoder pair that used to run for every sampled frame while
+        // retaining the exact pixels needed by face detection.
+        cmd.args([
+            "-an",
+            "-sn",
+            "-dn",
+            "-frames:v",
+            "1",
+            "-pix_fmt",
+            "rgb24",
+            "-f",
+            "image2pipe",
+            "-vcodec",
+            "ppm",
+            "-",
+        ]);
+        cmd
+    }
+
+    fn constrained_command(&self, hardware_acceleration: bool) -> Command {
+        let mut cmd = command(&self.ffmpeg);
+        cmd.args([
+            "-nostdin",
+            "-hide_banner",
+            "-threads",
+            DECODE_THREADS,
+            "-filter_threads",
+            FILTER_THREADS,
+        ]);
+        if hardware_acceleration {
+            cmd.args(["-hwaccel", "auto"]);
+        }
+        cmd
     }
 
     /// Timestamps where the picture changes substantially.
@@ -164,13 +237,12 @@ impl Ffmpeg {
     /// scene detector runs, so this costs a fraction of a full decode while
     /// still finding the cuts (§19).
     pub fn scene_changes(&self, path: &Path, threshold: f64, probe_fps: f64) -> Result<Vec<f64>> {
-        let filter = format!(
-            "fps={probe_fps},scale=320:-2,select='gt(scene,{threshold})',showinfo",
-        );
-        let out = command(&self.ffmpeg)
+        let filter = format!("fps={probe_fps},scale=320:-2,select='gt(scene,{threshold})',showinfo",);
+        let mut cmd = self.constrained_command(false);
+        let out = cmd
             .args(["-v", "info", "-i"])
             .arg(path)
-            .args(["-vf", &filter, "-an", "-f", "null", "-"])
+            .args(["-vf", &filter, "-an", "-sn", "-dn", "-f", "null", "-"])
             .stdin(Stdio::null())
             .output()
             .map_err(|e| MediaError::Ffmpeg(format!("ffmpeg failed to start: {e}")))?;
@@ -206,7 +278,7 @@ impl Ffmpeg {
             )));
         }
 
-        let img = image::load_from_memory_with_format(&out.stdout, image::ImageFormat::Png)
+        let img = image::load_from_memory_with_format(&out.stdout, image::ImageFormat::Pnm)
             .map_err(|e| MediaError::Decode(format!("{}: {e}", path.display())))?;
         Ok(img.to_rgb8())
     }
@@ -237,5 +309,24 @@ mod tests {
         assert_eq!(parse_rational("25/1"), Some(25.0));
         assert_eq!(parse_rational("0/0"), None);
         assert_eq!(parse_rational("59.94"), Some(59.94));
+    }
+
+    #[test]
+    fn frame_decode_is_thread_limited_and_uses_lossless_lightweight_output() {
+        let ffmpeg = Ffmpeg {
+            ffmpeg: "ffmpeg".into(),
+            ffprobe: "ffprobe".into(),
+        };
+        let command = ffmpeg.image_command(Path::new("clip.mp4"), Some(12.5), Some(1280), true);
+        let args: Vec<String> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+
+        assert!(args.windows(2).any(|pair| pair == ["-threads", DECODE_THREADS]));
+        assert!(args.windows(2).any(|pair| pair == ["-filter_threads", FILTER_THREADS]));
+        assert!(args.windows(2).any(|pair| pair == ["-hwaccel", "auto"]));
+        assert!(args.windows(2).any(|pair| pair == ["-vcodec", "ppm"]));
+        assert!(!args.iter().any(|arg| arg == "png"));
     }
 }

@@ -351,15 +351,40 @@ h2 {
   border: 2px solid transparent;
 }
 
-.media-tile img {
+.media-tile img,
+.media-tile video {
   width: 100%;
   height: 100%;
   object-fit: cover;
   display: block;
 }
 
+.media-tile video {
+  background: var(--bg-hover);
+}
+
+.media-tile .video-hover-poster,
+.media-tile .video-hover-player {
+  position: absolute;
+  inset: 0;
+}
+
+.media-tile .video-hover-player {
+  opacity: 0;
+  transition: opacity 120ms ease-out;
+}
+
+.media-tile .video-hover-player.ready {
+  opacity: 1;
+}
+
 .media-tile.selected {
   border-color: var(--accent);
+}
+
+.media-tile:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .media-tile .overlay {
@@ -418,6 +443,55 @@ h2 {
 .quality-badge.duplicate {
   color: var(--accent);
   border-color: rgba(124, 139, 255, 0.45);
+}
+
+.editorial-badges {
+  position: absolute;
+  right: 6px;
+  bottom: 27px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 5px;
+  border-radius: 6px;
+  background: rgba(8, 10, 16, 0.8);
+  color: #ffd166;
+  font-size: 10px;
+  line-height: 1.2;
+}
+
+.editorial-badges .pick {
+  color: var(--ok);
+  font-weight: 700;
+}
+
+.editorial-badges .reject {
+  color: var(--error);
+  font-weight: 700;
+}
+
+.video-hover-timeline {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: 23px;
+  height: 3px;
+  overflow: hidden;
+  border-radius: 99px;
+  background: rgba(255, 255, 255, 0.3);
+  z-index: 4;
+}
+
+.video-hover-timeline span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 120ms linear;
+}
+
+.media-shortcuts-hint {
+  margin-top: 10px;
 }
 
 .grouping-bar {
@@ -720,6 +794,39 @@ h2 {
 
 .timeline-chips .chip:hover {
   border-color: var(--teal);
+}
+
+.video-sample-nav {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow-x: auto;
+  flex: 0 0 auto;
+  padding: 0 18px 12px;
+}
+
+.video-sample-nav .hint {
+  flex: 0 0 auto;
+  margin-right: 4px;
+}
+
+.video-sample-nav .chip {
+  flex: 0 0 auto;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 99px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.video-sample-nav .chip:hover,
+.video-sample-nav .chip.active {
+  border-color: var(--accent);
+}
+
+.video-sample-nav .chip.active {
+  background: var(--accent-soft);
 }
 
 /* ---- notices -------------------------------------------------------- */

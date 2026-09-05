@@ -34,7 +34,11 @@ pub struct ScanOptions {
 
 impl Default for ScanOptions {
     fn default() -> Self {
-        Self { recursive: true, follow_symlinks: false, max_depth: 32 }
+        Self {
+            recursive: true,
+            follow_symlinks: false,
+            max_depth: 32,
+        }
     }
 }
 
@@ -49,8 +53,14 @@ pub struct ScanReport {
 
 /// Directories other tools scatter around a shoot that never contain originals.
 const IGNORED_DIRS: &[&str] = &[
-    ".git", "node_modules", "__MACOSX", ".Trash", "$RECYCLE.BIN",
-    "Lightroom Catalog Previews.lrdata", ".thumbnails", "_teo_export",
+    ".git",
+    "node_modules",
+    "__MACOSX",
+    ".Trash",
+    "$RECYCLE.BIN",
+    "Lightroom Catalog Previews.lrdata",
+    ".thumbnails",
+    "_teo_export",
 ];
 
 fn is_ignored_dir(name: &str) -> bool {
@@ -188,7 +198,10 @@ mod tests {
     #[test]
     fn non_recursive_stays_at_the_top_level() {
         let dir = fixture();
-        let options = ScanOptions { recursive: false, ..Default::default() };
+        let options = ScanOptions {
+            recursive: false,
+            ..Default::default()
+        };
         let report = scan(dir.path(), &options, None, |_| {}).unwrap();
         assert_eq!(report.photos, 2);
         assert_eq!(report.videos, 1);
@@ -223,6 +236,12 @@ mod tests {
 
     #[test]
     fn missing_folder_is_an_error() {
-        assert!(scan(Path::new("Z:\\definitely-not-here"), &ScanOptions::default(), None, |_| {}).is_err());
+        assert!(scan(
+            Path::new("Z:\\definitely-not-here"),
+            &ScanOptions::default(),
+            None,
+            |_| {}
+        )
+        .is_err());
     }
 }

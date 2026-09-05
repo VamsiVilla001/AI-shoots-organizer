@@ -82,8 +82,7 @@ impl ThumbnailCache {
 
     fn write(&self, image: &RgbImage, target: &Path) -> Result<()> {
         if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| MediaError::Io(format!("create {}: {e}", parent.display())))?;
+            std::fs::create_dir_all(parent).map_err(|e| MediaError::Io(format!("create {}: {e}", parent.display())))?;
         }
 
         let scaled = downscale(image, THUMBNAIL_MAX_DIM);
@@ -127,20 +126,16 @@ impl ThumbnailCache {
     }
 }
 
-fn render_source(
-    source: &Path,
-    orientation: u16,
-    duration: Option<f64>,
-    ffmpeg: Option<&Ffmpeg>,
-) -> Result<RgbImage> {
-    let (kind, _) = formats::classify(source)
-        .ok_or_else(|| MediaError::Unsupported(source.display().to_string()))?;
+fn render_source(source: &Path, orientation: u16, duration: Option<f64>, ffmpeg: Option<&Ffmpeg>) -> Result<RgbImage> {
+    let (kind, _) = formats::classify(source).ok_or_else(|| MediaError::Unsupported(source.display().to_string()))?;
 
     match kind {
         MediaKind::Photo => crate::decode::load_image(source, orientation, Some(THUMBNAIL_MAX_DIM * 2), ffmpeg),
         MediaKind::Video => {
             let ff = ffmpeg.ok_or_else(|| MediaError::MissingFfmpeg("video thumbnails need FFmpeg".into()))?;
-            let at = duration.map(|d| (d * VIDEO_POSTER_FRACTION).clamp(0.0, (d - 0.1).max(0.0))).unwrap_or(0.0);
+            let at = duration
+                .map(|d| (d * VIDEO_POSTER_FRACTION).clamp(0.0, (d - 0.1).max(0.0)))
+                .unwrap_or(0.0);
             crate::decode::load_video_frame(source, at, orientation, Some(THUMBNAIL_MAX_DIM * 2), ff)
         }
     }

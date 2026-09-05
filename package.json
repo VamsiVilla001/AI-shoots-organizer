@@ -9,13 +9,17 @@
   ],
   "scripts": {
     "dev": "npm run tauri:dev -w @teo/desktop",
+    "opencv:setup": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup-opencv.ps1",
+    "dev:opencv": "npm run opencv:setup && npm run tauri:dev -w @teo/desktop -- -- --features opencv-tracking",
     "build": "npm run tauri:build -w @teo/desktop",
+    "build:opencv": "npm run opencv:setup && npm run tauri:build -w @teo/desktop -- -- --features opencv-tracking",
     "web:dev": "npm run dev -w @teo/desktop",
     "web:build": "npm run build -w @teo/desktop",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "lint": "npm run lint --workspaces --if-present",
     "rs:check": "cargo check --workspace --all-targets",
     "rs:test": "cargo test --workspace",
+    "rs:test:opencv": "cargo test -p teo-video-analysis --features opencv-tracking",
     "rs:fmt": "cargo fmt --all",
     "rs:clippy": "cargo clippy --workspace --all-targets -- -D warnings"
   },

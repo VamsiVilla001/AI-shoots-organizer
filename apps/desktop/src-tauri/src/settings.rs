@@ -18,6 +18,8 @@ const MAX_BACKGROUND_WORKERS: usize = 2;
 /// Leave CPU capacity for the webview, SQLite and image decoding even on large
 /// workstations. ONNX inference scales poorly beyond this per-session limit.
 const MAX_INFERENCE_THREADS: usize = 4;
+const LEGACY_RECOGNITION_THRESHOLD: f32 = 0.42;
+const LEGACY_RECOGNITION_MARGIN: f32 = 0.05;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -90,8 +92,8 @@ impl Default for AppSettings {
             max_faces_per_image: 64,
             analysis_max_dim: 1600,
 
-            recognition_threshold: 0.42,
-            recognition_margin: 0.05,
+            recognition_threshold: 0.55,
+            recognition_margin: 0.10,
             unique_person_per_frame: true,
             auto_confirm_above: 1.0,
 
@@ -117,7 +119,18 @@ impl Default for AppSettings {
 impl AppSettings {
     pub fn load(db: &Database) -> DbResult<Self> {
         let conn = db.conn()?;
-        settings::get(&conn, KEY, AppSettings::default())
+        let mut loaded: Self = settings::get(&conn, KEY, AppSettings::default())?;
+        // Upgrade installations that still carry the original permissive
+        // pair. Custom values are respected; only the exact legacy defaults
+        // are migrated.
+        if (loaded.recognition_threshold - LEGACY_RECOGNITION_THRESHOLD).abs() < f32::EPSILON
+            && (loaded.recognition_margin - LEGACY_RECOGNITION_MARGIN).abs() < f32::EPSILON
+        {
+            loaded.recognition_threshold = AppSettings::default().recognition_threshold;
+            loaded.recognition_margin = AppSettings::default().recognition_margin;
+            settings::set(&conn, KEY, &loaded)?;
+        }
+        Ok(loaded)
     }
 
     pub fn save(&self, db: &Database) -> DbResult<()> {
@@ -199,7 +212,10 @@ impl AppSettings {
             sample_interval: self.video_sample_interval,
             max_frames: self.video_max_frames,
             probe_fps: 4.0,
-            frame_max_dim: self.analysis_max_dim.min(1600),
+            // Detection ultimately runs on a 640px tensor. A 1280px video
+            // frame retains ample crop detail for recognition while avoiding
+            // the extra scaling and RGB memory of a 1600px intermediate.
+            frame_max_dim: self.analysis_max_dim.min(1280),
             min_frame_gap: 1.0,
         }
     }
@@ -260,7 +276,11 @@ mod tests {
 
     #[test]
     fn detector_input_size_is_rounded_to_the_stride() {
-        let settings = AppSettings { detection_input_size: 700, ..Default::default() }.sanitised();
+        let settings = AppSettings {
+            detection_input_size: 700,
+            ..Default::default()
+        }
+        .sanitised();
         assert_eq!(settings.detection_input_size % 32, 0);
         assert_eq!(settings.detection_input_size, 672);
     }
@@ -273,7 +293,11 @@ mod tests {
             AppSettings::default().recognition_threshold
         );
 
-        let custom = AppSettings { recognition_threshold: 0.61, video_enabled: false, ..Default::default() };
+        let custom = AppSettings {
+            recognition_threshold: 0.61,
+            video_enabled: false,
+            ..Default::default()
+        };
         custom.save(&db).unwrap();
 
         let loaded = AppSettings::load(&db).unwrap();
@@ -282,8 +306,27 @@ mod tests {
     }
 
     #[test]
+    fn legacy_permissive_recognition_defaults_are_tightened_on_load() {
+        let db = Database::open_in_memory().unwrap();
+        let legacy = AppSettings {
+            recognition_threshold: LEGACY_RECOGNITION_THRESHOLD,
+            recognition_margin: LEGACY_RECOGNITION_MARGIN,
+            ..Default::default()
+        };
+        legacy.save(&db).unwrap();
+
+        let loaded = AppSettings::load(&db).unwrap();
+        assert_eq!(loaded.recognition_threshold, 0.55);
+        assert_eq!(loaded.recognition_margin, 0.10);
+    }
+
+    #[test]
     fn derived_configs_track_the_settings() {
-        let settings = AppSettings { recognition_threshold: 0.55, cluster_min_size: 7, ..Default::default() };
+        let settings = AppSettings {
+            recognition_threshold: 0.55,
+            cluster_min_size: 7,
+            ..Default::default()
+        };
         assert!((settings.matcher_config().threshold - 0.55).abs() < 1e-6);
         assert_eq!(settings.cluster_config().min_cluster_size, 7);
     }

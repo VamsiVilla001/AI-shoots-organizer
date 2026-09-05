@@ -38,6 +38,8 @@ fn map(row: &Row<'_>) -> rusqlite::Result<Media> {
         duplicate_group_id: get(row, "duplicate_group_id")?,
         duplicate_count: get(row, "duplicate_count")?,
         is_best_shot: get::<i64>(row, "is_best_shot")? != 0,
+        rating: get(row, "rating")?,
+        pick_state: get(row, "pick_state")?,
         error: get(row, "error")?,
     })
 }
@@ -133,6 +135,41 @@ pub fn set_thumbnail(conn: &Connection, id: i64, thumbnail_path: &str) -> Result
         params![id, thumbnail_path],
     )?;
     Ok(())
+}
+
+/// Applies an editor's rating and/or pick decision to one or more files.
+/// Passing `None` for a field leaves that field unchanged.
+pub fn set_editorial_state(
+    conn: &Connection,
+    media_ids: &[i64],
+    rating: Option<i64>,
+    pick_state: Option<&str>,
+) -> Result<usize> {
+    if rating.is_none() && pick_state.is_none() {
+        return Ok(0);
+    }
+    if let Some(value) = rating {
+        if !(0..=5).contains(&value) {
+            return Err(crate::DbError::other("rating must be between 0 and 5"));
+        }
+    }
+    if let Some(value) = pick_state {
+        if !matches!(value, "none" | "pick" | "reject") {
+            return Err(crate::DbError::other("pick state must be none, pick, or reject"));
+        }
+    }
+
+    let mut changed = 0;
+    let mut stmt = conn.prepare(
+        "UPDATE media
+            SET rating = COALESCE(?2, rating),
+                pick_state = COALESCE(?3, pick_state)
+          WHERE id = ?1",
+    )?;
+    for media_id in media_ids {
+        changed += stmt.execute(params![media_id, rating, pick_state])?;
+    }
+    Ok(changed)
 }
 
 pub fn set_quality(
@@ -451,6 +488,16 @@ pub fn query(conn: &Connection, q: &MediaQuery) -> Result<Vec<Media>> {
     if q.only_duplicates {
         wheres.push("m.media_type = 'photo' AND m.duplicate_group_id IS NOT NULL".to_string());
     }
+    if let Some(min_rating) = q.min_rating.filter(|value| *value > 0) {
+        wheres.push(format!("m.rating >= ?{}", args.len() + 1));
+        args.push(Box::new(min_rating.clamp(1, 5)));
+    }
+    if let Some(pick_state) = q.pick_state.as_deref() {
+        if matches!(pick_state, "none" | "pick" | "reject") {
+            wheres.push(format!("m.pick_state = ?{}", args.len() + 1));
+            args.push(Box::new(pick_state.to_string()));
+        }
+    }
     if let Some(search) = &q.search {
         if !search.trim().is_empty() {
             wheres.push(format!("m.filename LIKE ?{}", args.len() + 1));
@@ -464,6 +511,9 @@ pub fn query(conn: &Connection, q: &MediaQuery) -> Result<Vec<Media>> {
     }
     match q.sort.as_deref() {
         Some("quality") => sql.push_str(" ORDER BY m.quality_score IS NULL, m.quality_score DESC, m.filename"),
+        Some("rating") => sql.push_str(
+            " ORDER BY m.rating DESC, (m.pick_state = 'pick') DESC, m.captured_at IS NULL, m.captured_at, m.filename",
+        ),
         Some("filename") => sql.push_str(" ORDER BY m.filename COLLATE NOCASE"),
         _ => sql.push_str(" ORDER BY m.captured_at IS NULL, m.captured_at, m.filename"),
     }
@@ -649,5 +699,49 @@ mod tests {
         )
         .unwrap();
         assert_eq!(best.iter().map(|item| item.id).collect::<Vec<_>>(), vec![b]);
+    }
+
+    #[test]
+    fn editorial_ratings_persist_filter_and_sort() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+        let shoot_id = seed(&conn);
+        let all = query(
+            &conn,
+            &MediaQuery { shoot_id: Some(shoot_id), ..Default::default() },
+        )
+        .unwrap();
+
+        set_editorial_state(&conn, &[all[0].id], Some(3), Some("pick")).unwrap();
+        set_editorial_state(&conn, &[all[1].id], Some(5), None).unwrap();
+
+        let picks = query(
+            &conn,
+            &MediaQuery {
+                shoot_id: Some(shoot_id),
+                pick_state: Some("pick".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(picks.len(), 1);
+        assert_eq!(picks[0].rating, 3);
+
+        let rated = query(
+            &conn,
+            &MediaQuery {
+                shoot_id: Some(shoot_id),
+                min_rating: Some(3),
+                sort: Some("rating".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(rated.iter().map(|item| item.rating).collect::<Vec<_>>(), vec![5, 3]);
+
+        reset_analysis(&conn, shoot_id).unwrap();
+        let kept = get_by_id(&conn, all[0].id).unwrap().unwrap();
+        assert_eq!(kept.rating, 3);
+        assert_eq!(kept.pick_state, "pick");
     }
 }

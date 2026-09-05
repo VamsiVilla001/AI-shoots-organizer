@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use parking_lot::{Mutex, RwLock};
 use teo_database::Database;
-use teo_media_core::ThumbnailCache;
+use teo_media_core::{ThumbnailCache, VideoProxyCache};
 
 use crate::paths::AppPaths;
 use crate::settings::AppSettings;
@@ -15,6 +15,7 @@ pub struct AppState {
     pub db: Database,
     pub paths: AppPaths,
     pub thumbnails: ThumbnailCache,
+    pub proxies: VideoProxyCache,
     /// Base URL the webview uses to fetch media through our custom protocol.
     pub media_url_base: String,
 
@@ -34,9 +35,11 @@ pub struct AppState {
 impl AppState {
     pub fn new(db: Database, paths: AppPaths, settings: AppSettings, media_url_base: String) -> Self {
         let thumbnails = ThumbnailCache::new(&paths.thumbnails);
+        let proxies = VideoProxyCache::new(&paths.proxies);
         Self {
             db,
             thumbnails,
+            proxies,
             paths,
             media_url_base,
             settings: RwLock::new(settings),

@@ -93,8 +93,9 @@ pub fn list_summaries(conn: &Connection, shoot_id: i64, include_named: bool) -> 
     Ok(rows)
 }
 
-/// Naming a cluster promotes it to a player profile and confirms every face in
-/// it as a library sample (§7).
+/// Naming a cluster confirms its members. Reference-library queries trust only
+/// the cluster cover; the rest remain visible decisions without multiplying a
+/// possibly imperfect cluster into many training samples.
 pub fn name_cluster(conn: &Connection, cluster_id: i64, person_id: i64) -> Result<usize> {
     conn.execute(
         "UPDATE clusters SET person_id = ?2, status = 'named' WHERE id = ?1",
@@ -110,8 +111,8 @@ pub fn name_cluster(conn: &Connection, cluster_id: i64, person_id: i64) -> Resul
 /// Splits the given faces out into a new cluster — the "Split incorrect
 /// cluster" action from §10.
 pub fn split(conn: &Connection, cluster_id: i64, face_ids: &[i64], label: &str) -> Result<i64> {
-    let cluster = get_by_id(conn, cluster_id)?
-        .ok_or_else(|| crate::DbError::other(format!("cluster {cluster_id} not found")))?;
+    let cluster =
+        get_by_id(conn, cluster_id)?.ok_or_else(|| crate::DbError::other(format!("cluster {cluster_id} not found")))?;
     let new_id = create(conn, cluster.shoot_id, label)?;
 
     let mut stmt = conn.prepare(
@@ -131,10 +132,10 @@ pub fn merge(conn: &Connection, target_id: i64, source_id: i64) -> Result<()> {
     if target_id == source_id {
         return Err(crate::DbError::other("cannot merge a cluster into itself"));
     }
-    let target = get_by_id(conn, target_id)?
-        .ok_or_else(|| crate::DbError::other(format!("cluster {target_id} not found")))?;
-    let source = get_by_id(conn, source_id)?
-        .ok_or_else(|| crate::DbError::other(format!("cluster {source_id} not found")))?;
+    let target =
+        get_by_id(conn, target_id)?.ok_or_else(|| crate::DbError::other(format!("cluster {target_id} not found")))?;
+    let source =
+        get_by_id(conn, source_id)?.ok_or_else(|| crate::DbError::other(format!("cluster {source_id} not found")))?;
     if target.shoot_id != source.shoot_id {
         return Err(crate::DbError::other("clusters belong to different shoots"));
     }
@@ -201,7 +202,12 @@ mod tests {
                     &NewFace {
                         media_id,
                         shoot_id: shoot.id,
-                        bbox: BoundingBox { x: 0.0, y: 0.0, w: 0.1, h: 0.1 },
+                        bbox: BoundingBox {
+                            x: 0.0,
+                            y: 0.0,
+                            w: 0.1,
+                            h: 0.1,
+                        },
                         landmarks: None,
                         detection_confidence: 0.9,
                         embedding: Some(vec![i as f32, 1.0]),
@@ -230,8 +236,14 @@ mod tests {
         let person = people::get_or_create(&conn, "Jonathan", None).unwrap();
         assert_eq!(name_cluster(&conn, cluster_id, person.id).unwrap(), 4);
 
-        // All four are now reusable library samples for future shoots.
-        assert_eq!(faces::library_vectors(&conn).unwrap().len(), 4);
+        // All four remain named in this explicitly reviewed cluster, but only
+        // its best cover is trusted as a reusable reference. One bad cluster
+        // must not multiply into a contaminated player profile.
+        assert_eq!(faces::library_vectors(&conn).unwrap().len(), 1);
+        assert!(face_ids.iter().all(|face_id| {
+            let face = faces::get_by_id(&conn, *face_id).unwrap().unwrap();
+            face.person_id == Some(person.id) && face.assignment == "confirmed"
+        }));
         assert_eq!(get_by_id(&conn, cluster_id).unwrap().unwrap().status, "named");
     }
 

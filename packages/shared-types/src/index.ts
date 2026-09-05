@@ -21,6 +21,7 @@ export type ShootStatus =
   | 'failed'
 
 export type MediaType = 'photo' | 'video'
+export type MediaPickState = 'none' | 'pick' | 'reject'
 
 export type ProcessingStatus =
   | 'pending'
@@ -114,6 +115,9 @@ export interface Media {
   duplicateGroupId: number | null
   duplicateCount: number
   isBestShot: boolean
+  /** Human editorial rating; zero means not rated yet. */
+  rating: number
+  pickState: MediaPickState
   error: string | null
 }
 
@@ -353,7 +357,9 @@ export interface MediaQuery {
   groupSize?: number | null
   onlyBestShots?: boolean
   onlyDuplicates?: boolean
-  sort?: 'capturedAt' | 'quality' | 'filename' | null
+  minRating?: number | null
+  pickState?: MediaPickState | null
+  sort?: 'capturedAt' | 'quality' | 'rating' | 'filename' | null
   limit?: number | null
   offset?: number | null
 }
@@ -410,6 +416,7 @@ export interface AppPaths {
   root: string
   database: string
   thumbnails: string
+  proxies: string
   faceCache: string
   models: string
   logs: string
@@ -439,6 +446,9 @@ export interface AppInfo {
   mediaUrlBase: string
   ffmpegAvailable: boolean
   ffmpegVersion: string | null
+  gstreamerAvailable: boolean
+  gstreamerVersion: string | null
+  videoTrackingBackend: string
   models: ModelStatus
   accelerators: Accelerator[]
   cpuCores: number

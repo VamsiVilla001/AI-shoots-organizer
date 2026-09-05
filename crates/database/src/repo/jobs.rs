@@ -102,7 +102,7 @@ pub fn claim_next_io(conn: &Connection) -> Result<Option<Job>> {
             "UPDATE jobs SET state = 'running', started_at = ?1, attempts = attempts + 1
               WHERE id = (
                   SELECT id FROM jobs
-                   WHERE state = 'queued' AND kind IN ('scan', 'thumbnail')
+                   WHERE state = 'queued' AND kind IN ('scan', 'thumbnail', 'proxy')
                    ORDER BY priority ASC, id ASC LIMIT 1
               )
           RETURNING *",
@@ -112,7 +112,7 @@ pub fn claim_next_io(conn: &Connection) -> Result<Option<Job>> {
     Ok(job)
 }
 
-/// Claims AI and shoot-wide processing while leaving scans and thumbnails to
+/// Claims AI and shoot-wide processing while leaving scans, thumbnails and proxies to
 /// the I/O worker. Keeping the lanes independent lets GPU inference overlap
 /// image indexing instead of waiting behind the entire thumbnail queue.
 pub fn claim_next_compute(conn: &Connection) -> Result<Option<Job>> {
@@ -121,7 +121,7 @@ pub fn claim_next_compute(conn: &Connection) -> Result<Option<Job>> {
             "UPDATE jobs SET state = 'running', started_at = ?1, attempts = attempts + 1
               WHERE id = (
                   SELECT id FROM jobs
-                   WHERE state = 'queued' AND kind NOT IN ('scan', 'thumbnail')
+                   WHERE state = 'queued' AND kind NOT IN ('scan', 'thumbnail', 'proxy')
                    ORDER BY priority ASC, id ASC LIMIT 1
               )
           RETURNING *",
@@ -143,7 +143,11 @@ pub fn complete(conn: &Connection, id: i64) -> Result<()> {
 /// another try; past it, it stays failed and surfaces in the UI.
 pub fn fail(conn: &Connection, id: i64, error: &str) -> Result<JobState> {
     let attempts: i64 = conn.query_row("SELECT attempts FROM jobs WHERE id = ?1", params![id], |r| r.get(0))?;
-    let state = if attempts < MAX_ATTEMPTS { JobState::Queued } else { JobState::Failed };
+    let state = if attempts < MAX_ATTEMPTS {
+        JobState::Queued
+    } else {
+        JobState::Failed
+    };
     conn.execute(
         "UPDATE jobs SET state = ?2, error = ?3, finished_at = ?4 WHERE id = ?1",
         params![id, state, error, now()],
@@ -193,9 +197,8 @@ pub fn pending_count(conn: &Connection, shoot_id: Option<i64>) -> Result<i64> {
 }
 
 pub fn list_failed(conn: &Connection, shoot_id: i64, limit: i64) -> Result<Vec<Job>> {
-    let mut stmt = conn.prepare(
-        "SELECT * FROM jobs WHERE shoot_id = ?1 AND state = 'failed' ORDER BY finished_at DESC LIMIT ?2",
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT * FROM jobs WHERE shoot_id = ?1 AND state = 'failed' ORDER BY finished_at DESC LIMIT ?2")?;
     let rows = stmt
         .query_map(params![shoot_id, limit], map)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -204,7 +207,10 @@ pub fn list_failed(conn: &Connection, shoot_id: i64, limit: i64) -> Result<Vec<J
 
 /// The numbers rendered in the progress panel.
 pub fn progress(conn: &Connection, shoot_id: i64) -> Result<ProcessingProgress> {
-    let mut p = ProcessingProgress { shoot_id, ..Default::default() };
+    let mut p = ProcessingProgress {
+        shoot_id,
+        ..Default::default()
+    };
 
     conn.query_row(
         "SELECT COUNT(*),
@@ -259,7 +265,11 @@ pub fn progress(conn: &Connection, shoot_id: i64) -> Result<ProcessingProgress> 
     };
 
     p.stage = if p.jobs_running == 0 && p.jobs_queued == 0 {
-        if p.media_total == 0 { "idle" } else { "complete" }
+        if p.media_total == 0 {
+            "idle"
+        } else {
+            "complete"
+        }
     } else if p.media_scanned < p.media_total {
         "scanning"
     } else if p.media_analysed < p.media_total {
@@ -361,11 +371,17 @@ mod tests {
         let conn = db.conn().unwrap();
         let shoot = shoots::create(&conn, "S", "C:\\s").unwrap();
 
-        assert!(enqueue_unique(&conn, shoot.id, JobKind::Cluster, None, 400).unwrap().is_some());
-        assert!(enqueue_unique(&conn, shoot.id, JobKind::Cluster, None, 400).unwrap().is_none());
+        assert!(enqueue_unique(&conn, shoot.id, JobKind::Cluster, None, 400)
+            .unwrap()
+            .is_some());
+        assert!(enqueue_unique(&conn, shoot.id, JobKind::Cluster, None, 400)
+            .unwrap()
+            .is_none());
 
         let job = claim_next(&conn, None).unwrap().unwrap();
         complete(&conn, job.id).unwrap();
-        assert!(enqueue_unique(&conn, shoot.id, JobKind::Cluster, None, 400).unwrap().is_some());
+        assert!(enqueue_unique(&conn, shoot.id, JobKind::Cluster, None, 400)
+            .unwrap()
+            .is_some());
     }
 }

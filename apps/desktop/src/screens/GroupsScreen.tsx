@@ -14,7 +14,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import type { Group, MediaType } from '@teo/shared-types'
+import type { Group, MediaPickState, MediaType } from '@teo/shared-types'
 import * as api from '../api'
 import { folderNameFor } from '../folders'
 import { formatCount } from '../media'
@@ -36,7 +36,11 @@ function GroupsBody({ shootId }: { shootId: number }) {
   const [view, setView] = useState<View>({ kind: 'ungrouped' })
   const [typeFilter, setTypeFilter] = useState<MediaType | 'all'>('all')
   const [qualityFilter, setQualityFilter] = useState<'all' | 'best' | 'duplicates'>('all')
-  const [mediaSort, setMediaSort] = useState<'capturedAt' | 'quality' | 'filename'>('capturedAt')
+  const [editorialFilter, setEditorialFilter] = useState<'all' | MediaPickState>('all')
+  const [minRating, setMinRating] = useState(0)
+  const [mediaSort, setMediaSort] = useState<'capturedAt' | 'quality' | 'rating' | 'filename'>(
+    'capturedAt',
+  )
   const [search, setSearch] = useState('')
   const [debouncedSearch, setDebouncedSearch] = useState('')
   const [selected, setSelected] = useState<Set<number>>(new Set())
@@ -62,7 +66,18 @@ function GroupsBody({ shootId }: { shootId: number }) {
   }, [search])
 
   const media = useQuery({
-    queryKey: ['media', shootId, 'sort', view, typeFilter, qualityFilter, mediaSort, debouncedSearch],
+    queryKey: [
+      'media',
+      shootId,
+      'sort',
+      view,
+      typeFilter,
+      qualityFilter,
+      editorialFilter,
+      minRating,
+      mediaSort,
+      debouncedSearch,
+    ],
     queryFn: () =>
       api.listMedia({
         shootId,
@@ -71,6 +86,8 @@ function GroupsBody({ shootId }: { shootId: number }) {
         mediaType: typeFilter === 'all' ? null : typeFilter,
         onlyBestShots: qualityFilter === 'best',
         onlyDuplicates: qualityFilter === 'duplicates',
+        pickState: editorialFilter === 'all' ? null : editorialFilter,
+        minRating: minRating || null,
         sort: mediaSort,
         search: debouncedSearch || null,
         limit: 2000,
@@ -174,6 +191,15 @@ function GroupsBody({ shootId }: { shootId: number }) {
             : 'No player albums to build groups from yet — name the unknown faces on the AI Albums screen first.',
       })
       refresh()
+    },
+    onError: (e) => pushNotice({ level: 'error', message: String(e instanceof Error ? e.message : e) }),
+  })
+
+  const setEditorial = useMutation({
+    mutationFn: api.setMediaEditorial,
+    onSuccess: (changed) => {
+      pushNotice({ level: 'success', message: `${formatCount(changed)} file(s) updated.` })
+      queryClient.invalidateQueries({ queryKey: ['media', shootId] })
     },
     onError: (e) => pushNotice({ level: 'error', message: String(e instanceof Error ? e.message : e) }),
   })
@@ -330,7 +356,31 @@ function GroupsBody({ shootId }: { shootId: number }) {
               >
                 <option value="capturedAt">Capture time</option>
                 <option value="quality">Best quality</option>
+                <option value="rating">Rating</option>
                 <option value="filename">Filename</option>
+              </select>
+            </label>
+            <label className="checkbox-row">
+              <span className="hint">Flag</span>
+              <select
+                value={editorialFilter}
+                onChange={(event) => setEditorialFilter(event.target.value as typeof editorialFilter)}
+              >
+                <option value="all">All</option>
+                <option value="pick">Picks</option>
+                <option value="reject">Rejects</option>
+                <option value="none">Unflagged</option>
+              </select>
+            </label>
+            <label className="checkbox-row">
+              <span className="hint">Stars</span>
+              <select value={minRating} onChange={(event) => setMinRating(Number(event.target.value))}>
+                <option value={0}>Any</option>
+                {[1, 2, 3, 4, 5].map((rating) => (
+                  <option key={rating} value={rating}>
+                    {rating}+ ★
+                  </option>
+                ))}
               </select>
             </label>
             <span className="hint">
@@ -363,6 +413,8 @@ function GroupsBody({ shootId }: { shootId: number }) {
               // dragging an unselected one drags just it.
               dragPayload.current = selected.has(mediaId) ? [...selected] : [mediaId]
             }}
+            onEditorial={(args) => setEditorial.mutate(args)}
+            editorialBusy={setEditorial.isPending}
             emptyTitle={
               view.kind === 'ungrouped' ? 'Everything is sorted' : 'Nothing matches these filters'
             }
@@ -372,6 +424,11 @@ function GroupsBody({ shootId }: { shootId: number }) {
                 : 'Try another filter, or clear the search.'
             }
           />
+
+          <div className="hint media-shortcuts-hint">
+            Focus a thumbnail, then press 1–5 to rate, 0 to clear stars, P to toggle Pick, or X to
+            toggle Reject. A selected batch is updated together.
+          </div>
 
           {selected.size > 0 && (
             <SelectionBar

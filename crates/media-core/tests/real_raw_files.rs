@@ -11,6 +11,12 @@ fn sample() -> Option<PathBuf> {
         .filter(|path| path.is_file())
 }
 
+fn video_sample() -> Option<PathBuf> {
+    std::env::var_os("TEO_VIDEO_FILE")
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+}
+
 #[test]
 #[ignore = "set TEO_RAW_FILE to a real camera RAW"]
 fn raw_is_verified_and_decoded_without_ffmpeg() {
@@ -79,4 +85,29 @@ fn acceptance_formats_route_to_the_expected_pipeline() {
             Some((MediaKind::Video, Decoder::Ffmpeg))
         );
     }
+}
+
+#[test]
+#[ignore = "set TEO_VIDEO_FILE to a real video"]
+fn real_video_frame_uses_the_bounded_decoder_path() {
+    let Some(path) = video_sample() else {
+        eprintln!("TEO_VIDEO_FILE is not set to a readable file");
+        return;
+    };
+    let ffmpeg = teo_media_core::Ffmpeg::discover(None).expect("FFmpeg must be available");
+    let info = ffmpeg.probe(&path).expect("the real video should be probeable");
+    let image = ffmpeg
+        .extract_frame(&path, 0.0, Some(1280))
+        .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+
+    assert!(image.width() > 0 && image.height() > 0);
+    assert!(image.width().max(image.height()) <= 1280);
+    println!(
+        "{}: source {:?}x{:?}, decoded {}x{}",
+        path.display(),
+        info.width,
+        info.height,
+        image.width(),
+        image.height()
+    );
 }

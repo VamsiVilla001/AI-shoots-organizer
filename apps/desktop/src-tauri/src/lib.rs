@@ -39,11 +39,8 @@ pub fn run() {
             init_logging(&paths);
             tracing::info!(version = env!("CARGO_PKG_VERSION"), data = %paths.root.display(), "starting");
 
-            let db = Database::open(paths.database_file())
-                .map_err(|e| format!("could not open the database: {e}"))?;
-            let settings = AppSettings::load(&db)
-                .unwrap_or_default()
-                .sanitised();
+            let db = Database::open(paths.database_file()).map_err(|e| format!("could not open the database: {e}"))?;
+            let settings = AppSettings::load(&db).unwrap_or_default().sanitised();
 
             let state = Arc::new(AppState::new(db, paths, settings, protocol::url_base()));
             app.manage(Arc::clone(&state));
@@ -93,6 +90,7 @@ pub fn run() {
             commands::list_media,
             commands::get_media,
             commands::media_faces,
+            commands::set_media_editorial,
             commands::reveal_in_folder,
             commands::open_path,
             // players
@@ -135,6 +133,7 @@ pub fn run() {
             commands::name_face,
             // video
             commands::video_timelines,
+            commands::video_sample_frames,
             // export
             commands::preview_export,
             commands::start_export,

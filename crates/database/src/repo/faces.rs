@@ -68,7 +68,7 @@ pub fn insert_manual(conn: &Connection, face: &NewFace) -> Result<i64> {
         "INSERT INTO faces (media_id, shoot_id, embedding, embedding_dim,
                             bbox_x, bbox_y, bbox_w, bbox_h, landmarks,
                             detection_confidence, source, quality, frame_time, crop_path, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, 1.0, 'manual', ?9, NULL, NULL, ?10)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, 1.0, 'manual', ?9, ?10, NULL, ?11)",
         params![
             face.media_id,
             face.shoot_id,
@@ -79,6 +79,7 @@ pub fn insert_manual(conn: &Connection, face: &NewFace) -> Result<i64> {
             face.bbox.w,
             face.bbox.h,
             face.quality,
+            face.frame_time,
             now(),
         ],
     )?;
@@ -106,6 +107,7 @@ pub fn delete_for_media(conn: &Connection, media_id: i64) -> Result<usize> {
 pub struct FaceVector {
     pub face_id: i64,
     pub media_id: i64,
+    pub frame_time: Option<f64>,
     pub person_id: Option<i64>,
     pub embedding: Vec<f32>,
     pub quality: f64,
@@ -119,6 +121,7 @@ fn map_vector(row: &Row<'_>) -> rusqlite::Result<Option<FaceVector>> {
     Ok(Some(FaceVector {
         face_id: row.get("id")?,
         media_id: row.get("media_id")?,
+        frame_time: row.get("frame_time")?,
         person_id: row.get("person_id")?,
         embedding,
         quality: row.get::<_, Option<f64>>("quality")?.unwrap_or(0.0),
@@ -129,8 +132,14 @@ fn map_vector(row: &Row<'_>) -> rusqlite::Result<Option<FaceVector>> {
 /// player face library described in §6.
 pub fn library_vectors(conn: &Connection) -> Result<Vec<FaceVector>> {
     let mut stmt = conn.prepare(
-        "SELECT id, media_id, person_id, embedding, quality FROM faces
-          WHERE person_id IS NOT NULL AND assignment = 'confirmed' AND embedding IS NOT NULL",
+        "SELECT id, media_id, frame_time, person_id, embedding, quality FROM faces
+          WHERE person_id IS NOT NULL AND assignment = 'confirmed' AND embedding IS NOT NULL
+            -- A named cluster is a hypothesis, not dozens of independently
+            -- reviewed reference photos. Only its reviewed cover may train
+            -- recognition; individually tagged faces have no cluster.
+            AND (cluster_id IS NULL OR id = (
+                SELECT c.cover_face_id FROM clusters c WHERE c.id = faces.cluster_id
+            ))",
     )?;
     let rows = stmt.query_map([], map_vector)?.collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows.into_iter().flatten().collect())
@@ -139,7 +148,7 @@ pub fn library_vectors(conn: &Connection) -> Result<Vec<FaceVector>> {
 /// Embeddings in one shoot that still belong to nobody — the input to clustering.
 pub fn unassigned_vectors(conn: &Connection, shoot_id: i64) -> Result<Vec<FaceVector>> {
     let mut stmt = conn.prepare(
-        "SELECT id, media_id, person_id, embedding, quality FROM faces
+        "SELECT id, media_id, frame_time, person_id, embedding, quality FROM faces
           WHERE shoot_id = ?1 AND person_id IS NULL
             AND assignment NOT IN ('ignored', 'rejected') AND embedding IS NOT NULL
           ORDER BY id",
@@ -152,7 +161,7 @@ pub fn unassigned_vectors(conn: &Connection, shoot_id: i64) -> Result<Vec<FaceVe
 
 pub fn vectors_for_media(conn: &Connection, media_id: i64) -> Result<Vec<FaceVector>> {
     let mut stmt = conn.prepare(
-        "SELECT id, media_id, person_id, embedding, quality FROM faces
+        "SELECT id, media_id, frame_time, person_id, embedding, quality FROM faces
           WHERE media_id = ?1 AND embedding IS NOT NULL",
     )?;
     let rows = stmt
@@ -171,6 +180,17 @@ pub fn set_suggestion(conn: &Connection, face_id: i64, person_id: i64, confidenc
     Ok(())
 }
 
+/// Suggestions are derived from the current library and thresholds. Clear
+/// them before every recognition pass so tightening Settings actually removes
+/// stale false positives while confirmed reviewer decisions remain untouched.
+pub fn clear_suggestions_for_shoot(conn: &Connection, shoot_id: i64) -> Result<usize> {
+    Ok(conn.execute(
+        "UPDATE faces SET person_id = NULL, recognition_confidence = NULL, assignment = 'unassigned'
+          WHERE shoot_id = ?1 AND assignment = 'suggested'",
+        params![shoot_id],
+    )?)
+}
+
 /// A human decision: this face is this player. Confirmed faces become library
 /// samples, which is how a correction improves future recognition (§6).
 pub fn assign(conn: &Connection, face_id: i64, person_id: i64, confidence: Option<f64>) -> Result<()> {
@@ -182,9 +202,7 @@ pub fn assign(conn: &Connection, face_id: i64, person_id: i64, confidence: Optio
 }
 
 pub fn assign_many(conn: &Connection, face_ids: &[i64], person_id: i64) -> Result<usize> {
-    let mut stmt = conn.prepare(
-        "UPDATE faces SET person_id = ?2, assignment = 'confirmed' WHERE id = ?1",
-    )?;
+    let mut stmt = conn.prepare("UPDATE faces SET person_id = ?2, assignment = 'confirmed' WHERE id = ?1")?;
     let mut n = 0;
     for id in face_ids {
         n += stmt.execute(params![id, person_id])?;
@@ -194,9 +212,7 @@ pub fn assign_many(conn: &Connection, face_ids: &[i64], person_id: i64) -> Resul
 
 /// Confirms the suggestion already on the face, without changing who it points at.
 pub fn confirm_many(conn: &Connection, face_ids: &[i64]) -> Result<usize> {
-    let mut stmt = conn.prepare(
-        "UPDATE faces SET assignment = 'confirmed' WHERE id = ?1 AND person_id IS NOT NULL",
-    )?;
+    let mut stmt = conn.prepare("UPDATE faces SET assignment = 'confirmed' WHERE id = ?1 AND person_id IS NOT NULL")?;
     let mut n = 0;
     for id in face_ids {
         n += stmt.execute(params![id])?;
@@ -222,9 +238,8 @@ pub fn reject_many(conn: &Connection, face_ids: &[i64]) -> Result<usize> {
 /// "Remove false face detection" — keeps the row so the detector is not re-run
 /// on it, but takes it out of every count and album.
 pub fn ignore_many(conn: &Connection, face_ids: &[i64]) -> Result<usize> {
-    let mut stmt = conn.prepare(
-        "UPDATE faces SET assignment = 'ignored', person_id = NULL, cluster_id = NULL WHERE id = ?1",
-    )?;
+    let mut stmt =
+        conn.prepare("UPDATE faces SET assignment = 'ignored', person_id = NULL, cluster_id = NULL WHERE id = ?1")?;
     let mut n = 0;
     for id in face_ids {
         n += stmt.execute(params![id])?;
@@ -233,17 +248,26 @@ pub fn ignore_many(conn: &Connection, face_ids: &[i64]) -> Result<usize> {
 }
 
 pub fn set_assignment(conn: &Connection, face_id: i64, assignment: FaceAssignment) -> Result<()> {
-    conn.execute("UPDATE faces SET assignment = ?2 WHERE id = ?1", params![face_id, assignment])?;
+    conn.execute(
+        "UPDATE faces SET assignment = ?2 WHERE id = ?1",
+        params![face_id, assignment],
+    )?;
     Ok(())
 }
 
 pub fn set_cluster(conn: &Connection, face_id: i64, cluster_id: Option<i64>) -> Result<()> {
-    conn.execute("UPDATE faces SET cluster_id = ?2 WHERE id = ?1", params![face_id, cluster_id])?;
+    conn.execute(
+        "UPDATE faces SET cluster_id = ?2 WHERE id = ?1",
+        params![face_id, cluster_id],
+    )?;
     Ok(())
 }
 
 pub fn clear_clusters_for_shoot(conn: &Connection, shoot_id: i64) -> Result<()> {
-    conn.execute("UPDATE faces SET cluster_id = NULL WHERE shoot_id = ?1", params![shoot_id])?;
+    conn.execute(
+        "UPDATE faces SET cluster_id = NULL WHERE shoot_id = ?1",
+        params![shoot_id],
+    )?;
     Ok(())
 }
 
@@ -367,7 +391,12 @@ mod tests {
             &NewFace {
                 media_id,
                 shoot_id: shoot.id,
-                bbox: BoundingBox { x: 0.1, y: 0.1, w: 0.2, h: 0.3 },
+                bbox: BoundingBox {
+                    x: 0.1,
+                    y: 0.1,
+                    w: 0.2,
+                    h: 0.3,
+                },
                 landmarks: None,
                 detection_confidence: 0.97,
                 embedding: Some(embedding),
@@ -440,7 +469,12 @@ mod tests {
             &NewFace {
                 media_id: detected.media_id,
                 shoot_id,
-                bbox: BoundingBox { x: 0.5, y: 0.2, w: 0.2, h: 0.3 },
+                bbox: BoundingBox {
+                    x: 0.5,
+                    y: 0.2,
+                    w: 0.2,
+                    h: 0.3,
+                },
                 landmarks: None,
                 detection_confidence: 1.0,
                 embedding: Some(vec![0.8, 0.2]),
@@ -455,5 +489,35 @@ mod tests {
 
         assert!(get_by_id(&conn, detected_id).unwrap().is_none());
         assert!(get_by_id(&conn, manual_id).unwrap().is_some());
+    }
+
+    #[test]
+    fn reviewer_drawn_video_faces_keep_the_sample_timestamp() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+        let (shoot_id, detected_id) = seed_face(&conn, vec![0.2, 0.8]);
+        let detected = get_by_id(&conn, detected_id).unwrap().unwrap();
+        let manual_id = insert_manual(
+            &conn,
+            &NewFace {
+                media_id: detected.media_id,
+                shoot_id,
+                bbox: BoundingBox {
+                    x: 0.2,
+                    y: 0.1,
+                    w: 0.3,
+                    h: 0.4,
+                },
+                landmarks: None,
+                detection_confidence: 1.0,
+                embedding: Some(vec![0.4, 0.6]),
+                quality: Some(0.85),
+                frame_time: Some(12.5),
+                crop_path: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(get_by_id(&conn, manual_id).unwrap().unwrap().frame_time, Some(12.5));
     }
 }

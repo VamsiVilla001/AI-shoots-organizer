@@ -39,6 +39,16 @@ const MIGRATIONS: &[Migration] = &[
         name: "manual_faces",
         sql: include_str!("migration_005_manual_faces.sql"),
     },
+    Migration {
+        version: 6,
+        name: "video_sample_frames",
+        sql: include_str!("migration_006_video_sample_frames.sql"),
+    },
+    Migration {
+        version: 7,
+        name: "editorial_ratings",
+        sql: include_str!("migration_007_editorial_ratings.sql"),
+    },
 ];
 
 /// The schema version this build expects.
@@ -132,13 +142,14 @@ mod tests {
     fn upgrades_manual_group_version_three_databases() {
         let mut conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(include_str!("schema.sql")).unwrap();
-        conn.execute_batch(include_str!("migration_002_person_count.sql")).unwrap();
+        conn.execute_batch(include_str!("migration_002_person_count.sql"))
+            .unwrap();
         conn.execute_batch(include_str!("schema_003_groups.sql")).unwrap();
         conn.pragma_update(None, "user_version", 3).unwrap();
 
         run(&mut conn).unwrap();
 
-        assert_eq!(current_version(&conn).unwrap(), 5);
+        assert_eq!(current_version(&conn).unwrap(), target_version());
         let has_quality: bool = conn
             .prepare("PRAGMA table_info(media)")
             .unwrap()
@@ -153,5 +164,20 @@ mod tests {
             .unwrap()
             .any(|name| matches!(name.as_deref(), Ok("source")));
         assert!(has_face_source);
+        let has_video_samples: bool = conn
+            .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'video_sample_frames'")
+            .unwrap()
+            .exists([])
+            .unwrap();
+        assert!(has_video_samples);
+        let media_columns = conn
+            .prepare("PRAGMA table_info(media)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert!(media_columns.iter().any(|name| name == "rating"));
+        assert!(media_columns.iter().any(|name| name == "pick_state"));
     }
 }
