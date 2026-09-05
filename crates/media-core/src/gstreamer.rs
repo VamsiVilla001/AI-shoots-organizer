@@ -416,9 +416,9 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "set TEO_VIDEO_FILE to validate a real GStreamer installation"]
+    #[ignore = "set SKWAD_VIDEO_FILE to validate a real GStreamer installation"]
     fn real_video_creates_a_complete_proxy() {
-        let source = std::env::var_os("TEO_VIDEO_FILE").expect("set TEO_VIDEO_FILE");
+        let source = std::env::var_os("SKWAD_VIDEO_FILE").expect("set SKWAD_VIDEO_FILE");
         let runtime = Gstreamer::discover().expect("GStreamer runtime not found");
         let directory = tempfile::tempdir().unwrap();
         let target = directory.path().join("proxy.mp4");

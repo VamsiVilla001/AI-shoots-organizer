@@ -1,4 +1,4 @@
--- Esports AI Media Organiser — baseline schema (migration 1)
+-- SKWAD Media Organiser — baseline schema (migration 1)
 --
 -- Design notes:
 --   * Source media is never written to. Everything here is an *index* of files

@@ -11,13 +11,13 @@ use std::sync::OnceLock;
 use std::time::Instant;
 
 use image::RgbImage;
-use teo_database::models::{BoundingBox, Media, MediaMetadata, MediaType, NewFace, ProcessingStatus};
-use teo_database::repo::{faces, media as media_repo, video as video_repo};
-use teo_database::Database;
-use teo_face_detection::{Detection, FaceDetector, Rect, ScrfdDetector};
-use teo_face_recognition::{ArcFaceEmbedder, Embedding, FaceEmbedder};
-use teo_media_core::formats::{self, MediaKind};
-use teo_media_core::{Ffmpeg, Gstreamer, ThumbnailCache, VideoProxyCache};
+use skwad_database::models::{BoundingBox, Media, MediaMetadata, MediaType, NewFace, ProcessingStatus};
+use skwad_database::repo::{faces, media as media_repo, video as video_repo};
+use skwad_database::Database;
+use skwad_face_detection::{Detection, FaceDetector, Rect, ScrfdDetector};
+use skwad_face_recognition::{ArcFaceEmbedder, Embedding, FaceEmbedder};
+use skwad_media_core::formats::{self, MediaKind};
+use skwad_media_core::{Ffmpeg, Gstreamer, ThumbnailCache, VideoProxyCache};
 
 use crate::models::{ModelRegistry, ModelRole};
 use crate::paths::AppPaths;
@@ -30,9 +30,9 @@ pub enum PipelineError {
     #[error("FFmpeg is required for this file but is not available")]
     FfmpegUnavailable,
     #[error(transparent)]
-    Media(#[from] teo_media_core::MediaError),
+    Media(#[from] skwad_media_core::MediaError),
     #[error(transparent)]
-    Database(#[from] teo_database::DbError),
+    Database(#[from] skwad_database::DbError),
     #[error("{0}")]
     Other(String),
 }
@@ -150,7 +150,7 @@ impl Engine {
         };
         let orientation = source_media_orientation(item, media_kind, self.ffmpeg.as_ref());
         let image = match media_kind {
-            MediaKind::Photo => teo_media_core::decode::load_image(
+            MediaKind::Photo => skwad_media_core::decode::load_image(
                 path,
                 orientation,
                 Some(self.settings.analysis_max_dim),
@@ -161,7 +161,7 @@ impl Engine {
                     PipelineError::Other("choose an analysed video sample before marking a face".into())
                 })?;
                 let ffmpeg = self.ffmpeg.as_ref().ok_or(PipelineError::FfmpegUnavailable)?;
-                teo_media_core::decode::load_video_frame(
+                skwad_media_core::decode::load_video_frame(
                     path,
                     timestamp,
                     orientation,
@@ -215,7 +215,7 @@ impl Engine {
             media_repo::set_orientation(&conn, item.id, i64::from(orientation))?;
         }
 
-        let decoded = teo_media_core::decode::decode_image(
+        let decoded = skwad_media_core::decode::decode_image(
             &path,
             orientation,
             Some(self.settings.analysis_max_dim),
@@ -277,7 +277,7 @@ impl Engine {
             .zip(item.height)
             .and_then(|(width, height)| Some((u32::try_from(width).ok()?, u32::try_from(height).ok()?)));
 
-        let plan = teo_video_analysis::plan_video(&ffmpeg, &path, item.duration, dimensions, &config);
+        let plan = skwad_video_analysis::plan_video(&ffmpeg, &path, item.duration, dimensions, &config);
 
         {
             let conn = db.conn()?;
@@ -291,7 +291,7 @@ impl Engine {
         let mut previous_frame: Option<PreviousVideoFrame> = None;
         let mut tracked_faces_recovered = 0usize;
         for entry in &plan.timestamps {
-            match teo_video_analysis::sample_frame(&ffmpeg, &path, entry, orientation, &config) {
+            match skwad_video_analysis::sample_frame(&ffmpeg, &path, entry, orientation, &config) {
                 Ok(frame) => {
                     decoded_frames += 1;
                     {
@@ -333,7 +333,7 @@ impl Engine {
             decoded = decoded_frames,
             faces = outcome.faces_detected,
             tracked_faces_recovered,
-            tracking_backend = ?teo_video_analysis::tracking::backend(),
+            tracking_backend = ?skwad_video_analysis::tracking::backend(),
             "video analysed"
         );
         Ok(outcome)
@@ -390,16 +390,16 @@ impl Engine {
         current_image: &RgbImage,
         current_faces: &mut Vec<AnalysedFace>,
     ) -> usize {
-        if teo_video_analysis::tracking::backend() == teo_video_analysis::tracking::TrackingBackend::Disabled {
+        if skwad_video_analysis::tracking::backend() == skwad_video_analysis::tracking::TrackingBackend::Disabled {
             return 0;
         }
         let (previous_width, previous_height) = previous.image.dimensions();
         let sources: Vec<&AnalysedFace> = previous.faces.iter().filter(|face| face.embedding.is_some()).collect();
-        let boxes: Vec<teo_video_analysis::tracking::TrackBox> = sources
+        let boxes: Vec<skwad_video_analysis::tracking::TrackBox> = sources
             .iter()
             .map(|face| {
                 let (x, y, width, height) = face.detection.bbox.normalised(previous_width, previous_height);
-                teo_video_analysis::tracking::TrackBox {
+                skwad_video_analysis::tracking::TrackBox {
                     x: x as f32,
                     y: y as f32,
                     width: width as f32,
@@ -407,7 +407,7 @@ impl Engine {
                 }
             })
             .collect();
-        let proposals = teo_video_analysis::tracking::track_boxes(&previous.image, current_image, &boxes);
+        let proposals = skwad_video_analysis::tracking::track_boxes(&previous.image, current_image, &boxes);
         let (width, height) = current_image.dimensions();
         let mut recovered = 0usize;
 
@@ -553,7 +553,7 @@ fn source_media_orientation(item: &Media, expected_kind: MediaKind, ffmpeg: Opti
     if kind != expected_kind || !path.exists() {
         return indexed;
     }
-    teo_media_core::metadata::read_orientation(path, kind, ffmpeg).unwrap_or(indexed)
+    skwad_media_core::metadata::read_orientation(path, kind, ffmpeg).unwrap_or(indexed)
 }
 
 /// Finds FFmpeg, honouring an explicit directory from Settings.
@@ -579,7 +579,7 @@ pub fn index_media(db: &Database, thumbnails: &ThumbnailCache, ffmpeg: Option<&F
 
     let (kind, decoder) =
         formats::classify(&path).ok_or_else(|| PipelineError::Other(format!("unsupported file: {}", item.path)))?;
-    let meta = teo_media_core::metadata::read(&path, kind, decoder, ffmpeg);
+    let meta = skwad_media_core::metadata::read(&path, kind, decoder, ffmpeg);
 
     {
         let conn = db.conn()?;
@@ -610,7 +610,7 @@ pub fn index_media(db: &Database, thumbnails: &ThumbnailCache, ffmpeg: Option<&F
             if kind == MediaKind::Photo {
                 match image::open(&thumb) {
                     Ok(image) => {
-                        let quality = teo_media_core::quality::analyse(&image.to_rgb8());
+                        let quality = skwad_media_core::quality::analyse(&image.to_rgb8());
                         media_repo::set_quality(
                             &conn,
                             item.id,
@@ -660,8 +660,8 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Barrier};
-    use teo_database::models::{MediaType, NewMedia};
-    use teo_database::repo::shoots;
+    use skwad_database::models::{MediaType, NewMedia};
+    use skwad_database::repo::shoots;
 
     /// Writes a real JPEG so the decode path is genuinely exercised.
     fn write_jpeg(path: &std::path::Path) {
@@ -836,7 +836,7 @@ mod tests {
             6,
             "source EXIF must win at analysis time"
         );
-        let decoded = teo_media_core::decode::load_image(&photo, 6, None, None).unwrap();
+        let decoded = skwad_media_core::decode::load_image(&photo, 6, None, None).unwrap();
         assert_eq!(decoded.dimensions(), (240, 320), "orientation 6 swaps the decoded axes");
     }
 

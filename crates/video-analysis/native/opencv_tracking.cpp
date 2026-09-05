@@ -44,7 +44,7 @@ void write_box(TeoTrackedBox& output,
 
 extern "C" {
 
-int teo_opencv_track_boxes(const unsigned char* previous_rgb,
+int skwad_opencv_track_boxes(const unsigned char* previous_rgb,
                            const unsigned char* current_rgb,
                            int width,
                            int height,

@@ -1,4 +1,4 @@
-//! SQLite storage for the Esports AI Media Organiser.
+//! SQLite storage for the SKWAD Media Organiser.
 //!
 //! Everything the application knows lives here: the shoot index, detected faces
 //! and their embeddings, the reusable player library, generated albums and the

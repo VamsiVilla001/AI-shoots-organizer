@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Permissions the organiser's main window needs. Media reading goes through the teomedia:// protocol handler, which resolves ids against the database, so no broad filesystem permission is granted here.",
+  "description": "Permissions the organiser's main window needs. Media reading goes through the skwadmedia:// protocol handler, which resolves ids against the database, so no broad filesystem permission is granted here.",
   "windows": ["main"],
   "permissions": [
     "core:default",

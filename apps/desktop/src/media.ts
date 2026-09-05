@@ -1,8 +1,8 @@
 /**
- * URLs for the teomedia:// protocol, plus a few formatting helpers.
+ * URLs for the skwadmedia:// protocol, plus a few formatting helpers.
  */
 
-let base = 'http://teomedia.localhost'
+let base = 'http://skwadmedia.localhost'
 
 /** Called once at startup with `AppInfo.mediaUrlBase`. */
 export function setMediaBase(urlBase: string) {

@@ -6,14 +6,14 @@
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
-use teo_database::models::ProcessingProgress;
+use skwad_database::models::ProcessingProgress;
 
-pub const PROGRESS: &str = "teo://progress";
-pub const SHOOT_CHANGED: &str = "teo://shoot-changed";
-pub const LIBRARY_CHANGED: &str = "teo://library-changed";
-pub const JOB_FAILED: &str = "teo://job-failed";
-pub const EXPORT_PROGRESS: &str = "teo://export-progress";
-pub const NOTICE: &str = "teo://notice";
+pub const PROGRESS: &str = "skwad://progress";
+pub const SHOOT_CHANGED: &str = "skwad://shoot-changed";
+pub const LIBRARY_CHANGED: &str = "skwad://library-changed";
+pub const JOB_FAILED: &str = "skwad://job-failed";
+pub const EXPORT_PROGRESS: &str = "skwad://export-progress";
+pub const NOTICE: &str = "skwad://notice";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

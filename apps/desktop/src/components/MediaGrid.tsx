@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import type { Media, MediaPickState } from '@teo/shared-types'
+import type { Media, MediaPickState } from '@skwad/shared-types'
 import { formatTime, thumbUrl, videoPreviewUrl } from '../media'
 import { useUi } from '../store'
 

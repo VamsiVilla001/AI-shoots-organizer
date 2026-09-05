@@ -11,7 +11,7 @@ import {
   type ClusterSummary,
   type MediaPickState,
   type MediaType,
-} from '@teo/shared-types'
+} from '@skwad/shared-types'
 import * as api from '../api'
 import { formatConfidence, formatCount, groupSizeName, thumbUrl } from '../media'
 import { FaceCrop } from '../components/FaceCrop'

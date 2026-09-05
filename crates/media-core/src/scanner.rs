@@ -60,7 +60,7 @@ const IGNORED_DIRS: &[&str] = &[
     "$RECYCLE.BIN",
     "Lightroom Catalog Previews.lrdata",
     ".thumbnails",
-    "_teo_export",
+    "_skwad_export",
 ];
 
 fn is_ignored_dir(name: &str) -> bool {

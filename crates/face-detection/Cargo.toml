@@ -1,5 +1,5 @@
 [package]
-name = "teo-face-detection"
+name = "skwad-face-detection"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

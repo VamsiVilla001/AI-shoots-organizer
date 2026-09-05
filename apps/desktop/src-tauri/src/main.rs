@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    teo_desktop_lib::run()
+    skwad_desktop_lib::run()
 }

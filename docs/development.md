@@ -6,13 +6,13 @@
 React UI  ──invoke──▶  Tauri commands (commands.rs)   ── thin: validate, query, return
    ▲                        │
    │ events                 ▼
-   └──────────────  SQLite (teo-database)  ◀── jobs table = the queue
+   └──────────────  SQLite (skwad-database)  ◀── jobs table = the queue
                             ▲
         worker threads (worker.rs) ── claim job → run stage → write results
                             │
       ┌─────────────────────┼──────────────────────┐
       ▼                     ▼                      ▼
- teo-media-core      face-detection +        teo-clustering
+ skwad-media-core      face-detection +        skwad-clustering
  (scan/thumbs)       face-recognition        (match + cluster)
                      (ONNX Runtime)
 ```
@@ -38,7 +38,7 @@ Key decisions, and where to look:
   inference without loading several detector/embedder pairs. Models load lazily,
   unload after 30 idle seconds, and rebuild when `AppState::settings_version`
   changes, so settings apply without restart.
-- **Media reaches the webview through `teomedia://`** (`protocol.rs`), which
+- **Media reaches the webview through `skwadmedia://`** (`protocol.rs`), which
   resolves database ids — the webview never gets raw filesystem access. The
   `full/` route is also what makes HEIC/RAW previewable (decoded via FFmpeg).
 - **Face crops in the UI are CSS crops** of the cached thumbnail using the
@@ -102,7 +102,7 @@ Four things this pinned down, each of which had a wrong default:
    Our own crates were compiling at `opt-level = 0` during `npm run dev`:
    `align_face` 4.03 ms vs 0.77 ms, `cosine` 8.3 µs vs 0.42 µs, `knn_graph`
    over 1500 faces 2409 ms vs 72 ms. The root `Cargo.toml` now names each
-   `teo-*` crate explicitly.
+   `skwad-*` crate explicitly.
 2. **DirectML requires static shapes.** Given a batch of 8 against a model
    whose graph declares a batch of 1, it does not degrade — it fails with
    `BatchNormalization … The parameter is incorrect`, failing every face.

@@ -6,10 +6,10 @@
 //! from a clean studio session.
 
 use serde::{Deserialize, Serialize};
-use teo_clustering::{ClusterConfig, MatcherConfig};
-use teo_database::{repo::settings, Database, Result as DbResult};
-use teo_face_detection::{Accelerator, DetectorConfig, SessionConfig};
-use teo_video_analysis::VideoAnalysisConfig;
+use skwad_clustering::{ClusterConfig, MatcherConfig};
+use skwad_database::{repo::settings, Database, Result as DbResult};
+use skwad_face_detection::{Accelerator, DetectorConfig, SessionConfig};
+use skwad_video_analysis::VideoAnalysisConfig;
 
 const KEY: &str = "app_settings";
 /// More than two concurrent decoders and ONNX engine pairs makes the desktop

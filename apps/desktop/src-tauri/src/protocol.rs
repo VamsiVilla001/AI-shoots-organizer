@@ -20,11 +20,11 @@ use std::sync::Arc;
 
 use tauri::http::{header, Request, Response, StatusCode};
 use tauri::{AppHandle, Manager, UriSchemeResponder};
-use teo_database::repo::media as media_repo;
+use skwad_database::repo::media as media_repo;
 
 use crate::state::AppState;
 
-pub const SCHEME: &str = "teomedia";
+pub const SCHEME: &str = "skwadmedia";
 
 /// Longest edge for the `full` rendering. Enough to inspect a face crop at
 /// 100%, small enough to send over IPC without a stall.
@@ -91,7 +91,7 @@ fn route(app: &AppHandle, request: &Request<Vec<u8>>) -> Response<Vec<u8>> {
     }
 }
 
-fn serve_thumbnail(media: &teo_database::models::Media) -> Response<Vec<u8>> {
+fn serve_thumbnail(media: &skwad_database::models::Media) -> Response<Vec<u8>> {
     let Some(path) = media.thumbnail_path.as_ref() else {
         return error(StatusCode::NOT_FOUND, "no thumbnail yet");
     };
@@ -106,7 +106,7 @@ fn serve_thumbnail(media: &teo_database::models::Media) -> Response<Vec<u8>> {
 /// JPEG and PNG are streamed straight through. Anything else — HEIC, TIFF,
 /// camera raw — is decoded and re-encoded, which is what makes those formats
 /// previewable in the first place.
-fn serve_full(state: &Arc<AppState>, media: &teo_database::models::Media) -> Response<Vec<u8>> {
+fn serve_full(state: &Arc<AppState>, media: &skwad_database::models::Media) -> Response<Vec<u8>> {
     let path = Path::new(&media.path);
     if !path.is_file() {
         return error(StatusCode::NOT_FOUND, "the original file has moved or been deleted");
@@ -127,7 +127,7 @@ fn serve_full(state: &Arc<AppState>, media: &teo_database::models::Media) -> Res
 
     let ffmpeg = crate::pipeline::discover_ffmpeg(&state.settings());
     let orientation = media.orientation.clamp(1, 8) as u16;
-    match teo_media_core::decode::load_image(path, orientation, Some(FULL_MAX_DIM), ffmpeg.as_ref()) {
+    match skwad_media_core::decode::load_image(path, orientation, Some(FULL_MAX_DIM), ffmpeg.as_ref()) {
         Ok(image) => {
             let mut buffer = Vec::new();
             match image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buffer, 90).encode_image(&image) {
@@ -146,9 +146,9 @@ fn serve_full(state: &Arc<AppState>, media: &teo_database::models::Media) -> Res
 fn serve_video_frame(
     state: &Arc<AppState>,
     request: &Request<Vec<u8>>,
-    media: &teo_database::models::Media,
+    media: &skwad_database::models::Media,
 ) -> Response<Vec<u8>> {
-    if media.media_type != teo_database::models::MediaType::Video.as_str() {
+    if media.media_type != skwad_database::models::MediaType::Video.as_str() {
         return error(StatusCode::BAD_REQUEST, "sample frames are only available for videos");
     }
     let Some(timestamp) = request.uri().query().and_then(parse_frame_timestamp) else {
@@ -165,7 +165,7 @@ fn serve_video_frame(
         );
     };
     let orientation = media.orientation.clamp(1, 8) as u16;
-    match teo_media_core::decode::load_video_frame(path, timestamp, orientation, Some(VIDEO_FRAME_MAX_DIM), &ffmpeg) {
+    match skwad_media_core::decode::load_video_frame(path, timestamp, orientation, Some(VIDEO_FRAME_MAX_DIM), &ffmpeg) {
         Ok(image) => {
             let mut buffer = Vec::new();
             match image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buffer, 90).encode_image(&image) {
@@ -183,9 +183,9 @@ fn serve_video_frame(
 fn serve_video_preview(
     state: &Arc<AppState>,
     request: &Request<Vec<u8>>,
-    media: &teo_database::models::Media,
+    media: &skwad_database::models::Media,
 ) -> Response<Vec<u8>> {
-    if media.media_type != teo_database::models::MediaType::Video.as_str() {
+    if media.media_type != skwad_database::models::MediaType::Video.as_str() {
         return error(StatusCode::BAD_REQUEST, "previews are only available for videos");
     }
     let source = Path::new(&media.path);
@@ -195,7 +195,7 @@ fn serve_video_preview(
 
     let target = state.proxies.path_for(&media.content_key);
     if !target.is_file() {
-        let Some(gstreamer) = teo_media_core::Gstreamer::discover() else {
+        let Some(gstreamer) = skwad_media_core::Gstreamer::discover() else {
             return error(
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
                 "GStreamer is required for video proxies",
@@ -223,7 +223,7 @@ fn parse_frame_timestamp(query: &str) -> Option<f64> {
 /// Serves a video, honouring `Range` so the player can seek. Without range
 /// support the `<video>` element refuses to scrub, which would break jumping
 /// to a detection timestamp.
-fn serve_video(request: &Request<Vec<u8>>, media: &teo_database::models::Media) -> Response<Vec<u8>> {
+fn serve_video(request: &Request<Vec<u8>>, media: &skwad_database::models::Media) -> Response<Vec<u8>> {
     let path = Path::new(&media.path);
     serve_video_path(request, path, video_mime(&media.extension), false)
 }
@@ -412,7 +412,7 @@ mod tests {
 
     #[test]
     fn hover_proxies_stay_at_thumbnail_scale() {
-        assert_eq!(teo_media_core::VIDEO_PROXY_WIDTH, teo_media_core::THUMBNAIL_MAX_DIM);
+        assert_eq!(skwad_media_core::VIDEO_PROXY_WIDTH, skwad_media_core::THUMBNAIL_MAX_DIM);
     }
 
     #[test]

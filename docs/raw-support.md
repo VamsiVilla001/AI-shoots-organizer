@@ -101,8 +101,8 @@ routing. Bitmap conversion and stable error codes are unit tested.
 A real-file test is opt-in because camera originals are not committed:
 
 ```powershell
-$env:TEO_RAW_FILE='\\server\share\shoot\DSCF1092.RAF'
-cargo test -p teo-media-core --test real_raw_files -- --ignored --nocapture
+$env:SKWAD_RAW_FILE='\\server\share\shoot\DSCF1092.RAF'
+cargo test -p skwad-media-core --test real_raw_files -- --ignored --nocapture
 ```
 
 The release acceptance matrix should include at least one genuine RAF, ARW,

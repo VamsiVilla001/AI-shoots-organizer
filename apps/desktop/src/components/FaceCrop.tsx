@@ -24,7 +24,7 @@
  */
 
 import { useState } from 'react'
-import type { BoundingBox } from '@teo/shared-types'
+import type { BoundingBox } from '@skwad/shared-types'
 import { thumbUrl } from '../media'
 
 /** Fraction of the face's own size added around it. */

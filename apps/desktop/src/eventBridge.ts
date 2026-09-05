@@ -13,12 +13,12 @@ import type {
   NoticeEvent,
   ProgressEvent,
   ShootChangedEvent,
-} from '@teo/shared-types'
+} from '@skwad/shared-types'
 import { useUi } from './store'
 
 export async function startEventBridge(queryClient: QueryClient): Promise<() => void> {
   const disposers = await Promise.all([
-    listen<ProgressEvent>('teo://progress', ({ payload }) => {
+    listen<ProgressEvent>('skwad://progress', ({ payload }) => {
       useUi.getState().setProgress(payload)
       // When a shoot finishes, its lists are stale in one go.
       if (payload.stage === 'complete') {
@@ -36,7 +36,7 @@ export async function startEventBridge(queryClient: QueryClient): Promise<() => 
       }
     }),
 
-    listen<ShootChangedEvent>('teo://shoot-changed', ({ payload }) => {
+    listen<ShootChangedEvent>('skwad://shoot-changed', ({ payload }) => {
       queryClient.invalidateQueries({ queryKey: ['shoots'] })
       queryClient.invalidateQueries({ queryKey: ['media', payload.shootId] })
       queryClient.invalidateQueries({ queryKey: ['albums', payload.shootId] })
@@ -47,14 +47,14 @@ export async function startEventBridge(queryClient: QueryClient): Promise<() => 
       queryClient.invalidateQueries({ queryKey: ['faces'] })
     }),
 
-    listen('teo://library-changed', () => {
+    listen('skwad://library-changed', () => {
       queryClient.invalidateQueries({ queryKey: ['people'] })
       queryClient.invalidateQueries({ queryKey: ['faces'] })
       queryClient.invalidateQueries({ queryKey: ['clusters'] })
       queryClient.invalidateQueries({ queryKey: ['albums'] })
     }),
 
-    listen<JobFailedEvent>('teo://job-failed', ({ payload }) => {
+    listen<JobFailedEvent>('skwad://job-failed', ({ payload }) => {
       useUi.getState().pushNotice({
         level: 'error',
         message: payload.file
@@ -63,14 +63,14 @@ export async function startEventBridge(queryClient: QueryClient): Promise<() => 
       })
     }),
 
-    listen<ExportProgressEvent>('teo://export-progress', ({ payload }) => {
+    listen<ExportProgressEvent>('skwad://export-progress', ({ payload }) => {
       useUi.getState().setExportProgress(payload)
       if (payload.finished) {
         queryClient.invalidateQueries({ queryKey: ['exports', payload.shootId] })
       }
     }),
 
-    listen<NoticeEvent>('teo://notice', ({ payload }) => {
+    listen<NoticeEvent>('skwad://notice', ({ payload }) => {
       // Scan counters arrive as info notices; surface only the meaningful ones.
       if (payload.level !== 'info') useUi.getState().pushNotice(payload)
     }),

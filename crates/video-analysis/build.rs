@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 fn main() {
     println!("cargo:rerun-if-changed=native/opencv_tracking.cpp");
-    println!("cargo:rerun-if-env-changed=TEO_OPENCV_DIR");
+    println!("cargo:rerun-if-env-changed=SKWAD_OPENCV_DIR");
 
     if env::var_os("CARGO_FEATURE_OPENCV_TRACKING").is_none() {
         return;
@@ -15,7 +15,7 @@ fn main() {
     }
 
     let build_root = find_build_root().unwrap_or_else(|| {
-        panic!("OpenCV SDK not found. Run scripts/setup-opencv.ps1 or set TEO_OPENCV_DIR to the OpenCV build directory")
+        panic!("OpenCV SDK not found. Run scripts/setup-opencv.ps1 or set SKWAD_OPENCV_DIR to the OpenCV build directory")
     });
     let include = build_root.join("include");
     let platform_root = ["vc17", "vc16"]
@@ -45,7 +45,7 @@ fn main() {
         .file("native/opencv_tracking.cpp")
         .flag_if_supported("/std:c++17")
         .warnings(true)
-        .compile("teo_opencv_tracking_bridge");
+        .compile("skwad_opencv_tracking_bridge");
 
     println!("cargo:rustc-link-search=native={}", platform_root.join("lib").display());
     println!("cargo:rustc-link-lib=dylib={link_name}");
@@ -58,7 +58,7 @@ fn main() {
 }
 
 fn find_build_root() -> Option<PathBuf> {
-    if let Some(root) = env::var_os("TEO_OPENCV_DIR").map(PathBuf::from) {
+    if let Some(root) = env::var_os("SKWAD_OPENCV_DIR").map(PathBuf::from) {
         if root.join("include/opencv2/core.hpp").is_file() {
             return Some(root);
         }

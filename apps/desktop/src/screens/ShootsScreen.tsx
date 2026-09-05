@@ -6,7 +6,7 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { open } from '@tauri-apps/plugin-dialog'
-import type { ShootSummary } from '@teo/shared-types'
+import type { ShootSummary } from '@skwad/shared-types'
 import * as api from '../api'
 import { formatCount, formatDate } from '../media'
 import { Modal } from '../components/Modal'

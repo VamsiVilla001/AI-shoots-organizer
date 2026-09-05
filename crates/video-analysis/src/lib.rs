@@ -14,7 +14,7 @@ use std::path::Path;
 use image::RgbImage;
 use serde::{Deserialize, Serialize};
 
-use teo_media_core::{Ffmpeg, MediaError};
+use skwad_media_core::{Ffmpeg, MediaError};
 
 pub use sampling::{plan_frames, FramePlan, PlannedFrame};
 
@@ -117,7 +117,7 @@ pub fn sample_frame(
     config: &VideoAnalysisConfig,
 ) -> Result<SampledFrame> {
     let image =
-        teo_media_core::decode::load_video_frame(path, entry.at, orientation, Some(config.frame_max_dim), ffmpeg)?;
+        skwad_media_core::decode::load_video_frame(path, entry.at, orientation, Some(config.frame_max_dim), ffmpeg)?;
     Ok(SampledFrame {
         timestamp: entry.at,
         image,

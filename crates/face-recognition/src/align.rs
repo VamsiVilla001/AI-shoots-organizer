@@ -8,7 +8,7 @@
 
 use image::RgbImage;
 
-use teo_face_detection::{Landmarks, Rect};
+use skwad_face_detection::{Landmarks, Rect};
 
 /// The canonical ArcFace 112×112 landmark template: left eye, right eye, nose,
 /// left mouth corner, right mouth corner.

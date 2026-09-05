@@ -8,11 +8,11 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use serde::Serialize;
-use teo_clustering::{cluster_faces, FaceMatcher};
-use teo_database::models::{JobKind, MediaType, NewMedia, ProcessingStatus, ShootStatus};
-use teo_database::repo::{albums, clusters, faces, jobs, logs, media as media_repo, shoots};
-use teo_database::Database;
-use teo_media_core::{scan, MediaKind, ScanOptions};
+use skwad_clustering::{cluster_faces, FaceMatcher};
+use skwad_database::models::{JobKind, MediaType, NewMedia, ProcessingStatus, ShootStatus};
+use skwad_database::repo::{albums, clusters, faces, jobs, logs, media as media_repo, shoots};
+use skwad_database::Database;
+use skwad_media_core::{scan, MediaKind, ScanOptions};
 
 use crate::settings::AppSettings;
 
@@ -41,9 +41,9 @@ pub mod priority {
 #[derive(Debug, thiserror::Error)]
 pub enum StageError {
     #[error(transparent)]
-    Database(#[from] teo_database::DbError),
+    Database(#[from] skwad_database::DbError),
     #[error(transparent)]
-    Media(#[from] teo_media_core::MediaError),
+    Media(#[from] skwad_media_core::MediaError),
     #[error("{0}")]
     Other(String),
 }
@@ -189,7 +189,7 @@ pub fn scan_shoot(
 }
 
 /// Queues the three shoot-wide stages, if they are not already waiting.
-pub fn queue_finishing_stages(conn: &teo_database::rusqlite::Connection, shoot_id: i64) -> Result<()> {
+pub fn queue_finishing_stages(conn: &skwad_database::rusqlite::Connection, shoot_id: i64) -> Result<()> {
     jobs::enqueue_unique(conn, shoot_id, JobKind::Recognise, None, priority::RECOGNISE)?;
     jobs::enqueue_unique(conn, shoot_id, JobKind::Cluster, None, priority::CLUSTER)?;
     jobs::enqueue_unique(conn, shoot_id, JobKind::Albums, None, priority::ALBUMS)?;
@@ -243,7 +243,7 @@ pub fn recognise_shoot(db: &Database, shoot_id: i64, settings: &AppSettings) -> 
     // independently. Grouping only by media id incorrectly treated an entire
     // video as one group photo and prevented the same player from matching at
     // more than one sampled timestamp.
-    let mut by_frame: std::collections::BTreeMap<(i64, Option<u64>), Vec<teo_database::repo::faces::FaceVector>> =
+    let mut by_frame: std::collections::BTreeMap<(i64, Option<u64>), Vec<skwad_database::repo::faces::FaceVector>> =
         std::collections::BTreeMap::new();
     for vector in unassigned {
         by_frame
@@ -282,17 +282,17 @@ pub fn recognise_shoot(db: &Database, shoot_id: i64, settings: &AppSettings) -> 
             "UPDATE video_detections SET person_id = (SELECT f.person_id FROM faces f WHERE f.id = video_detections.face_id)
               WHERE face_id IS NOT NULL
                 AND media_id IN (SELECT id FROM media WHERE shoot_id = ?1)",
-            teo_database::rusqlite::params![shoot_id],
+            skwad_database::rusqlite::params![shoot_id],
         )
-        .map_err(teo_database::DbError::from)?;
+        .map_err(skwad_database::DbError::from)?;
     }
 
     Ok(report)
 }
 
 fn select_reference_vectors(
-    vectors: Vec<teo_database::repo::faces::FaceVector>,
-) -> Vec<teo_database::repo::faces::FaceVector> {
+    vectors: Vec<skwad_database::repo::faces::FaceVector>,
+) -> Vec<skwad_database::repo::faces::FaceVector> {
     let mut by_person = std::collections::BTreeMap::<i64, Vec<_>>::new();
     for vector in vectors {
         if let Some(person_id) = vector.person_id {
@@ -400,19 +400,19 @@ pub fn reset_analysis(db: &Database, shoot_id: i64) -> Result<()> {
     db.transaction(|conn| {
         conn.execute(
             "DELETE FROM faces WHERE shoot_id = ?1",
-            teo_database::rusqlite::params![shoot_id],
+            skwad_database::rusqlite::params![shoot_id],
         )?;
         conn.execute(
             "DELETE FROM video_detections WHERE media_id IN (SELECT id FROM media WHERE shoot_id = ?1)",
-            teo_database::rusqlite::params![shoot_id],
+            skwad_database::rusqlite::params![shoot_id],
         )?;
         conn.execute(
             "DELETE FROM clusters WHERE shoot_id = ?1",
-            teo_database::rusqlite::params![shoot_id],
+            skwad_database::rusqlite::params![shoot_id],
         )?;
         conn.execute(
             "DELETE FROM albums WHERE shoot_id = ?1",
-            teo_database::rusqlite::params![shoot_id],
+            skwad_database::rusqlite::params![shoot_id],
         )?;
         // `media_groups` is deliberately left alone: the editor's own sorting is
         // not an AI result and must survive a re-analysis.
@@ -473,8 +473,8 @@ pub fn queue_pending_work(db: &Database, shoot_id: i64) -> Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use teo_database::models::BoundingBox;
-    use teo_database::repo::people;
+    use skwad_database::models::BoundingBox;
+    use skwad_database::repo::people;
 
     fn seed_shoot(db: &Database) -> i64 {
         let conn = db.conn().unwrap();
@@ -499,7 +499,7 @@ mod tests {
         .unwrap();
         let face_id = faces::insert(
             &conn,
-            &teo_database::models::NewFace {
+            &skwad_database::models::NewFace {
                 media_id,
                 shoot_id,
                 bbox: BoundingBox {
@@ -541,7 +541,7 @@ mod tests {
             .map(|(frame_time, embedding)| {
                 faces::insert(
                     &conn,
-                    &teo_database::models::NewFace {
+                    &skwad_database::models::NewFace {
                         media_id,
                         shoot_id,
                         bbox: BoundingBox {
@@ -707,7 +707,7 @@ mod tests {
     #[test]
     fn reference_selection_keeps_the_best_and_caps_good_extras() {
         let samples = (0..12)
-            .map(|face_id| teo_database::repo::faces::FaceVector {
+            .map(|face_id| skwad_database::repo::faces::FaceVector {
                 face_id,
                 media_id: face_id,
                 frame_time: None,
@@ -715,7 +715,7 @@ mod tests {
                 embedding: vec![1.0, 0.0],
                 quality: if face_id == 11 { 0.95 } else { 0.7 },
             })
-            .chain(std::iter::once(teo_database::repo::faces::FaceVector {
+            .chain(std::iter::once(skwad_database::repo::faces::FaceVector {
                 face_id: 99,
                 media_id: 99,
                 frame_time: None,

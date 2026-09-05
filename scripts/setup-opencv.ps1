@@ -28,4 +28,4 @@ if (-not (Test-Path -LiteralPath (Join-Path $buildRoot 'include\opencv2\core.hpp
 }
 
 Write-Host "OpenCV $version is ready at $buildRoot"
-Write-Host 'Build the prototype with: cargo test -p teo-video-analysis --features opencv-tracking'
+Write-Host 'Build the prototype with: cargo test -p skwad-video-analysis --features opencv-tracking'

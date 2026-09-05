@@ -5,7 +5,7 @@
 
 import { useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import type { FaceAssignment, FaceWithContext } from '@teo/shared-types'
+import type { FaceAssignment, FaceWithContext } from '@skwad/shared-types'
 import * as api from '../api'
 import { formatConfidence, formatCount } from '../media'
 import { FaceCrop } from '../components/FaceCrop'

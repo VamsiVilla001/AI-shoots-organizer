@@ -51,7 +51,7 @@ struct NativeTrackedBox {
 
 #[cfg(feature = "opencv-tracking")]
 extern "C" {
-    fn teo_opencv_track_boxes(
+    fn skwad_opencv_track_boxes(
         previous_rgb: *const u8,
         current_rgb: *const u8,
         width: i32,
@@ -97,7 +97,7 @@ fn track_boxes_impl(previous: &RgbImage, current: &RgbImage, boxes: &[TrackBox])
     // OpenCV receives the exact common dimensions checked above and the native
     // bridge catches C++ exceptions before they cross the ABI boundary.
     let status = unsafe {
-        teo_opencv_track_boxes(
+        skwad_opencv_track_boxes(
             previous.as_raw().as_ptr(),
             current.as_raw().as_ptr(),
             width,

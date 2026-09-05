@@ -13,7 +13,7 @@ use image::RgbImage;
 
 pub use align::{align_face, align_from_bbox, ALIGNED_SIZE, ARCFACE_TEMPLATE};
 pub use arcface::ArcFaceEmbedder;
-pub use teo_face_detection::{Accelerator, Detection, SessionConfig};
+pub use skwad_face_detection::{Accelerator, Detection, SessionConfig};
 
 #[derive(Debug, thiserror::Error)]
 pub enum EmbedError {
@@ -29,9 +29,9 @@ pub enum EmbedError {
 
 pub type Result<T> = std::result::Result<T, EmbedError>;
 
-impl From<teo_face_detection::FaceError> for EmbedError {
-    fn from(e: teo_face_detection::FaceError) -> Self {
-        use teo_face_detection::FaceError;
+impl From<skwad_face_detection::FaceError> for EmbedError {
+    fn from(e: skwad_face_detection::FaceError) -> Self {
+        use skwad_face_detection::FaceError;
         match e {
             FaceError::ModelMissing(m) => EmbedError::ModelMissing(m),
             FaceError::BadOutput(m) => EmbedError::BadOutput(m),
@@ -151,7 +151,7 @@ mod tests {
 
     #[test]
     fn prepare_face_falls_back_when_landmarks_are_missing() {
-        use teo_face_detection::Rect;
+        use skwad_face_detection::Rect;
         let image = RgbImage::new(200, 200);
         let detection = Detection {
             bbox: Rect { x1: 50.0, y1: 50.0, x2: 150.0, y2: 150.0 },

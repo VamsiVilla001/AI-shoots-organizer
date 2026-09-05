@@ -1,9 +1,9 @@
-# TE Organiser application memory
+# SKWAD Media Organiser application memory
 
 Last updated: 4 September 2026 (Asia/Calcutta)
 
-This is the current handoff memory for the **Esports AI Media Organiser** (also
-called **TE Organiser**). It consolidates the product intent, repository state,
+This is the current handoff memory for the **SKWAD Media Organiser** (also
+called **SKWAD Media Organiser**). It consolidates the product intent, repository state,
 implemented work, decisions, test status, known limitations, and next work from
 the development sessions. Claude should read this file before changing the
 application.
@@ -11,7 +11,7 @@ application.
 ## 1. Current repository state
 
 - Repository: `https://github.com/VamsiVilla001/AI-shoots-organizer.git`
-- Local checkout: `D:\Project KK\Personal projects\TE Organiser`
+- Local checkout: `D:\Project KK\Personal projects\SKWAD Media Organiser`
 - Active branch: `windowsV2`
 - Current committed HEAD: `3e545da feat(media): give RAW photos full feature parity`
 - `windowsV2` currently matches `origin/windowsV2` at `3e545da`.
@@ -35,7 +35,7 @@ c2b6bec fix(pipeline): wait for orientation indexing before analysis
 a4a797f Merge V1 into manual grouping, and renumber the migration to 3
 343bcfc Fix upgrade path for existing version 3 databases
 0a914cb Add photo quality and duplicate ranking foundation
-8c32639 Establish TE Organiser 1.0 baseline and 1.2 roadmap
+8c32639 Establish SKWAD Media Organiser 1.0 baseline and 1.2 roadmap
 24d2906 Optimize scan and face processing resources
 1b452ac Stabilize scanning and improve album grouping
 ```
@@ -93,7 +93,7 @@ Rust Tauri commands and AppState
         +---- export-engine (copy plans and collision-safe folder output)
 ```
 
-There is no `teo-server` crate, loopback HTTP API, browser transport, or current
+There is no `skwad-server` crate, loopback HTTP API, browser transport, or current
 `.github/workflows/release.yml` in this checkout. Some older documents describe
 that alternate/server-refactor branch; do not rebuild the current app around
 those documents unless the user explicitly asks to restart that architecture.
@@ -211,8 +211,8 @@ Real-file RAW tests are opt-in because proprietary camera originals are not in
 the repository:
 
 ```powershell
-$env:TEO_RAW_FILE='\\server\share\shoot\DSCF1092.RAF'
-cargo test -p teo-media-core --test real_raw_files -- --ignored --nocapture
+$env:SKWAD_RAW_FILE='\\server\share\shoot\DSCF1092.RAF'
+cargo test -p skwad-media-core --test real_raw_files -- --ignored --nocapture
 ```
 
 The complete real-camera acceptance matrix across RAF, ARW, NEF, CR2/CR3 and
@@ -492,7 +492,7 @@ settings, models, and all source files alone.
   clustering, video sampling, FFmpeg path/status, OpenCV backend status, cache
   and privacy/data deletion.
 
-Media is served to the WebView through the ID-based `teomedia://` custom
+Media is served to the WebView through the ID-based `skwadmedia://` custom
 protocol. The frontend does not receive broad filesystem access. Video serving
 supports bounded byte ranges; review sample images use a validated timestamp
 query.
@@ -531,8 +531,8 @@ window seen earlier.
 Expected build locations:
 
 - frontend bundle: `apps/desktop/dist/`
-- development executable: `target/debug/teo-desktop.exe`
-- release executable: `target/release/teo-desktop.exe`
+- development executable: `target/debug/skwad-desktop.exe`
+- release executable: `target/release/skwad-desktop.exe`
 - Windows NSIS installer: `target/release/bundle/nsis/`
 - macOS app/DMG when built on macOS: under `target/release/bundle/`
 
@@ -544,28 +544,28 @@ successful Tauri release build.
 Windows application data on this machine is normally:
 
 ```text
-C:\Users\CG\AppData\Roaming\com.teorganiser.desktop\
+C:\Users\CG\AppData\Roaming\com.skwad.mediaorganiser\
   database\media.db
   thumbnails\
   face_cache\
   models\
-  logs\teo.log
+  logs\skwad.log
 ```
 
 The production database observed during 4K calibration was
-`C:\Users\CG\AppData\Roaming\com.teorganiser.desktop\database\media.db`.
+`C:\Users\CG\AppData\Roaming\com.skwad.mediaorganiser\database\media.db`.
 Back it up before any manual SQL/data repair.
 
 ## 15. Most recent verification status
 
 The latest uncommitted recognition tightening was verified on 3 September 2026:
 
-- `teo-clustering`: 31 tests passed.
-- `teo-database`: 59 tests passed after the P0 editorial migration/query tests.
-- `teo-desktop`: 65 tests passed after the low-resolution hover-proxy route test.
-- `teo-media-core`: 32 tests discovered (31 normal passes and one opt-in real
+- `skwad-clustering`: 31 tests passed.
+- `skwad-database`: 59 tests passed after the P0 editorial migration/query tests.
+- `skwad-desktop`: 65 tests passed after the low-resolution hover-proxy route test.
+- `skwad-media-core`: 32 tests discovered (31 normal passes and one opt-in real
   GStreamer test), covering full-video proxy policy and isolated proxy storage.
-- `teo-desktop --features opencv-tracking`: 64 tests passed.
+- `skwad-desktop --features opencv-tracking`: 64 tests passed.
 - OpenCV/video-analysis native suite: 15 tests passed during its implementation.
 - Clippy passed for clustering, database, desktop and the OpenCV feature work
   with warnings denied.
@@ -663,7 +663,7 @@ Known stale/conflicting documentation as of this snapshot:
   it is implemented and tested in the dirty tree.
 - `docs/deployment.md`, parts of `docs/work-log-2026-08.md`, and
   `docs/server-architecture.md` describe a server-extraction branch with
-  `teo-server`, sidecars, transports and CI files that do not exist in the
+  `skwad-server`, sidecars, transports and CI files that do not exist in the
   current `windowsV2` checkout.
 - The line in `media-core/src/ffmpeg.rs` describing FFmpeg still decode mentions
   camera RAW historically; actual routing sends supported camera RAW to LibRaw.

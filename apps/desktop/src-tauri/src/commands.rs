@@ -10,12 +10,12 @@ use std::sync::Arc;
 use serde::Serialize;
 use tauri::{AppHandle, State};
 
-use teo_clustering::FaceMatcher;
-use teo_database::models::*;
-use teo_database::repo::{
+use skwad_clustering::FaceMatcher;
+use skwad_database::models::*;
+use skwad_database::repo::{
     albums, clusters, exports, faces, groups, jobs, logs, media as media_repo, people, shoots, video,
 };
-use teo_export_engine::ExportOptions;
+use skwad_export_engine::ExportOptions;
 
 use crate::events;
 use crate::models::{ModelRegistry, ModelStatus};
@@ -60,7 +60,7 @@ pub struct AppInfo {
     pub gstreamer_version: Option<String>,
     pub video_tracking_backend: String,
     pub models: ModelStatus,
-    pub accelerators: Vec<teo_face_detection::Accelerator>,
+    pub accelerators: Vec<skwad_face_detection::Accelerator>,
     pub cpu_cores: usize,
     pub supported_extensions: Vec<String>,
     pub cache_bytes: u64,
@@ -70,7 +70,7 @@ pub struct AppInfo {
 pub fn app_info(state: State<'_, Arc<AppState>>) -> Result<AppInfo> {
     let settings = state.settings();
     let ffmpeg = crate::pipeline::discover_ffmpeg(&settings);
-    let gstreamer = teo_media_core::Gstreamer::discover();
+    let gstreamer = skwad_media_core::Gstreamer::discover();
     let registry = ModelRegistry::new(&state.paths.models);
 
     Ok(AppInfo {
@@ -81,15 +81,15 @@ pub fn app_info(state: State<'_, Arc<AppState>>) -> Result<AppInfo> {
         ffmpeg_version: ffmpeg.as_ref().and_then(|f| f.version()),
         gstreamer_available: gstreamer.is_some(),
         gstreamer_version: gstreamer.as_ref().and_then(|runtime| runtime.version()),
-        video_tracking_backend: match teo_video_analysis::tracking::backend() {
-            teo_video_analysis::tracking::TrackingBackend::OpenCv => "OpenCV tracking",
-            teo_video_analysis::tracking::TrackingBackend::Disabled => "Detector only",
+        video_tracking_backend: match skwad_video_analysis::tracking::backend() {
+            skwad_video_analysis::tracking::TrackingBackend::OpenCv => "OpenCV tracking",
+            skwad_video_analysis::tracking::TrackingBackend::Disabled => "Detector only",
         }
         .to_string(),
         models: registry.status(settings.detector_model.as_deref(), settings.embedder_model.as_deref()),
-        accelerators: teo_face_detection::available_accelerators(),
+        accelerators: skwad_face_detection::available_accelerators(),
         cpu_cores: num_cpus::get(),
-        supported_extensions: teo_media_core::formats::supported_extensions()
+        supported_extensions: skwad_media_core::formats::supported_extensions()
             .into_iter()
             .map(String::from)
             .collect(),
@@ -208,10 +208,10 @@ pub fn clear_selected_scanned_data(
             let mut statement = conn.prepare("SELECT thumbnail_path, content_key FROM media WHERE shoot_id = ?1")?;
             for shoot_id in &shoot_ids {
                 let cached = statement
-                    .query_map(teo_database::rusqlite::params![shoot_id], |row| {
+                    .query_map(skwad_database::rusqlite::params![shoot_id], |row| {
                         Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?))
                     })?
-                    .collect::<teo_database::rusqlite::Result<Vec<_>>>()?;
+                    .collect::<skwad_database::rusqlite::Result<Vec<_>>>()?;
                 for (thumbnail_path, content_key) in cached {
                     thumbnail_paths.extend(thumbnail_path.map(PathBuf::from));
                     content_keys.push(content_key);
@@ -234,7 +234,7 @@ pub fn clear_selected_scanned_data(
     for path in thumbnail_paths {
         let still_referenced: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM media WHERE thumbnail_path = ?1)",
-            teo_database::rusqlite::params![path.to_string_lossy().as_ref()],
+            skwad_database::rusqlite::params![path.to_string_lossy().as_ref()],
             |row| row.get(0),
         )?;
         if still_referenced || !path.starts_with(cache_root) || !path.is_file() {
@@ -251,7 +251,7 @@ pub fn clear_selected_scanned_data(
     for content_key in content_keys {
         let still_referenced: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM media WHERE content_key = ?1)",
-            teo_database::rusqlite::params![content_key],
+            skwad_database::rusqlite::params![content_key],
             |row| row.get(0),
         )?;
         if !still_referenced && state.proxies.remove(&content_key)? {
@@ -799,9 +799,9 @@ pub fn add_media_to_group(
     let (group, added) = state.db.transaction(|conn| {
         let group = match (group_id, group_name.as_deref()) {
             (Some(id), _) => groups::get_by_id(conn, id)?
-                .ok_or_else(|| teo_database::DbError::other("that group no longer exists"))?,
+                .ok_or_else(|| skwad_database::DbError::other("that group no longer exists"))?,
             (None, Some(name)) => groups::get_or_create(conn, shoot_id, name, None)?,
-            (None, None) => return Err(teo_database::DbError::other("choose a group or type a new name")),
+            (None, None) => return Err(skwad_database::DbError::other("choose a group or type a new name")),
         };
         let added = if move_files {
             groups::move_media(conn, group.id, &media_ids)?
@@ -889,7 +889,7 @@ pub fn group_from_album(
 ) -> Result<Group> {
     let group = state.db.transaction(|conn| {
         let album = albums::get_by_id(conn, album_id)?
-            .ok_or_else(|| teo_database::DbError::other("that album no longer exists"))?;
+            .ok_or_else(|| skwad_database::DbError::other("that album no longer exists"))?;
         let label = name
             .as_deref()
             .map(str::trim)
@@ -897,7 +897,7 @@ pub fn group_from_album(
             .unwrap_or(&album.name);
         let group = groups::get_or_create(conn, album.shoot_id, label, album.person_ids.first().copied())?;
         groups::add_media(conn, group.id, &albums::media_ids(conn, album_id, None)?)?;
-        groups::get_by_id(conn, group.id)?.ok_or_else(|| teo_database::DbError::other("that group no longer exists"))
+        groups::get_by_id(conn, group.id)?.ok_or_else(|| skwad_database::DbError::other("that group no longer exists"))
     })?;
 
     events::shoot_changed(&app, group.shoot_id, "groups");
@@ -972,7 +972,7 @@ pub fn assign_faces(
         let person_id = match (person_id, person_name.as_deref()) {
             (Some(id), _) => id,
             (None, Some(name)) => people::get_or_create(conn, name, None)?.id,
-            (None, None) => return Err(teo_database::DbError::other("choose or name a player")),
+            (None, None) => return Err(skwad_database::DbError::other("choose or name a player")),
         };
         let n = faces::assign_many(conn, &face_ids, person_id)?;
         video::sync_face_people(conn, &face_ids)?;
@@ -1117,7 +1117,7 @@ pub async fn add_manual_face(
                 }),
             );
             let face = faces::get_by_id(conn, face_id)?
-                .ok_or_else(|| teo_database::DbError::other("the new face could not be read back"))?;
+                .ok_or_else(|| skwad_database::DbError::other("the new face could not be read back"))?;
             Ok(ManualFaceResult { face, suggested_person })
         })?;
         Ok(result)
@@ -1161,7 +1161,7 @@ pub async fn name_face(
     let result = tauri::async_runtime::spawn_blocking(move || -> Result<NameFaceResult> {
         let (person, faces_named, shoot_id, appearances_before_matching) = state.db.transaction(|conn| {
             let face = faces::get_by_id(conn, face_id)?
-                .ok_or_else(|| teo_database::DbError::other("that face is no longer in the library"))?;
+                .ok_or_else(|| skwad_database::DbError::other("that face is no longer in the library"))?;
             let person = people::get_or_create(conn, &name, team.as_deref())?;
 
             // Clicking one box confirms exactly that face. A machine-created
@@ -1187,7 +1187,7 @@ pub async fn name_face(
                 "SELECT COUNT(*) FROM faces
                   WHERE shoot_id = ?1 AND person_id = ?2
                     AND assignment IN ('suggested','confirmed')",
-                teo_database::rusqlite::params![face.shoot_id, person.id],
+                skwad_database::rusqlite::params![face.shoot_id, person.id],
                 |row| row.get::<_, i64>(0),
             )?;
             Ok((person, faces_named, face.shoot_id, appearances_before_matching))
@@ -1206,7 +1206,7 @@ pub async fn name_face(
                     "SELECT COUNT(*) FROM faces
                   WHERE shoot_id = ?1 AND person_id = ?2
                     AND assignment IN ('suggested','confirmed')",
-                    teo_database::rusqlite::params![shoot_id, person.id],
+                    skwad_database::rusqlite::params![shoot_id, person.id],
                     |row| row.get::<_, i64>(0),
                 )?;
                 let matches_found = appearances_after_matching
@@ -1223,7 +1223,7 @@ pub async fn name_face(
                     None => 0,
                 };
                 let group = groups::get_by_id(conn, group.id)?
-                    .ok_or_else(|| teo_database::DbError::other("that group no longer exists"))?;
+                    .ok_or_else(|| skwad_database::DbError::other("that group no longer exists"))?;
 
                 Ok(NameFaceResult {
                     person,
@@ -1288,14 +1288,14 @@ pub fn video_sample_frames(state: State<'_, Arc<AppState>>, media_id: i64) -> Re
 fn review_sample_times(
     stored: Vec<f64>,
     duration: Option<f64>,
-    config: &teo_video_analysis::VideoAnalysisConfig,
+    config: &skwad_video_analysis::VideoAnalysisConfig,
 ) -> Vec<f64> {
     // The interval plan is inexpensive and deterministic, so existing videos
     // analysed before sample-frame indexing still expose every cadence frame.
     // Persisted scene-change samples are unioned in when they exist.
     let mut milliseconds = std::collections::BTreeSet::new();
     for timestamp in stored.into_iter().chain(
-        teo_video_analysis::plan_frames(duration, &[], config)
+        skwad_video_analysis::plan_frames(duration, &[], config)
             .timestamps
             .into_iter()
             .map(|frame| frame.at),
@@ -1421,7 +1421,7 @@ pub fn clear_thumbnail_cache(state: State<'_, Arc<AppState>>) -> Result<u64> {
     let removed = state.thumbnails.clear()? + state.proxies.clear()?;
     let conn = state.db.conn()?;
     conn.execute("UPDATE media SET thumbnail_path = NULL", [])
-        .map_err(teo_database::DbError::from)?;
+        .map_err(skwad_database::DbError::from)?;
     Ok(removed)
 }
 
@@ -1470,7 +1470,7 @@ mod tests {
 
     #[test]
     fn video_review_keeps_scene_samples_and_fills_the_interval_cadence() {
-        let config = teo_video_analysis::VideoAnalysisConfig {
+        let config = skwad_video_analysis::VideoAnalysisConfig {
             sample_interval: 5.0,
             max_frames: 60,
             ..Default::default()

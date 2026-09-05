@@ -5,7 +5,7 @@
 
 import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import type { AppSettings } from '@teo/shared-types'
+import type { AppSettings } from '@skwad/shared-types'
 import * as api from '../api'
 import { formatBytes } from '../media'
 import { useUi } from '../store'

@@ -1,4 +1,4 @@
-# TE Organiser product roadmap
+# SKWAD Media Organiser product roadmap
 
 ## Version strategy
 
@@ -15,7 +15,7 @@
 
 ### Release goal
 
-An esports editor should be able to install TE Organiser, process a real shoot,
+An esports editor should be able to install SKWAD Media Organiser, process a real shoot,
 understand why each result exists, correct mistakes quickly, and prove how much
 sorting work was saved. Windows and Apple Silicon builds should have repeatable
 release gates.

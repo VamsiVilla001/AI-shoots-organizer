@@ -1,4 +1,4 @@
-# Esports AI Media Organiser
+# SKWAD Media Organiser
 ## Architecture & Development Plan
 
 **Target Platforms:** Windows 10/11 and macOS on Apple Silicon  
@@ -762,7 +762,7 @@ Recommended navigation:
 
 ```text
 ┌─────────────────────────────────────────────┐
-│ Esports AI Media Organiser                 │
+│ SKWAD Media Organiser                 │
 ├───────────────┬─────────────────────────────┤
 │ Shoots        │                             │
 │ Players       │        Workspace            │
@@ -922,7 +922,7 @@ Avoid storing unnecessary biometric data in logs.
 # 26. Suggested Project Structure
 
 ```text
-esports-media-ai/
+skwad-media-organiser/
 │
 ├── apps/
 │   └── desktop/

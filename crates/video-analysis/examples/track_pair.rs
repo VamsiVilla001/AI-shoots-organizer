@@ -5,7 +5,7 @@ use std::env;
 use std::path::Path;
 use std::time::Instant;
 
-use teo_video_analysis::tracking::{self, TrackBox};
+use skwad_video_analysis::tracking::{self, TrackBox};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let arguments: Vec<String> = env::args().collect();
