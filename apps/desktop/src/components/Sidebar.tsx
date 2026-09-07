@@ -10,6 +10,7 @@ const ITEMS: Array<{ id: Screen; label: string; needsShoot: boolean }> = [
   { id: 'review', label: 'Review', needsShoot: true },
   { id: 'export', label: 'Shortcut Export', needsShoot: true },
   { id: 'catalogues', label: 'Shared Catalogues', needsShoot: false },
+  { id: 'profile', label: 'Profile', needsShoot: false },
   { id: 'settings', label: 'Settings', needsShoot: false },
 ]
 

@@ -56,7 +56,35 @@ export type Accelerator = 'auto' | 'cpu' | 'directMl' | 'coreMl' | 'cuda'
 export interface CatalogueSessionStatus {
   authenticatedOnce: boolean
   accountId: string | null
+  email: string | null
   deviceKeyId: string | null
+}
+
+export interface SignUpResult {
+  signedIn: boolean
+  confirmationRequired: boolean
+}
+
+export interface UserProfile {
+  userId: string
+  email: string
+  displayName: string
+  avatarUrl: string | null
+  jobTitle: string | null
+  organisation: string | null
+  location: string | null
+  bio: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export interface ProfileUpdate {
+  displayName: string
+  avatarUrl: string | null
+  jobTitle: string | null
+  organisation: string | null
+  location: string | null
+  bio: string | null
 }
 
 export interface CatalogueSummary {

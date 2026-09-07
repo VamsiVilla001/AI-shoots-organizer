@@ -43,7 +43,41 @@ pub struct LoadedCatalogue {
 pub struct SessionStatus {
     pub authenticated_once: bool,
     pub account_id: Option<String>,
+    pub email: Option<String>,
     pub device_key_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SignUpResult {
+    pub signed_in: bool,
+    pub confirmation_required: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserProfile {
+    pub user_id: String,
+    pub email: String,
+    pub display_name: String,
+    pub avatar_url: Option<String>,
+    pub job_title: Option<String>,
+    pub organisation: Option<String>,
+    pub location: Option<String>,
+    pub bio: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileUpdate {
+    pub display_name: String,
+    pub avatar_url: Option<String>,
+    pub job_title: Option<String>,
+    pub organisation: Option<String>,
+    pub location: Option<String>,
+    pub bio: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -69,6 +103,8 @@ pub struct LoadedCatalogueInfo {
 #[serde(rename_all = "camelCase")]
 struct StoredIdentity {
     account_id: String,
+    #[serde(default)]
+    email: String,
     workspace_id: String,
     access_token: String,
     refresh_token: String,
@@ -103,17 +139,32 @@ struct WorkspaceRow {
     id: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct ProfileRow {
+    user_id: String,
+    display_name: String,
+    avatar_url: Option<String>,
+    job_title: Option<String>,
+    organisation: Option<String>,
+    location: Option<String>,
+    bio: Option<String>,
+    created_at: String,
+    updated_at: String,
+}
+
 #[tauri::command]
 pub fn catalogue_session_status() -> Result<SessionStatus> {
     match load_identity() {
         Ok(identity) => Ok(SessionStatus {
             authenticated_once: true,
             account_id: Some(identity.account_id),
+            email: Some(identity.email),
             device_key_id: Some(identity.device_key_id),
         }),
         Err(_) => Ok(SessionStatus {
             authenticated_once: false,
             account_id: None,
+            email: None,
             device_key_id: None,
         }),
     }
@@ -121,27 +172,79 @@ pub fn catalogue_session_status() -> Result<SessionStatus> {
 
 #[tauri::command]
 pub async fn sign_in_skwad(email: String, password: String) -> Result<SessionStatus> {
+    let password = Zeroizing::new(password);
+    let auth = password_authentication(&email, &password).await?;
+    establish_identity(auth, &email).await
+}
+
+#[tauri::command]
+pub async fn sign_up_skwad(email: String, password: String, display_name: String) -> Result<SignUpResult> {
+    let display_name = display_name.trim();
+    if display_name.is_empty() || display_name.chars().count() > 80 {
+        return Err(command_error("display name must contain between 1 and 80 characters"));
+    }
+    if password.chars().count() < 8 {
+        return Err(command_error("password must contain at least 8 characters"));
+    }
     let url = std::env::var("SKWAD_SUPABASE_URL").map_err(|_| command_error("SKWAD_SUPABASE_URL is not configured"))?;
     let anon = std::env::var("SKWAD_SUPABASE_ANON_KEY")
         .map_err(|_| command_error("SKWAD_SUPABASE_ANON_KEY is not configured"))?;
     let password = Zeroizing::new(password);
+    let response = reqwest::Client::new()
+        .post(format!("{}/auth/v1/signup", url.trim_end_matches('/')))
+        .header("apikey", &anon)
+        .json(&serde_json::json!({
+            "email": email,
+            "password": password.as_str(),
+            "data": {"display_name": display_name}
+        }))
+        .send()
+        .await
+        .map_err(command_error)?;
+    if !response.status().is_success() {
+        return Err(command_error(
+            "SKWAD account creation failed; check the email and password requirements",
+        ));
+    }
+    let body: serde_json::Value = response.json().await.map_err(command_error)?;
+    if body.get("access_token").and_then(|value| value.as_str()).is_none() {
+        return Ok(SignUpResult {
+            signed_in: false,
+            confirmation_required: true,
+        });
+    }
+    let auth: AuthResponse = serde_json::from_value(body).map_err(command_error)?;
+    establish_identity(auth, &email).await?;
+    Ok(SignUpResult {
+        signed_in: true,
+        confirmation_required: false,
+    })
+}
+
+async fn password_authentication(email: &str, password: &str) -> Result<AuthResponse> {
+    let url = std::env::var("SKWAD_SUPABASE_URL").map_err(|_| command_error("SKWAD_SUPABASE_URL is not configured"))?;
+    let anon = std::env::var("SKWAD_SUPABASE_ANON_KEY")
+        .map_err(|_| command_error("SKWAD_SUPABASE_ANON_KEY is not configured"))?;
     let response = reqwest::Client::new()
         .post(format!(
             "{}/auth/v1/token?grant_type=password",
             url.trim_end_matches('/')
         ))
         .header("apikey", &anon)
-        .json(&serde_json::json!({"email": email, "password": password.as_str()}))
+        .json(&serde_json::json!({"email": email, "password": password}))
         .send()
         .await
         .map_err(command_error)?;
     if !response.status().is_success() {
         return Err(command_error("SKWAD account sign-in failed"));
     }
-    let auth: AuthResponse = response.json().await.map_err(command_error)?;
+    response.json().await.map_err(command_error)
+}
+
+async fn establish_identity(auth: AuthResponse, email: &str) -> Result<SessionStatus> {
+    let (url, anon) = supabase_config()?;
     let account_id = auth.user.id;
-    let workspace_id = personal_workspace(&url, &anon, &auth.access_token, &account_id, &email).await?;
-    let backend_keys = fetch_backend_keys().await?;
+    let workspace_id = personal_workspace(&url, &anon, &auth.access_token, &account_id, email).await?;
     let existing = load_identity()
         .ok()
         .filter(|identity| identity.account_id == account_id);
@@ -164,7 +267,9 @@ pub async fn sign_in_skwad(email: String, password: String) -> Result<SessionSta
             )
         }
     };
-    trusted_signing_keys.insert(backend_keys.signing_key_id, backend_keys.signing_public_key);
+    if let Ok(backend_keys) = fetch_backend_keys().await {
+        trusted_signing_keys.insert(backend_keys.signing_key_id, backend_keys.signing_public_key);
+    }
     let registration = reqwest::Client::new().post(format!("{}/rest/v1/devices?on_conflict=id", url.trim_end_matches('/')))
         .header("apikey", &anon).bearer_auth(&auth.access_token).header("Prefer", "resolution=merge-duplicates")
         .json(&serde_json::json!({"id": device_id, "user_id": account_id, "opaque_key_id": device_key_id, "hpke_public_key": device_public_key, "label": std::env::var("COMPUTERNAME").unwrap_or_else(|_| "SKWAD desktop".into())}))
@@ -176,6 +281,7 @@ pub async fn sign_in_skwad(email: String, password: String) -> Result<SessionSta
     }
     save_identity(&StoredIdentity {
         account_id: account_id.clone(),
+        email: email.trim().to_owned(),
         workspace_id,
         access_token: auth.access_token,
         refresh_token: auth.refresh_token,
@@ -188,6 +294,7 @@ pub async fn sign_in_skwad(email: String, password: String) -> Result<SessionSta
     Ok(SessionStatus {
         authenticated_once: true,
         account_id: Some(account_id),
+        email: Some(email.trim().to_owned()),
         device_key_id: Some(device_key_id),
     })
 }
@@ -196,6 +303,75 @@ pub async fn sign_in_skwad(email: String, password: String) -> Result<SessionSta
 pub fn clear_authenticated_session() -> Result<()> {
     credential_entry()?.delete_credential().map_err(command_error)?;
     Ok(())
+}
+
+#[tauri::command]
+pub async fn sign_out_skwad(state: State<'_, Arc<AppState>>) -> Result<()> {
+    if let Ok(identity) = load_identity() {
+        if let Ok((url, anon)) = supabase_config() {
+            let _ = reqwest::Client::new()
+                .post(format!("{url}/auth/v1/logout"))
+                .header("apikey", anon)
+                .bearer_auth(identity.access_token)
+                .send()
+                .await;
+        }
+    }
+    state.loaded_catalogues.lock().clear();
+    clear_authenticated_session()
+}
+
+#[tauri::command]
+pub async fn get_user_profile() -> Result<UserProfile> {
+    let mut identity = load_identity().map_err(|_| command_error("sign in to view your profile"))?;
+    refresh_session(&mut identity).await?;
+    fetch_profile(&identity).await
+}
+
+#[tauri::command]
+pub async fn update_user_profile(update: ProfileUpdate) -> Result<UserProfile> {
+    let mut identity = load_identity().map_err(|_| command_error("sign in to update your profile"))?;
+    refresh_session(&mut identity).await?;
+
+    let display_name = update.display_name.trim().to_owned();
+    if display_name.is_empty() || display_name.chars().count() > 80 {
+        return Err(command_error("display name must contain between 1 and 80 characters"));
+    }
+    let avatar_url = clean_optional(update.avatar_url, 2048, "avatar URL")?;
+    if let Some(url) = &avatar_url {
+        let parsed = reqwest::Url::parse(url).map_err(|_| command_error("avatar URL is invalid"))?;
+        if !matches!(parsed.scheme(), "http" | "https") {
+            return Err(command_error("avatar URL must use HTTPS or HTTP"));
+        }
+    }
+    let body = serde_json::json!({
+        "display_name": display_name,
+        "avatar_url": avatar_url,
+        "job_title": clean_optional(update.job_title, 120, "job title")?,
+        "organisation": clean_optional(update.organisation, 160, "organisation")?,
+        "location": clean_optional(update.location, 120, "location")?,
+        "bio": clean_optional(update.bio, 500, "bio")?,
+    });
+    let (url, anon) = supabase_config()?;
+    let response = reqwest::Client::new()
+        .patch(format!(
+            "{url}/rest/v1/profiles?user_id=eq.{}&select=user_id,display_name,avatar_url,job_title,organisation,location,bio,created_at,updated_at",
+            identity.account_id
+        ))
+        .header("apikey", anon)
+        .bearer_auth(&identity.access_token)
+        .header("Prefer", "return=representation")
+        .json(&body)
+        .send()
+        .await
+        .map_err(command_error)?
+        .error_for_status()
+        .map_err(command_error)?;
+    let rows: Vec<ProfileRow> = response.json().await.map_err(command_error)?;
+    rows.into_iter()
+        .next()
+        .map(|row| profile_from_row(row, &identity.email))
+        .ok_or_else(|| command_error("the profile was not found"))
 }
 
 #[tauri::command]
@@ -521,6 +697,58 @@ fn loaded_info(
     })
 }
 
+async fn fetch_profile(identity: &StoredIdentity) -> Result<UserProfile> {
+    let (url, anon) = supabase_config()?;
+    let rows: Vec<ProfileRow> = reqwest::Client::new()
+        .get(format!(
+            "{url}/rest/v1/profiles?select=user_id,display_name,avatar_url,job_title,organisation,location,bio,created_at,updated_at&user_id=eq.{}&limit=1",
+            identity.account_id
+        ))
+        .header("apikey", anon)
+        .bearer_auth(&identity.access_token)
+        .send()
+        .await
+        .map_err(command_error)?
+        .error_for_status()
+        .map_err(command_error)?
+        .json()
+        .await
+        .map_err(command_error)?;
+    rows.into_iter()
+        .next()
+        .map(|row| profile_from_row(row, &identity.email))
+        .ok_or_else(|| command_error("the profile was not found"))
+}
+
+fn profile_from_row(row: ProfileRow, email: &str) -> UserProfile {
+    UserProfile {
+        user_id: row.user_id,
+        email: email.to_owned(),
+        display_name: row.display_name,
+        avatar_url: row.avatar_url,
+        job_title: row.job_title,
+        organisation: row.organisation,
+        location: row.location,
+        bio: row.bio,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+    }
+}
+
+fn clean_optional(value: Option<String>, max: usize, label: &str) -> Result<Option<String>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if value.chars().count() > max {
+        return Err(command_error(format!("{label} must not exceed {max} characters")));
+    }
+    Ok(Some(value.to_owned()))
+}
+
 async fn fetch_backend_keys() -> Result<BackendKeys> {
     reqwest::Client::new()
         .get(format!("{}/v1/crypto/public-keys", backend_url()))
@@ -729,5 +957,29 @@ impl StoredIdentity {
         .map_err(command_error)?
         .try_into()
         .map_err(|_| command_error("invalid trusted signing key"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clean_optional;
+
+    #[test]
+    fn optional_profile_fields_are_trimmed() {
+        assert_eq!(
+            clean_optional(Some("  Esports producer  ".into()), 120, "job title").unwrap(),
+            Some("Esports producer".into())
+        );
+    }
+
+    #[test]
+    fn blank_profile_fields_become_null() {
+        assert_eq!(clean_optional(Some("   ".into()), 120, "job title").unwrap(), None);
+        assert_eq!(clean_optional(None, 120, "job title").unwrap(), None);
+    }
+
+    #[test]
+    fn oversized_profile_fields_are_rejected() {
+        assert!(clean_optional(Some("12345".into()), 4, "field").is_err());
     }
 }

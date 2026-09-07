@@ -45,6 +45,23 @@ The SQL migration enables RLS for every shared table. Anonymous access has no
 policies. Owners publish and administer members, editors modify draft metadata,
 and viewers read published data. Published revision rows are immutable.
 
+## Moving authentication to the permanent local/LAN server
+
+The desktop is not tied to a hosted Supabase project. In development,
+`SKWAD_SUPABASE_URL=http://127.0.0.1:54321` points it at the local stack. For a
+permanent self-hosted server, apply every file under `supabase/migrations`, then
+change `SKWAD_SUPABASE_URL`, `SKWAD_SUPABASE_ANON_KEY`, and
+`SKWAD_BACKEND_URL` in the desktop launch environment. No rebuild is required.
+
+Do not expose PostgreSQL directly to the desktop. The client talks to Supabase
+Auth and its RLS-protected REST API. Use HTTPS for every non-loopback address.
+To preserve development accounts, migrate both the Supabase `auth` schema and
+the application `public` schema using the supported backup/restore process;
+copying only `public.profiles` does not copy password hashes. If the destination
+uses a different JWT secret, existing cached sessions must be discarded and
+users must sign in again. Device private keys should stay in each computer's OS
+credential store and must not be imported into PostgreSQL.
+
 ## Security boundary
 
 The operating-system credential store holds the device private key and cached

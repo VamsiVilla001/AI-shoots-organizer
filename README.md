@@ -3,8 +3,7 @@
 A local-first desktop application that sorts esports photo/video shoots into
 per-person folders. Point it at a raw footage folder, let on-device face
 recognition propose the grouping, name and correct the groups by hand, then
-export the originals into a folder per group — on a NAS share or any other
-destination.
+export native references to the untouched originals in a folder per group.
 
 **Current stable release:** 1.0.0
 **V2 prototype:** 2.0.0-alpha.1 on branch `V2.0`
@@ -18,6 +17,10 @@ destination.
 AI analysis, originals, proxies, thumbnails, crops and face embeddings remain
 local. V2 can publish an encrypted metadata-only `.skwad` catalogue to an
 authorised Supabase workspace; source media is never uploaded or copied.
+The V2 desktop uses the same self-hostable Supabase service for email/password
+accounts and own-user-only cloud profiles. Development and permanent LAN
+servers are selected through environment configuration rather than hard-coded
+addresses.
 
 ## Repository layout
 

@@ -1,7 +1,7 @@
 begin;
 
 create extension if not exists pgtap with schema extensions;
-select plan(13);
+select plan(17);
 
 insert into auth.users (id, email)
 values
@@ -71,20 +71,30 @@ values
 
 set local role anon;
 select is((select count(*) from public.workspaces), 0::bigint, 'anonymous users see no workspaces');
+select is((select count(*) from public.profiles), 0::bigint, 'anonymous users see no profiles');
 reset role;
 
 set local role authenticated;
 select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-000000000001', true);
 select is((select count(*) from public.workspaces), 1::bigint, 'owner sees the workspace');
 select is((select count(*) from public.catalogue_revisions), 2::bigint, 'owner sees drafts and published revisions');
+select is((select count(*) from public.profiles), 1::bigint, 'owner sees only their own profile');
 
 select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-000000000002', true);
 select is((select count(*) from public.workspaces), 1::bigint, 'editor sees the workspace');
 select is((select count(*) from public.catalogue_revisions), 2::bigint, 'editor sees drafts and published revisions');
+select is((select count(*) from public.profiles), 1::bigint, 'editor sees only their own profile');
+select is(
+  (select count(*) from public.profiles where user_id='00000000-0000-0000-0000-000000000001'),
+  0::bigint,
+  'editor cannot read the owner profile'
+);
 select throws_ok(
   $$update public.catalogue_revisions
       set state='published', object_key='forbidden.skwad', published_at=now()
       where id='40000000-0000-0000-0000-000000000002'$$,
+  null,
+  null,
   'editor cannot publish a revision'
 );
 
@@ -98,6 +108,8 @@ select throws_ok(
       ('40000000-0000-0000-0000-000000000003','50000000-0000-0000-0000-000000000003',
        '10000000-0000-0000-0000-000000000001','30000000-0000-0000-0000-000000000001',3,
        'draft','00000000-0000-0000-0000-000000000003')$$,
+  null,
+  null,
   'viewer cannot create a draft revision'
 );
 
@@ -123,6 +135,8 @@ select throws_ok(
   $$update public.catalogue_revisions
       set ciphertext_blake3='mutated'
       where id='40000000-0000-0000-0000-000000000001'$$,
+  null,
+  null,
   'published revisions are immutable'
 );
 

@@ -666,7 +666,7 @@ Implemented after that checkpoint:
   offline loading after prior authentication, NAS mapping and scan-free group
   rendering.
 
-Verification: 273 Rust tests, strict workspace Clippy, TypeScript typecheck and
+Verification after the account/profile work: 276 Rust tests, strict workspace Clippy, TypeScript typecheck and
 the production web bundle pass. The 10,000-reference catalogue query meets the
 five-second criterion. Supabase policy execution still needs Docker/Supabase
 CLI on the test machine; that CLI was unavailable. Independent cryptographic
@@ -706,7 +706,7 @@ documentation together so this file does not become another stale plan.
 Before editing:
 
 - Run `git status --short` and preserve every existing change.
-- Confirm the active branch remains `windowsV2` unless the user requests a new
+- Confirm the active branch remains `V2.0` unless the user requests a new
   branch.
 - Read the target module and its repository/tests before modifying behavior.
 - Check `crates/database/src/migrations.rs`; migration 7 is already allocated
@@ -721,3 +721,25 @@ Before editing:
 - Test default and OpenCV feature builds when touching shared video code.
 - Report honestly whether a change is committed/pushed, merely tested locally,
   or only planned.
+
+## 21. Application login and cloud profiles
+
+V2.0 now gates the desktop workspace behind the same Supabase account used by
+encrypted catalogues. Users can create an email/password account, sign in,
+sign out, and edit a protected profile containing display name, avatar URL,
+job title, organisation, location and bio.
+
+- Supabase Auth stores and verifies password hashes; plaintext passwords never
+  enter SQLite, profile rows, logs or settings.
+- `public.profiles` is created by migration
+  `202609070001_user_profiles.sql`, automatically provisioned after signup, and
+  protected by own-user-only RLS.
+- The device refresh token and X25519 private key remain in Windows Credential
+  Manager/macOS Keychain. This is deliberate: private keys and reusable tokens
+  must not be copied into the media or cloud profile database.
+- The desktop uses `SKWAD_SUPABASE_URL` and `SKWAD_SUPABASE_ANON_KEY`, so local
+  development and a later self-hosted LAN server use the same code. Non-loopback
+  deployments must use HTTPS and must never expose PostgreSQL directly.
+- Migrating accounts requires the Supabase `auth` schema as well as the
+  application `public` schema. Moving only `profiles` does not move password
+  hashes; changing the JWT secret invalidates cached sessions.

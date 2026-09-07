@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { open, save } from '@tauri-apps/plugin-dialog'
 import * as api from '../api'
 import { useUi } from '../store'
@@ -8,8 +8,6 @@ export function CataloguesScreen() {
   const queryClient = useQueryClient()
   const pushNotice = useUi((state) => state.pushNotice)
   const activeShootId = useUi((state) => state.activeShootId)
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
   const [passphrase, setPassphrase] = useState('')
   const [selected, setSelected] = useState<{ packageId: string; revisionId: string } | null>(null)
   const [groupId, setGroupId] = useState<number | null>(null)
@@ -25,16 +23,6 @@ export function CataloguesScreen() {
     queryKey: ['catalogueMedia', selected, groupId],
     queryFn: () => api.listCatalogueMedia(selected!.packageId, selected!.revisionId, groupId),
     enabled: selected !== null,
-  })
-
-  const authenticate = useMutation({
-    mutationFn: () => api.signInSkwad(email, password),
-    onSuccess: () => {
-      setPassword('')
-      queryClient.invalidateQueries({ queryKey: ['catalogueSession'] })
-      pushNotice({ level: 'success', message: 'Authenticated device key stored in the OS credential store.' })
-    },
-    onError: (error) => pushNotice({ level: 'error', message: String(error) }),
   })
 
   const publish = async () => {
@@ -93,15 +81,8 @@ export function CataloguesScreen() {
     <div className="settings-grid">
       <section className="card">
         <h2>Account & offline device</h2>
-        {session.data?.authenticatedOnce ? <>
-          <p>Authenticated as <strong>{session.data.accountId}</strong></p>
-          <p className="hint mono">{session.data.deviceKeyId}</p>
-        </> : <>
-          <p className="hint">Complete account authentication once before this device can open encrypted catalogues offline.</p>
-          <label className="field"><span>Email</span><input type="email" value={email} onChange={(event) => setEmail(event.target.value)} /></label>
-          <label className="field"><span>Password</span><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} /></label>
-          <button className="primary" onClick={() => authenticate.mutate()} disabled={authenticate.isPending}>Sign in &amp; register device</button>
-        </>}
+        <p>Authenticated as <strong>{session.data?.email || session.data?.accountId}</strong></p>
+        <p className="hint mono">Device key: {session.data?.deviceKeyId}</p>
         <label className="field"><span>Offline passphrase</span><input type="password" value={passphrase} onChange={(event) => setPassphrase(event.target.value)} placeholder="Used for publish or fallback load" /><span className="hint">Never stored. Transfer it through a separate secure channel.</span></label>
       </section>
       <section className="card">
