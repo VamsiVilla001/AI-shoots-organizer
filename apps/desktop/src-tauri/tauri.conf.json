@@ -43,8 +43,8 @@
         "mimeType": "application/vnd.skwad.catalogue"
       }
     ],
-    "shortDescription": "Player-wise AI sorting for esports shoots",
-    "longDescription": "Imports an esports photo and video shoot, identifies players locally with on-device face recognition, generates player-wise albums, and exports the original files into organised folders.",
+    "shortDescription": "Private AI media sorting and encrypted shared catalogues",
+    "longDescription": "Organises photo and video shoots with local AI, publishes encrypted metadata-only SKWAD catalogues, and exports native shortcuts without copying original media.",
     "copyright": "",
     "icon": [
       "icons/32x32.png",

@@ -205,7 +205,12 @@ mod tests {
 
     #[test]
     fn cpu_is_always_the_final_fallback() {
-        for accelerator in [Accelerator::Auto, Accelerator::Cpu, Accelerator::DirectMl, Accelerator::Cuda] {
+        for accelerator in [
+            Accelerator::Auto,
+            Accelerator::Cpu,
+            Accelerator::DirectMl,
+            Accelerator::Cuda,
+        ] {
             let providers = providers_for(accelerator);
             assert!(!providers.is_empty(), "{accelerator:?} produced no providers");
         }
@@ -225,7 +230,9 @@ mod tests {
         ));
         // Anything else ORT has to say must still reach the log.
         assert!(!is_benign_ort_message("Failed to create CUDA execution provider"));
-        assert!(!is_benign_ort_message("Some nodes were not assigned to the preferred provider"));
+        assert!(!is_benign_ort_message(
+            "Some nodes were not assigned to the preferred provider"
+        ));
         assert!(!is_benign_ort_message(""));
     }
 

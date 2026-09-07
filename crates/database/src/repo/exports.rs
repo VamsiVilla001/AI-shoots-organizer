@@ -30,7 +30,10 @@ pub fn create(conn: &Connection, shoot_id: i64, destination: &str, options_json:
 }
 
 pub fn set_total(conn: &Connection, id: i64, files_total: i64) -> Result<()> {
-    conn.execute("UPDATE exports SET files_total = ?2 WHERE id = ?1", params![id, files_total])?;
+    conn.execute(
+        "UPDATE exports SET files_total = ?2 WHERE id = ?1",
+        params![id, files_total],
+    )?;
     Ok(())
 }
 
@@ -58,8 +61,7 @@ pub fn get_by_id(conn: &Connection, id: i64) -> Result<Option<ExportRecord>> {
 }
 
 pub fn list(conn: &Connection, shoot_id: i64, limit: i64) -> Result<Vec<ExportRecord>> {
-    let mut stmt =
-        conn.prepare("SELECT * FROM exports WHERE shoot_id = ?1 ORDER BY id DESC LIMIT ?2")?;
+    let mut stmt = conn.prepare("SELECT * FROM exports WHERE shoot_id = ?1 ORDER BY id DESC LIMIT ?2")?;
     let rows = stmt
         .query_map(params![shoot_id, limit.clamp(1, 200)], map)?
         .collect::<rusqlite::Result<Vec<_>>>()?;

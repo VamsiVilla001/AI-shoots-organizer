@@ -1,0 +1,27 @@
+[package]
+name = "skwad-catalogue"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Encrypted SKWAD catalogue container and portable catalogue schema"
+
+[dependencies]
+argon2 = { version = "0.5", features = ["zeroize"] }
+base64 = "0.22"
+blake3 = "1.8"
+chacha20poly1305 = "0.10"
+ed25519-dalek = { version = "2.2", features = ["rand_core"] }
+hpke = "0.13"
+rand = "0.9"
+rusqlite = { version = "0.40", features = ["bundled", "serialize"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+uuid = { version = "1.18", features = ["v4", "serde"] }
+zeroize = { version = "1.8", features = ["derive"] }
+zip = { version = "4.6", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+skwad-database = { path = "../database" }
+tempfile = "3.27"

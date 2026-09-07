@@ -36,7 +36,12 @@ pub struct Similarity {
 }
 
 impl Similarity {
-    pub const IDENTITY: Similarity = Similarity { sc: 1.0, ss: 0.0, tx: 0.0, ty: 0.0 };
+    pub const IDENTITY: Similarity = Similarity {
+        sc: 1.0,
+        ss: 0.0,
+        tx: 0.0,
+        ty: 0.0,
+    };
 
     pub fn apply(&self, x: f32, y: f32) -> (f32, f32) {
         (self.sc * x - self.ss * y + self.tx, self.ss * x + self.sc * y + self.ty)
@@ -190,7 +195,12 @@ mod tests {
     #[test]
     fn recovers_a_known_rotation_scale_and_offset() {
         // Build a transform, push points through it, and check we solve back.
-        let truth = Similarity { sc: 1.5_f32 * 0.8, ss: 1.5 * 0.6, tx: 12.0, ty: -7.0 };
+        let truth = Similarity {
+            sc: 1.5_f32 * 0.8,
+            ss: 1.5 * 0.6,
+            tx: 12.0,
+            ty: -7.0,
+        };
         let src = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0), (5.0, 5.0)];
         let dst: Vec<(f32, f32)> = src.iter().map(|&(x, y)| truth.apply(x, y)).collect();
 
@@ -204,7 +214,12 @@ mod tests {
 
     #[test]
     fn inverse_undoes_the_transform() {
-        let t = Similarity { sc: 0.7, ss: -0.35, tx: 40.0, ty: 11.0 };
+        let t = Similarity {
+            sc: 0.7,
+            ss: -0.35,
+            tx: 40.0,
+            ty: 11.0,
+        };
         let inverse = t.inverse().unwrap();
         for &(x, y) in &[(0.0_f32, 0.0_f32), (13.0, 91.0), (-4.0, 6.5)] {
             let (fx, fy) = t.apply(x, y);
@@ -219,7 +234,14 @@ mod tests {
         let coincident = [(5.0_f32, 5.0_f32); 5];
         assert!(estimate_similarity(&coincident, &ARCFACE_TEMPLATE).is_none());
         assert!(estimate_similarity(&[(0.0, 0.0)], &ARCFACE_TEMPLATE).is_none());
-        assert!(Similarity { sc: 0.0, ss: 0.0, tx: 1.0, ty: 1.0 }.inverse().is_none());
+        assert!(Similarity {
+            sc: 0.0,
+            ss: 0.0,
+            tx: 1.0,
+            ty: 1.0
+        }
+        .inverse()
+        .is_none());
     }
 
     #[test]
@@ -268,7 +290,15 @@ mod tests {
                 image.put_pixel(x, y, Rgb([0, 200, 0]));
             }
         }
-        let crop = align_from_bbox(&image, &Rect { x1: 150.0, y1: 100.0, x2: 250.0, y2: 200.0 });
+        let crop = align_from_bbox(
+            &image,
+            &Rect {
+                x1: 150.0,
+                y1: 100.0,
+                x2: 250.0,
+                y2: 200.0,
+            },
+        );
         assert_eq!(crop.dimensions(), (112, 112));
         // The centre of the crop must come from inside the green square.
         assert!(crop.get_pixel(56, 56)[1] > 150);

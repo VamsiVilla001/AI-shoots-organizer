@@ -122,7 +122,10 @@ pub fn cluster_faces(embeddings: &[Vec<f32>], config: &ClusterConfig) -> Cluster
         return ClusterResult::default();
     }
     if n == 1 {
-        return ClusterResult { clusters: Vec::new(), unclustered: vec![0] };
+        return ClusterResult {
+            clusters: Vec::new(),
+            unclustered: vec![0],
+        };
     }
 
     let graph = knn_graph(embeddings, config.neighbours.max(1), config.edge_threshold);
@@ -229,7 +232,11 @@ fn build_cluster(embeddings: &[Vec<f32>], members: Vec<usize>) -> Cluster {
     } else {
         refs.iter().map(|v| cosine(v, &centre)).sum::<f32>() / members.len() as f32
     };
-    Cluster { members, centroid: centre, cohesion }
+    Cluster {
+        members,
+        centroid: centre,
+        cohesion,
+    }
 }
 
 /// How many times [`merge_close_clusters`] may sweep before giving up. Each
@@ -351,19 +358,28 @@ mod tests {
         let mut embeddings = identity(0, 6, 6, 0.1);
         embeddings.extend(identity(3, 6, 2, 0.1)); // a pair
 
-        let strict = ClusterConfig { min_cluster_size: 4, ..Default::default() };
+        let strict = ClusterConfig {
+            min_cluster_size: 4,
+            ..Default::default()
+        };
         let result = cluster_faces(&embeddings, &strict);
         assert_eq!(result.cluster_count(), 1);
         assert_eq!(result.unclustered.len(), 2);
 
-        let lenient = ClusterConfig { min_cluster_size: 2, ..Default::default() };
+        let lenient = ClusterConfig {
+            min_cluster_size: 2,
+            ..Default::default()
+        };
         assert_eq!(cluster_faces(&embeddings, &lenient).cluster_count(), 2);
     }
 
     #[test]
     fn a_high_edge_threshold_leaves_everything_unclustered() {
         let embeddings = identity(0, 6, 6, 0.3);
-        let config = ClusterConfig { edge_threshold: 0.999, ..Default::default() };
+        let config = ClusterConfig {
+            edge_threshold: 0.999,
+            ..Default::default()
+        };
         let result = cluster_faces(&embeddings, &config);
         assert_eq!(result.cluster_count(), 0);
         assert_eq!(result.unclustered.len(), 6);

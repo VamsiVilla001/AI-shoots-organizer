@@ -79,7 +79,13 @@ impl ArcFaceEmbedder {
             _ => GPU_MAX_BATCH,
         };
 
-        Ok(Self { session, input_name, dim, name, max_batch })
+        Ok(Self {
+            session,
+            input_name,
+            dim,
+            name,
+            max_batch,
+        })
     }
 
     /// Faces submitted to the model in one call.
@@ -117,8 +123,8 @@ impl ArcFaceEmbedder {
 
         let side = ALIGNED_SIZE as usize;
         let data = Self::to_tensor(crops);
-        let tensor = Tensor::from_array(([crops.len(), 3, side, side], data))
-            .map_err(|e| EmbedError::Runtime(e.to_string()))?;
+        let tensor =
+            Tensor::from_array(([crops.len(), 3, side, side], data)).map_err(|e| EmbedError::Runtime(e.to_string()))?;
 
         let outputs = self
             .session
@@ -181,11 +187,11 @@ impl FaceEmbedder for ArcFaceEmbedder {
         for chunk in crops.chunks(self.max_batch.max(1)) {
             match self.run(chunk) {
                 Ok(embeddings) if embeddings.len() == chunk.len() => out.extend(embeddings.into_iter().map(Ok)),
-                Ok(_) => out.extend(
-                    chunk
-                        .iter()
-                        .map(|_| Err(EmbedError::BadOutput("batch returned the wrong number of embeddings".into()))),
-                ),
+                Ok(_) => out.extend(chunk.iter().map(|_| {
+                    Err(EmbedError::BadOutput(
+                        "batch returned the wrong number of embeddings".into(),
+                    ))
+                })),
                 Err(e) => out.extend(chunk.iter().map(|_| Err(EmbedError::Runtime(e.to_string())))),
             }
         }

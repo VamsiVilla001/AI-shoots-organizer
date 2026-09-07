@@ -87,7 +87,10 @@ impl Database {
         let mut conn = pool.get()?;
         migrations::run(&mut conn)?;
         drop(conn);
-        Ok(Self { pool, path: PathBuf::from(":memory:") })
+        Ok(Self {
+            pool,
+            path: PathBuf::from(":memory:"),
+        })
     }
 
     pub fn conn(&self) -> Result<DbConn> {

@@ -1,7 +1,7 @@
 /**
  * The Export screen (§11, §34): choose a destination — a NAS share is the usual
  * one — pick which groups to write, preview the folder list and file count, run
- * the copy with live progress.
+ * native shortcuts with live progress. Originals are never copied.
  *
  * Originals are only ever read. The destination is refused if it sits inside
  * the shoot's own source folder.
@@ -100,7 +100,7 @@ function ExportBody({ shootId }: { shootId: number }) {
   return (
     <>
       <div className="workspace-header">
-        <h1>Copy &amp; Organise — {shoot.data?.name ?? ''}</h1>
+        <h1>Shortcut Export — {shoot.data?.name ?? ''}</h1>
       </div>
 
       {options.personIds !== null && (
@@ -108,7 +108,7 @@ function ExportBody({ shootId }: { shootId: number }) {
           <strong>{formatCount(options.personIds.length)} selected person group(s)</strong>
           <span className="hint">
             Choose a destination below. Each selected person will get a folder named after them,
-            containing copies of their grouped media.
+            containing native references to their grouped media.
           </span>
         </div>
       )}
@@ -310,8 +310,7 @@ function ExportBody({ shootId }: { shootId: number }) {
             <>
               <div className="hint">
                 {formatCount(preview.fileCount)} files · {formatBytes(preview.totalBytes)} into{' '}
-                {preview.folders.length} folder(s). Originals are copied; the source folder is never
-                modified.
+                {preview.folders.length} folder(s). Native shortcuts are created; originals are never copied or modified.
               </div>
               {preview.folders.length > 0 && (
                 <div className="folder-preview mono">
@@ -339,12 +338,12 @@ function ExportBody({ shootId }: { shootId: number }) {
                 />
               </div>
               <div className="hint">
-                {formatCount(exportProgress.filesDone)} copied
+                {formatCount(exportProgress.filesDone)} shortcuts created
                 {exportProgress.filesSkipped > 0 && `, ${exportProgress.filesSkipped} skipped`} ·{' '}
                 {formatBytes(exportProgress.bytesDone)}
               </div>
               <button className="small danger" onClick={() => api.cancelExport(shootId)}>
-                Cancel copying
+                Cancel export
               </button>
             </div>
           )}
@@ -354,7 +353,7 @@ function ExportBody({ shootId }: { shootId: number }) {
               disabled={!preview || preview.fileCount === 0 || busy || !!error}
               onClick={start}
             >
-              {busy ? 'Copying…' : 'Copy into folders'}
+              {busy ? 'Creating shortcuts…' : 'Create shortcut folders'}
             </button>
             {destination && !busy && (
               <button onClick={() => api.openPath(destination)}>Open folder</button>
@@ -365,7 +364,7 @@ function ExportBody({ shootId }: { shootId: number }) {
 
       {(history.data?.length ?? 0) > 0 && (
         <div className="section" style={{ marginTop: 26 }}>
-          <h2>Previous copies</h2>
+          <h2>Previous shortcut exports</h2>
           <div className="row-list">
             {history.data?.map((record) => (
               <div className="row" key={record.id}>

@@ -95,7 +95,9 @@ pub fn rename(conn: &Connection, id: i64, name: &str) -> Result<()> {
     }
     if let Some(other) = find_by_name(conn, name)? {
         if other.id != id {
-            return Err(crate::DbError::other(format!("a player named \"{name}\" already exists")));
+            return Err(crate::DbError::other(format!(
+                "a player named \"{name}\" already exists"
+            )));
         }
     }
     conn.execute(
@@ -114,7 +116,10 @@ pub fn update(conn: &Connection, id: i64, team: Option<&str>, notes: Option<&str
 }
 
 pub fn set_cover_face(conn: &Connection, id: i64, face_id: Option<i64>) -> Result<()> {
-    conn.execute("UPDATE people SET cover_face_id = ?2 WHERE id = ?1", params![id, face_id])?;
+    conn.execute(
+        "UPDATE people SET cover_face_id = ?2 WHERE id = ?1",
+        params![id, face_id],
+    )?;
     Ok(())
 }
 
@@ -142,7 +147,10 @@ pub fn merge(conn: &Connection, target_id: i64, source_id: i64) -> Result<i64> {
         |r| r.get::<_, i64>(0),
     )?;
     conn.execute("DELETE FROM people WHERE id = ?1", params![source_id])?;
-    conn.execute("UPDATE people SET updated_at = ?2 WHERE id = ?1", params![target_id, now()])?;
+    conn.execute(
+        "UPDATE people SET updated_at = ?2 WHERE id = ?1",
+        params![target_id, now()],
+    )?;
     Ok(moved)
 }
 
@@ -154,8 +162,14 @@ pub fn clear_recognition_data(conn: &Connection, id: i64) -> Result<()> {
           WHERE person_id = ?1",
         params![id],
     )?;
-    conn.execute("UPDATE clusters SET person_id = NULL, status = 'unnamed' WHERE person_id = ?1", params![id])?;
-    conn.execute("UPDATE people SET cover_face_id = NULL, updated_at = ?2 WHERE id = ?1", params![id, now()])?;
+    conn.execute(
+        "UPDATE clusters SET person_id = NULL, status = 'unnamed' WHERE person_id = ?1",
+        params![id],
+    )?;
+    conn.execute(
+        "UPDATE people SET cover_face_id = NULL, updated_at = ?2 WHERE id = ?1",
+        params![id, now()],
+    )?;
     Ok(())
 }
 

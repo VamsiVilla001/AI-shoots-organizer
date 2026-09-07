@@ -13,8 +13,8 @@ const ILLEGAL: &[char] = &['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
 
 /// Device names Windows refuses regardless of extension.
 const RESERVED: &[&str] = &[
-    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
-    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2",
+    "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
 ];
 
 /// Long enough for any real player name, short enough to leave room for the
@@ -39,7 +39,12 @@ pub fn sanitise_component(input: &str) -> String {
     out = out.trim().trim_end_matches(['.', ' ']).trim().to_string();
 
     if out.chars().count() > MAX_COMPONENT {
-        out = out.chars().take(MAX_COMPONENT).collect::<String>().trim_end().to_string();
+        out = out
+            .chars()
+            .take(MAX_COMPONENT)
+            .collect::<String>()
+            .trim_end()
+            .to_string();
     }
 
     let stem = out.split('.').next().unwrap_or("").to_ascii_uppercase();

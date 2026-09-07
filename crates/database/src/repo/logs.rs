@@ -72,9 +72,8 @@ pub fn record_quiet(
 }
 
 pub fn recent(conn: &Connection, shoot_id: Option<i64>, limit: i64) -> Result<Vec<LogEntry>> {
-    let mut stmt = conn.prepare(
-        "SELECT * FROM app_log WHERE (?1 IS NULL OR shoot_id = ?1) ORDER BY id DESC LIMIT ?2",
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT * FROM app_log WHERE (?1 IS NULL OR shoot_id = ?1) ORDER BY id DESC LIMIT ?2")?;
     let rows = stmt
         .query_map(params![shoot_id, limit.clamp(1, 2_000)], map)?
         .collect::<rusqlite::Result<Vec<_>>>()?;

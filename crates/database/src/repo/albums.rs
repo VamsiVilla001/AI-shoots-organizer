@@ -135,9 +135,11 @@ fn refresh_album_counts(conn: &Connection, album_id: i64) -> Result<i64> {
           WHERE id = ?1",
         params![album_id],
     )?;
-    Ok(conn.query_row("SELECT media_count FROM albums WHERE id = ?1", params![album_id], |r| {
-        r.get(0)
-    })?)
+    Ok(
+        conn.query_row("SELECT media_count FROM albums WHERE id = ?1", params![album_id], |r| {
+            r.get(0)
+        })?,
+    )
 }
 
 /// Rebuilds every album for a shoot from the current face assignments.
@@ -171,7 +173,15 @@ pub fn regenerate(conn: &Connection, shoot_id: i64) -> Result<usize> {
     };
 
     for (order, (person_id, name, _)) in players.iter().enumerate() {
-        let album_id = insert_album(conn, shoot_id, name, AlbumType::Player, &[*person_id], None, order as i64)?;
+        let album_id = insert_album(
+            conn,
+            shoot_id,
+            name,
+            AlbumType::Player,
+            &[*person_id],
+            None,
+            order as i64,
+        )?;
         conn.execute(
             "INSERT OR IGNORE INTO album_media (album_id, media_id)
              SELECT DISTINCT ?1, f.media_id FROM faces f
@@ -204,9 +214,10 @@ pub fn regenerate(conn: &Connection, shoot_id: i64) -> Result<usize> {
               LIMIT ?3",
         )?;
         let rows = stmt
-            .query_map(params![shoot_id, MIN_MULTI_PLAYER_MEDIA, MAX_MULTI_PLAYER_ALBUMS as i64], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
-            })?
+            .query_map(
+                params![shoot_id, MIN_MULTI_PLAYER_MEDIA, MAX_MULTI_PLAYER_ALBUMS as i64],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         rows
     };
@@ -294,9 +305,8 @@ pub fn regenerate(conn: &Connection, shoot_id: i64) -> Result<usize> {
     // A second, independent axis: how many people are in the file, regardless
     // of who they are. Every file lands in exactly one of these.
     let buckets: Vec<i64> = {
-        let mut stmt = conn.prepare(
-            "SELECT DISTINCT MIN(person_count, ?2) FROM media WHERE shoot_id = ?1 ORDER BY 1",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT DISTINCT MIN(person_count, ?2) FROM media WHERE shoot_id = ?1 ORDER BY 1")?;
         let rows = stmt
             .query_map(params![shoot_id, GROUP_SIZE_CAP], |r| r.get(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -387,7 +397,12 @@ mod tests {
                     &NewFace {
                         media_id,
                         shoot_id: shoot.id,
-                        bbox: BoundingBox { x: 0.0, y: 0.0, w: 0.1, h: 0.1 },
+                        bbox: BoundingBox {
+                            x: 0.0,
+                            y: 0.0,
+                            w: 0.1,
+                            h: 0.1,
+                        },
                         landmarks: None,
                         detection_confidence: 0.95,
                         embedding: Some(vec![1.0, 0.0]),
@@ -477,7 +492,12 @@ mod tests {
                 &NewFace {
                     media_id,
                     shoot_id,
-                    bbox: BoundingBox { x: 0.0, y: 0.0, w: 0.1, h: 0.1 },
+                    bbox: BoundingBox {
+                        x: 0.0,
+                        y: 0.0,
+                        w: 0.1,
+                        h: 0.1,
+                    },
                     landmarks: None,
                     detection_confidence: 0.9,
                     embedding: Some(vec![1.0, 0.0]),
@@ -542,7 +562,11 @@ mod tests {
             5,
             "face_count counts rows, one per sampled frame"
         );
-        assert_eq!(person_count_of(&conn, media_id), 1, "but there is only one person in the clip");
+        assert_eq!(
+            person_count_of(&conn, media_id),
+            1,
+            "but there is only one person in the clip"
+        );
     }
 
     /// The agreed semantics: distinct people across the whole clip, so two
@@ -607,13 +631,22 @@ mod tests {
         let conn = db.conn().unwrap();
         let shoot = shoots::create(&conn, "S", "C:\\s").unwrap();
 
-        let media_id =
-            add_media_with_faces(&conn, shoot.id, "group.jpg", false, &[(None, None), (None, None), (None, None)]);
+        let media_id = add_media_with_faces(
+            &conn,
+            shoot.id,
+            "group.jpg",
+            false,
+            &[(None, None), (None, None), (None, None)],
+        );
         media::refresh_person_counts(&conn, shoot.id).unwrap();
         assert_eq!(person_count_of(&conn, media_id), 3);
 
         // Marking one as a false detection drops the count.
-        let face_ids: Vec<i64> = faces::for_media(&conn, media_id).unwrap().iter().map(|f| f.id).collect();
+        let face_ids: Vec<i64> = faces::for_media(&conn, media_id)
+            .unwrap()
+            .iter()
+            .map(|f| f.id)
+            .collect();
         faces::ignore_many(&conn, &face_ids[..1]).unwrap();
         media::refresh_person_counts(&conn, shoot.id).unwrap();
         assert_eq!(person_count_of(&conn, media_id), 2);
@@ -657,7 +690,11 @@ mod tests {
             shoot.id,
             "solo.mp4",
             true,
-            &[(Some(0.0), Some(jonathan.id)), (Some(5.0), Some(jonathan.id)), (Some(10.0), Some(jonathan.id))],
+            &[
+                (Some(0.0), Some(jonathan.id)),
+                (Some(5.0), Some(jonathan.id)),
+                (Some(10.0), Some(jonathan.id)),
+            ],
         );
         media::refresh_person_counts(&conn, shoot.id).unwrap();
         assert_eq!(person_count_of(&conn, media_id), 1);
@@ -735,7 +772,10 @@ mod tests {
             .map(|a| a.media_count)
             .sum();
         let media_total = media::count_for_shoot(&conn, shoot_id).unwrap();
-        assert_eq!(total_in_group_size, media_total, "every file lands in exactly one size bucket");
+        assert_eq!(
+            total_in_group_size, media_total,
+            "every file lands in exactly one size bucket"
+        );
     }
 
     #[test]
@@ -785,7 +825,12 @@ mod tests {
             &NewFace {
                 media_id,
                 shoot_id,
-                bbox: BoundingBox { x: 0.0, y: 0.0, w: 0.1, h: 0.1 },
+                bbox: BoundingBox {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 0.1,
+                    h: 0.1,
+                },
                 landmarks: None,
                 detection_confidence: 0.91,
                 embedding: Some(vec![0.0, 1.0]),

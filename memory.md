@@ -632,15 +632,45 @@ adding novelty:
 9. Build the outcome dashboard and finish keyboard review undo/help.
 10. Add repeatable Windows and Apple Silicon release/signing/notarization gates.
 
-## 18. V2.0 direction (not current implementation)
+## 18. V2.0 encrypted shared catalogue prototype
 
-V2.0 is envisioned as a team media platform: NAS/server mode, remote CPU/GPU
-workers, multi-user review, live collaboration, organisation player libraries,
-editor/DAM integrations, compound search, and operational observability.
+Branch `V2.0` is version `2.0.0-alpha.1`. It was created from verified V1.2
+checkpoint `f26286c`; the SKWAD rebrand/migration checkpoint is `e1571da`.
 
-Do not begin this distributed architecture until V1.2 has repeatable installers,
-database recovery, accuracy evidence, and real editor usage measurements. The
-local/offline privacy-first mode must remain supported.
+Implemented after that checkpoint:
+
+- `skwad-catalogue` rebuilds an allow-listed portable SQLite database, combines
+  it with `manifest.json`, compresses it, and encrypts the whole payload using
+  a fresh XChaCha20-Poly1305 data key per revision.
+- Device/backend key wraps use HPKE X25519/HKDF-SHA-256/ChaCha20-Poly1305. The
+  passphrase wrap uses Argon2id with at least 64 MiB and calibrates toward 500
+  ms. A separate backend validates and signs packages with Ed25519.
+- The backend can add a recipient wrap and re-sign without re-encrypting the
+  payload. Revocation only affects future access and cannot erase a retained
+  revision.
+- Portable data includes relative references, media metadata, face boxes and
+  landmarks, named people/tags, groups/albums, ratings, picks, rankings and
+  notes. It excludes originals, proxies, thumbnails, crops, embeddings,
+  absolute paths, credentials, jobs, settings, exports and logs.
+- Device keys and cached sessions use Windows Credential Manager/macOS
+  Keychain. Never-authenticated devices are blocked. Decrypted SQLite stays in
+  memory and is zeroed on drop.
+- Shared media opens by ID through `libraryId + normalizedRelativePath`, an
+  approved device-local NAS root and a canonical containment check.
+- `supabase/` defines Auth/Postgres/Realtime/private Storage, stable UUID
+  metadata, owner/editor/viewer RLS, immutable revisions, devices, invitations,
+  notifications and audit records. Organisation workspaces remain reserved.
+- Copy export has been replaced by Windows Shell Link `.lnk` files and macOS
+  Finder aliases; original NAS media is never copied.
+- The app registers `.skwad` and has a Shared Catalogues screen for publishing,
+  offline loading after prior authentication, NAS mapping and scan-free group
+  rendering.
+
+Verification: 273 Rust tests, strict workspace Clippy, TypeScript typecheck and
+the production web bundle pass. The 10,000-reference catalogue query meets the
+five-second criterion. Supabase policy execution still needs Docker/Supabase
+CLI on the test machine; that CLI was unavailable. Independent cryptographic
+and authorization review remains mandatory before production use.
 
 ## 19. Documentation warnings
 

@@ -3,12 +3,14 @@ resolver = "2"
 members = [
     "apps/desktop/src-tauri",
     "crates/clustering",
+    "crates/catalogue",
     "crates/database",
     "crates/export-engine",
     "crates/face-detection",
     "crates/face-recognition",
     "crates/media-core",
     "crates/video-analysis",
+    "services/backend",
 ]
 
 [workspace.package]
@@ -19,6 +21,7 @@ license = "MIT"
 
 [workspace.dependencies]
 skwad-clustering = { path = "crates/clustering" }
+skwad-catalogue = { path = "crates/catalogue" }
 skwad-database = { path = "crates/database" }
 skwad-export-engine = { path = "crates/export-engine" }
 skwad-face-detection = { path = "crates/face-detection" }
@@ -42,6 +45,8 @@ strip = true
 opt-level = 3
 
 [profile.dev.package.skwad-clustering]
+opt-level = 3
+[profile.dev.package.skwad-catalogue]
 opt-level = 3
 [profile.dev.package.skwad-database]
 opt-level = 3

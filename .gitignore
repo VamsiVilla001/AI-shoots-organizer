@@ -17,6 +17,9 @@ apps/desktop/src-tauri/gen/
 !/models/manifest.json
 
 # Local data / scratch
+.env
+!.env.example
+supabase/.temp/
 *.db
 *.db-wal
 *.db-shm

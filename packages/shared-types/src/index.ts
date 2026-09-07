@@ -53,6 +53,60 @@ export type ExportStatus = 'queued' | 'running' | 'completed' | 'failed' | 'canc
 
 export type Accelerator = 'auto' | 'cpu' | 'directMl' | 'coreMl' | 'cuda'
 
+export interface CatalogueSessionStatus {
+  authenticatedOnce: boolean
+  accountId: string | null
+  deviceKeyId: string | null
+}
+
+export interface CatalogueSummary {
+  libraryId: string
+  shootId: string
+  shootName: string
+  publishedRevision: number
+  mediaCount: number
+  groupCount: number
+}
+
+export interface LoadedCatalogueInfo extends CatalogueSummary {
+  packageId: string
+  revisionId: string
+  mappedRoot: string | null
+}
+
+export interface CatalogueGroup {
+  id: number
+  stableId: string
+  name: string
+  folderName: string | null
+  notes: string | null
+  mediaCount: number
+  photoCount: number
+  videoCount: number
+}
+
+export interface CatalogueMedia {
+  id: number
+  stableId: string
+  relativePath: string
+  filename: string
+  mediaType: string
+  width: number | null
+  height: number | null
+  duration: number | null
+  rating: number
+  pickState: string
+  isBestShot: boolean
+  groupIds: number[]
+}
+
+export interface PublishSkwadResult {
+  packageId: string
+  revisionId: string
+  path: string
+  mediaCount: number
+}
+
 // ---------------------------------------------------------------------------
 // Records
 // ---------------------------------------------------------------------------

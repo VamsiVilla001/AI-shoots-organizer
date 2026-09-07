@@ -34,7 +34,15 @@ const DETECTOR_HINTS: &[&str] = &["scrfd", "retinaface", "det_", "detection", "y
 
 /// Fragments that identify a recognition/embedding model.
 const EMBEDDER_HINTS: &[&str] = &[
-    "arcface", "w600k", "glint", "recognition", "_rec", "mobileface", "r50", "r100", "webface",
+    "arcface",
+    "w600k",
+    "glint",
+    "recognition",
+    "_rec",
+    "mobileface",
+    "r50",
+    "r100",
+    "webface",
 ];
 
 pub fn classify(file_name: &str) -> ModelRole {
@@ -70,7 +78,9 @@ pub struct ModelRegistry {
 
 impl ModelRegistry {
     pub fn new(directory: impl Into<PathBuf>) -> Self {
-        Self { directory: directory.into() }
+        Self {
+            directory: directory.into(),
+        }
     }
 
     pub fn directory(&self) -> &Path {
@@ -113,7 +123,10 @@ impl ModelRegistry {
             }
             // A model named in settings that has since been deleted should not
             // silently fall back to a different one without a trace.
-            tracing::warn!(model = name, "configured model not found; falling back to auto-selection");
+            tracing::warn!(
+                model = name,
+                "configured model not found; falling back to auto-selection"
+            );
         }
 
         available
@@ -190,11 +203,7 @@ mod tests {
 
     #[test]
     fn lists_only_onnx_files() {
-        let (_dir, registry) = registry_with(&[
-            ("det_10g.onnx", 10),
-            ("w600k_r50.onnx", 20),
-            ("readme.txt", 5),
-        ]);
+        let (_dir, registry) = registry_with(&[("det_10g.onnx", 10), ("w600k_r50.onnx", 20), ("readme.txt", 5)]);
         let listed = registry.list();
         assert_eq!(listed.len(), 2);
         assert!(listed.iter().all(|m| m.name.ends_with(".onnx")));

@@ -15,7 +15,9 @@ fn main() {
     }
 
     let build_root = find_build_root().unwrap_or_else(|| {
-        panic!("OpenCV SDK not found. Run scripts/setup-opencv.ps1 or set SKWAD_OPENCV_DIR to the OpenCV build directory")
+        panic!(
+            "OpenCV SDK not found. Run scripts/setup-opencv.ps1 or set SKWAD_OPENCV_DIR to the OpenCV build directory"
+        )
     });
     let include = build_root.join("include");
     let platform_root = ["vc17", "vc16"]

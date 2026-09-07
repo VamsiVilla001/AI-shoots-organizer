@@ -7,7 +7,7 @@
 import { create } from 'zustand'
 import type { ExportProgressEvent, NoticeEvent, ProgressEvent } from '@skwad/shared-types'
 
-export type Screen = 'shoots' | 'groups' | 'players' | 'albums' | 'review' | 'export' | 'settings'
+export type Screen = 'shoots' | 'groups' | 'players' | 'albums' | 'review' | 'export' | 'catalogues' | 'settings'
 
 export interface Notice extends NoticeEvent {
   id: number

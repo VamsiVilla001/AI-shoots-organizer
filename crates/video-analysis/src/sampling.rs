@@ -45,7 +45,10 @@ pub fn plan_frames(duration: Option<f64>, scene_changes: &[f64], config: &VideoA
     if duration <= 0.0 {
         // An unknown duration still deserves one look at the opening frame.
         return FramePlan {
-            timestamps: vec![PlannedFrame { at: 0.0, from_scene_change: false }],
+            timestamps: vec![PlannedFrame {
+                at: 0.0,
+                from_scene_change: false,
+            }],
             scene_changes_found: scene_changes.len(),
             truncated: false,
         };
@@ -54,20 +57,29 @@ pub fn plan_frames(duration: Option<f64>, scene_changes: &[f64], config: &VideoA
     let mut candidates: Vec<PlannedFrame> = Vec::new();
 
     // Always look at the start; a talking-head clip may have no cuts at all.
-    candidates.push(PlannedFrame { at: 0.0, from_scene_change: false });
+    candidates.push(PlannedFrame {
+        at: 0.0,
+        from_scene_change: false,
+    });
 
     for &at in scene_changes {
         if at > 0.0 && at < duration {
             // Land just after the cut, not on it — the frame on the boundary is
             // often a dissolve or a motion-blurred transition.
-            candidates.push(PlannedFrame { at: (at + 0.2).min(duration - 0.05), from_scene_change: true });
+            candidates.push(PlannedFrame {
+                at: (at + 0.2).min(duration - 0.05),
+                from_scene_change: true,
+            });
         }
     }
 
     if config.sample_interval > 0.0 {
         let mut at = config.sample_interval;
         while at < duration {
-            candidates.push(PlannedFrame { at, from_scene_change: false });
+            candidates.push(PlannedFrame {
+                at,
+                from_scene_change: false,
+            });
             at += config.sample_interval;
         }
     }
@@ -172,8 +184,7 @@ mod tests {
     fn nearby_timestamps_collapse_and_prefer_the_cut() {
         // A cut at 4.9 sits within min_frame_gap of the 5.0 interval sample.
         let plan = plan_frames(Some(20.0), &[4.9], &config());
-        let near_five: Vec<&PlannedFrame> =
-            plan.timestamps.iter().filter(|f| (f.at - 5.0).abs() < 1.0).collect();
+        let near_five: Vec<&PlannedFrame> = plan.timestamps.iter().filter(|f| (f.at - 5.0).abs() < 1.0).collect();
         assert_eq!(near_five.len(), 1, "the pair should collapse to one frame");
         assert!(near_five[0].from_scene_change, "the scene change wins the slot");
     }
@@ -212,7 +223,10 @@ mod tests {
     #[test]
     fn scene_changes_survive_the_cap_ahead_of_interval_samples() {
         let scenes: Vec<f64> = (1..=40).map(|i| i as f64 * 30.0).collect();
-        let config = VideoAnalysisConfig { max_frames: 45, ..config() };
+        let config = VideoAnalysisConfig {
+            max_frames: 45,
+            ..config()
+        };
         let plan = plan_frames(Some(1800.0), &scenes, &config);
 
         assert!(plan.truncated);
@@ -238,7 +252,10 @@ mod tests {
 
     #[test]
     fn disabling_the_interval_leaves_only_cuts_and_the_opening_frame() {
-        let config = VideoAnalysisConfig { sample_interval: 0.0, ..config() };
+        let config = VideoAnalysisConfig {
+            sample_interval: 0.0,
+            ..config()
+        };
         let plan = plan_frames(Some(300.0), &[60.0, 120.0], &config);
         assert_eq!(plan.len(), 3);
     }

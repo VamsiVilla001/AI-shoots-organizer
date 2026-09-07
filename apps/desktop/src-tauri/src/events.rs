@@ -5,8 +5,8 @@
 //! database (§18).
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter};
 use skwad_database::models::ProcessingProgress;
+use tauri::{AppHandle, Emitter};
 
 pub const PROGRESS: &str = "skwad://progress";
 pub const SHOOT_CHANGED: &str = "skwad://shoot-changed";
@@ -69,9 +69,23 @@ pub fn emit<T: Serialize + Clone>(app: &AppHandle, event: &str, payload: T) {
 }
 
 pub fn notice(app: &AppHandle, level: &str, message: impl Into<String>) {
-    emit(app, NOTICE, Notice { level: level.to_string(), message: message.into() });
+    emit(
+        app,
+        NOTICE,
+        Notice {
+            level: level.to_string(),
+            message: message.into(),
+        },
+    );
 }
 
 pub fn shoot_changed(app: &AppHandle, shoot_id: i64, reason: &str) {
-    emit(app, SHOOT_CHANGED, ShootChanged { shoot_id, reason: reason.to_string() });
+    emit(
+        app,
+        SHOOT_CHANGED,
+        ShootChanged {
+            shoot_id,
+            reason: reason.to_string(),
+        },
+    );
 }

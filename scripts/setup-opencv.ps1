@@ -15,7 +15,15 @@ if (-not (Test-Path -LiteralPath $archive)) {
         -OutFile $archive
 }
 
-$actualSha256 = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash
+$sha256 = [System.Security.Cryptography.SHA256]::Create()
+$archiveStream = [System.IO.File]::OpenRead($archive)
+try {
+    $actualSha256 = [System.BitConverter]::ToString($sha256.ComputeHash($archiveStream)).Replace('-', '')
+}
+finally {
+    $archiveStream.Dispose()
+    $sha256.Dispose()
+}
 if ($actualSha256 -ne $expectedSha256) {
     throw "OpenCV download checksum mismatch. Expected $expectedSha256 but received $actualSha256"
 }

@@ -67,7 +67,10 @@ pub fn knn_graph(embeddings: &[Vec<f32>], k: usize, min_similarity: f32) -> Vec<
         return vec![Vec::new(); n];
     }
     if n > LARGE_SET_WARNING {
-        tracing::warn!(faces = n, "clustering a very large face set; this pass may take a while");
+        tracing::warn!(
+            faces = n,
+            "clustering a very large face set; this pass may take a while"
+        );
     }
 
     // Each row scans every other embedding but keeps only the best k, so peak
@@ -112,7 +115,10 @@ pub fn knn_graph(embeddings: &[Vec<f32>], k: usize, min_similarity: f32) -> Vec<
         for neighbour in neighbours {
             let already = graph[neighbour.index].iter().any(|m| m.index == i);
             if !already {
-                additions[neighbour.index].push(Neighbour { index: i, similarity: neighbour.similarity });
+                additions[neighbour.index].push(Neighbour {
+                    index: i,
+                    similarity: neighbour.similarity,
+                });
             }
         }
     }
@@ -170,7 +176,10 @@ mod tests {
 
         assert_eq!(graph[0][0].index, 1);
         assert_eq!(graph[2][0].index, 3);
-        assert!(graph[0].iter().all(|n| n.index != 2), "unrelated faces must not connect");
+        assert!(
+            graph[0].iter().all(|n| n.index != 2),
+            "unrelated faces must not connect"
+        );
     }
 
     #[test]
@@ -193,7 +202,8 @@ mod tests {
             for neighbour in row {
                 assert!(
                     graph[neighbour.index].iter().any(|m| m.index == i),
-                    "edge {i}->{} has no reverse", neighbour.index
+                    "edge {i}->{} has no reverse",
+                    neighbour.index
                 );
             }
         }

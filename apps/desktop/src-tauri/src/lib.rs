@@ -1,5 +1,6 @@
 //! SKWAD Media Organiser — application wiring.
 
+pub mod catalogue;
 pub mod commands;
 pub mod events;
 pub mod export;
@@ -14,8 +15,8 @@ pub mod worker;
 
 use std::sync::Arc;
 
-use tauri::Manager;
 use skwad_database::Database;
+use tauri::Manager;
 
 use crate::paths::AppPaths;
 use crate::settings::AppSettings;
@@ -76,6 +77,16 @@ pub fn run() {
             commands::get_settings,
             commands::update_settings,
             commands::model_status,
+            catalogue::catalogue_session_status,
+            catalogue::sign_in_skwad,
+            catalogue::clear_authenticated_session,
+            catalogue::publish_skwad,
+            catalogue::load_skwad,
+            catalogue::approve_catalogue_library,
+            catalogue::list_loaded_catalogues,
+            catalogue::list_catalogue_groups,
+            catalogue::list_catalogue_media,
+            catalogue::open_catalogue_media,
             // shoots
             commands::list_shoots,
             commands::get_shoot,

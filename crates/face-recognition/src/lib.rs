@@ -76,7 +76,12 @@ impl Embedding {
         if self.0.len() != other.0.len() {
             return 0.0;
         }
-        self.0.iter().zip(&other.0).map(|(a, b)| a * b).sum::<f32>().clamp(-1.0, 1.0)
+        self.0
+            .iter()
+            .zip(&other.0)
+            .map(|(a, b)| a * b)
+            .sum::<f32>()
+            .clamp(-1.0, 1.0)
     }
 }
 
@@ -154,10 +159,18 @@ mod tests {
         use skwad_face_detection::Rect;
         let image = RgbImage::new(200, 200);
         let detection = Detection {
-            bbox: Rect { x1: 50.0, y1: 50.0, x2: 150.0, y2: 150.0 },
+            bbox: Rect {
+                x1: 50.0,
+                y1: 50.0,
+                x2: 150.0,
+                y2: 150.0,
+            },
             score: 0.9,
             landmarks: None,
         };
-        assert_eq!(prepare_face(&image, &detection).dimensions(), (ALIGNED_SIZE, ALIGNED_SIZE));
+        assert_eq!(
+            prepare_face(&image, &detection).dimensions(),
+            (ALIGNED_SIZE, ALIGNED_SIZE)
+        );
     }
 }

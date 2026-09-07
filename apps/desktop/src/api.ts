@@ -37,6 +37,11 @@ import type {
   Shoot,
   ShootSummary,
   VideoTimeline,
+  CatalogueSessionStatus,
+  LoadedCatalogueInfo,
+  CatalogueGroup,
+  CatalogueMedia,
+  PublishSkwadResult,
 } from '@skwad/shared-types'
 
 /** Backend errors arrive as `{ message }`; normalise to a throwable Error. */
@@ -59,6 +64,23 @@ export const getSettings = () => call<AppSettings>('get_settings')
 export const updateSettings = (settings: AppSettings) =>
   call<AppSettings>('update_settings', { settings })
 export const modelStatus = () => call<ModelStatus>('model_status')
+export const catalogueSessionStatus = () => call<CatalogueSessionStatus>('catalogue_session_status')
+export const signInSkwad = (email: string, password: string) =>
+  call<CatalogueSessionStatus>('sign_in_skwad', { email, password })
+export const clearAuthenticatedSession = () => call<void>('clear_authenticated_session')
+export const publishSkwad = (shootId: number, destination: string, passphrase: string) =>
+  call<PublishSkwadResult>('publish_skwad', { shootId, destination, passphrase })
+export const loadSkwad = (path: string, passphrase?: string | null) =>
+  call<LoadedCatalogueInfo>('load_skwad', { path, passphrase: passphrase ?? null })
+export const approveCatalogueLibrary = (packageId: string, revisionId: string, root: string) =>
+  call<LoadedCatalogueInfo>('approve_catalogue_library', { packageId, revisionId, root })
+export const listLoadedCatalogues = () => call<LoadedCatalogueInfo[]>('list_loaded_catalogues')
+export const listCatalogueGroups = (packageId: string, revisionId: string) =>
+  call<CatalogueGroup[]>('list_catalogue_groups', { packageId, revisionId })
+export const listCatalogueMedia = (packageId: string, revisionId: string, groupId?: number | null) =>
+  call<CatalogueMedia[]>('list_catalogue_media', { packageId, revisionId, groupId: groupId ?? null })
+export const openCatalogueMedia = (packageId: string, revisionId: string, mediaId: number) =>
+  call<void>('open_catalogue_media', { packageId, revisionId, mediaId })
 
 // --- shoots ----------------------------------------------------------------
 

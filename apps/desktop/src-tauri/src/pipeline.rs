@@ -658,10 +658,10 @@ pub fn generate_video_proxy(proxies: &VideoProxyCache, gstreamer: &Gstreamer, it
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Barrier};
     use skwad_database::models::{MediaType, NewMedia};
     use skwad_database::repo::shoots;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier};
 
     /// Writes a real JPEG so the decode path is genuinely exercised.
     fn write_jpeg(path: &std::path::Path) {

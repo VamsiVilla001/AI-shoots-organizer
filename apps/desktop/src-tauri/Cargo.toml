@@ -19,6 +19,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 skwad-clustering = { path = "../../../crates/clustering" }
+skwad-catalogue = { path = "../../../crates/catalogue" }
 skwad-database = { path = "../../../crates/database" }
 skwad-export-engine = { path = "../../../crates/export-engine" }
 skwad-face-detection = { path = "../../../crates/face-detection" }
@@ -37,11 +38,17 @@ thiserror = "2.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = "0.4"
+base64 = "0.22"
+blake3 = "1.8"
 image = "0.25"
+keyring = { version = "3.6", features = ["windows-native", "apple-native"] }
 num_cpus = "1.17"
 parking_lot = "0.12"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1.18", features = ["v4"] }
+zeroize = "1.8"
 
 [dev-dependencies]
 tempfile = "3.27"

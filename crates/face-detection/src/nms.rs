@@ -30,14 +30,18 @@ mod tests {
     use crate::Rect;
 
     fn detection(x1: f32, y1: f32, x2: f32, y2: f32, score: f32) -> Detection {
-        Detection { bbox: Rect { x1, y1, x2, y2 }, score, landmarks: None }
+        Detection {
+            bbox: Rect { x1, y1, x2, y2 },
+            score,
+            landmarks: None,
+        }
     }
 
     #[test]
     fn collapses_duplicates_and_keeps_the_best() {
         let input = vec![
             detection(0.0, 0.0, 10.0, 10.0, 0.80),
-            detection(1.0, 1.0, 11.0, 11.0, 0.95), // same face, more confident
+            detection(1.0, 1.0, 11.0, 11.0, 0.95),   // same face, more confident
             detection(50.0, 50.0, 60.0, 60.0, 0.70), // a different face
         ];
         let kept = non_max_suppression(input, 0.4, 64);

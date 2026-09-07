@@ -13,6 +13,7 @@ import { AlbumsScreen } from './screens/AlbumsScreen'
 import { ReviewScreen } from './screens/ReviewScreen'
 import { ExportScreen } from './screens/ExportScreen'
 import { SettingsScreen } from './screens/SettingsScreen'
+import { CataloguesScreen } from './screens/CataloguesScreen'
 
 export default function App() {
   const screen = useUi((s) => s.screen)
@@ -34,6 +35,7 @@ export default function App() {
         {screen === 'albums' && <AlbumsScreen />}
         {screen === 'review' && <ReviewScreen />}
         {screen === 'export' && <ExportScreen />}
+        {screen === 'catalogues' && <CataloguesScreen />}
         {screen === 'settings' && <SettingsScreen />}
       </main>
       {viewerMediaId !== null && <MediaViewer mediaId={viewerMediaId} />}

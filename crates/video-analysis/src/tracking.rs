@@ -204,7 +204,7 @@ mod tests {
                 height: 0.5,
             }],
         )[0]
-            .expect("the edge box should still track");
+        .expect("the edge box should still track");
         assert!(tracked.bbox.x + tracked.bbox.width <= 1.0);
         assert!(tracked.bbox.y + tracked.bbox.height <= 1.0);
     }

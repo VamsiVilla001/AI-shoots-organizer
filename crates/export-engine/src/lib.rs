@@ -1,9 +1,7 @@
 //! Export (§11).
 //!
-//! The end of the workflow: take the albums the application produced and lay
-//! the *original* files out in folders an editor can open. The one hard rule
-//! is that source media is never modified, moved or renamed in place — every
-//! operation here writes to the destination folder and only reads from source.
+//! The end of the workflow: lay native references to originals into group
+//! folders. Original media is never copied, modified, moved or renamed.
 
 pub mod naming;
 
@@ -65,7 +63,7 @@ pub struct ExportOptions {
     /// `AiAlbums` only: restrict the export to these players. `None` exports
     /// everyone.
     pub person_ids: Option<Vec<i64>>,
-    /// Copy access and modification times onto the exported file.
+    /// Retained for V1 settings compatibility; shortcuts do not copy metadata.
     pub preserve_metadata: bool,
     pub existing: ExistingFilePolicy,
     /// `AiAlbums` only: also write multi-player albums as their own folders.
@@ -224,7 +222,7 @@ pub struct ExportProgress {
     pub bytes_done: u64,
 }
 
-/// Executes a plan, copying originals into place.
+/// Executes a plan, creating native shortcuts to originals.
 ///
 /// `should_continue` is polled between files so the UI can cancel a long
 /// export; `on_progress` reports after each one.
@@ -245,7 +243,7 @@ pub fn execute(
             return Err(ExportError::Cancelled);
         }
 
-        let target = destination.join(&item.relative);
+        let target = native_shortcut_path(&destination.join(&item.relative));
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent).map_err(|e| ExportError::Io {
                 path: parent.display().to_string(),
@@ -263,32 +261,18 @@ pub fn execute(
             _ => target,
         };
 
-        std::fs::copy(&item.source, &final_target).map_err(|e| ExportError::Io {
-            path: item.source.display().to_string(),
-            message: e.to_string(),
-        })?;
-
-        if options.preserve_metadata {
-            // Best effort: a destination that cannot hold timestamps (some
-            // network shares) should not fail the export.
-            if let Ok(meta) = std::fs::metadata(&item.source) {
-                if let Ok(modified) = meta.modified() {
-                    let time = filetime::FileTime::from_system_time(modified);
-                    if let Err(e) = filetime::set_file_mtime(&final_target, time) {
-                        tracing::debug!(path = %final_target.display(), error = %e, "could not preserve mtime");
-                    }
-                }
-            }
-        }
+        create_native_shortcut(&item.source, &final_target)?;
 
         progress.files_done += 1;
-        progress.bytes_done += item.size;
+        progress.bytes_done += std::fs::metadata(&final_target)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
         on_progress(progress);
     }
 
     if options.write_manifest {
         // Best effort: a manifest that could not be written is worth a log
-        // line, not a failed export of files that already copied fine.
+        // line, not a failed export of shortcuts already created successfully.
         if let Err(e) = write_manifest(plan, destination) {
             tracing::warn!(error = %e, "could not write the sorting report");
         }
@@ -297,7 +281,7 @@ pub fn execute(
     Ok(progress)
 }
 
-/// The name of the one file an export creates that is not a copy of a source
+/// The name of the one file an export creates that is not a native shortcut
 /// file. Prefixed with `_` so it sorts above the group folders.
 pub const MANIFEST_FILENAME: &str = "_sorting-report.txt";
 
@@ -312,7 +296,10 @@ pub fn write_manifest(plan: &ExportPlan, destination: &Path) -> std::io::Result<
     let _ = writeln!(report, "Destination : {}", destination.display());
     let _ = writeln!(report, "Folders     : {}", plan.folders.len());
     let _ = writeln!(report, "Files       : {}", plan.items.len());
-    let _ = writeln!(report, "\nOriginals were copied. The source folder was not modified.\n");
+    let _ = writeln!(
+        report,
+        "\nNative shortcuts were created. No original media was copied or modified.\n"
+    );
 
     let mut current = String::new();
     for item in &plan.items {
@@ -334,7 +321,10 @@ pub fn write_manifest(plan: &ExportPlan, destination: &Path) -> std::io::Result<
 
 fn next_free_name(target: &Path) -> PathBuf {
     let parent = target.parent().unwrap_or(Path::new("."));
-    let stem = target.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    let stem = target
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
     let extension = target.extension().map(|e| e.to_string_lossy().to_string());
 
     for n in 2..10_000 {
@@ -347,6 +337,88 @@ fn next_free_name(target: &Path) -> PathBuf {
         }
     }
     target.to_path_buf()
+}
+
+fn native_shortcut_path(logical: &Path) -> PathBuf {
+    let name = logical.file_name().unwrap_or_default().to_string_lossy();
+    #[cfg(target_os = "windows")]
+    let shortcut_name = format!("{name}.lnk");
+    #[cfg(target_os = "macos")]
+    let shortcut_name = format!("{name}.alias");
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let shortcut_name = format!("{name}.desktop");
+    logical.with_file_name(shortcut_name)
+}
+
+#[cfg(target_os = "windows")]
+fn create_native_shortcut(source: &Path, target: &Path) -> Result<()> {
+    use windows::{
+        core::{Interface, HSTRING, PCWSTR},
+        Win32::{
+            System::Com::{
+                CoCreateInstance, CoInitializeEx, CoUninitialize, IPersistFile, CLSCTX_INPROC_SERVER,
+                COINIT_APARTMENTTHREADED,
+            },
+            UI::Shell::{IShellLinkW, ShellLink},
+        },
+    };
+
+    let source_text = HSTRING::from(source.as_os_str());
+    let target_text = HSTRING::from(target.as_os_str());
+    let result = unsafe {
+        let initialized = CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok();
+        if let Err(error) = initialized {
+            return Err(ExportError::Io {
+                path: target.display().to_string(),
+                message: error.to_string(),
+            });
+        }
+        let operation = (|| -> windows::core::Result<()> {
+            let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)?;
+            link.SetPath(PCWSTR(source_text.as_ptr()))?;
+            let persist: IPersistFile = link.cast()?;
+            persist.Save(PCWSTR(target_text.as_ptr()), true)?;
+            Ok(())
+        })();
+        CoUninitialize();
+        operation
+    };
+    result.map_err(|error| ExportError::Io {
+        path: target.display().to_string(),
+        message: error.to_string(),
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn create_native_shortcut(source: &Path, target: &Path) -> Result<()> {
+    let status = std::process::Command::new("osascript")
+        .args(["-e", "on run argv", "-e", "tell application \"Finder\" to make alias file to POSIX file (item 1 of argv) at POSIX file (item 2 of argv)", "-e", "end run", "--"])
+        .arg(source)
+        .arg(target.parent().unwrap_or_else(|| Path::new(".")))
+        .status()
+        .map_err(|error| ExportError::Io { path: target.display().to_string(), message: error.to_string() })?;
+    if !status.success() {
+        return Err(ExportError::Io {
+            path: target.display().to_string(),
+            message: "Finder could not create the alias".into(),
+        });
+    }
+    let created = target
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(source.file_name().unwrap_or_default());
+    std::fs::rename(&created, target).map_err(|error| ExportError::Io {
+        path: target.display().to_string(),
+        message: error.to_string(),
+    })
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn create_native_shortcut(_source: &Path, target: &Path) -> Result<()> {
+    Err(ExportError::Io {
+        path: target.display().to_string(),
+        message: "native shortcut export is currently supported on Windows and macOS".into(),
+    })
 }
 
 #[cfg(test)]
@@ -392,7 +464,10 @@ mod tests {
 
     #[test]
     fn photos_and_videos_can_share_one_folder() {
-        let options = ExportOptions { split_photos_videos: false, ..Default::default() };
+        let options = ExportOptions {
+            split_photos_videos: false,
+            ..Default::default()
+        };
         let plan = plan(&groups(), &options);
         let relatives: Vec<String> = plan
             .items
@@ -443,7 +518,10 @@ mod tests {
 
     #[test]
     fn empty_groups_are_dropped() {
-        let groups = vec![ExportGroup { name: "Nobody".into(), files: vec![] }];
+        let groups = vec![ExportGroup {
+            name: "Nobody".into(),
+            files: vec![],
+        }];
         assert!(plan(&groups, &ExportOptions::default()).is_empty());
     }
 
@@ -484,7 +562,7 @@ mod tests {
         let report = std::fs::read_to_string(dest_dir.path().join(MANIFEST_FILENAME)).unwrap();
         assert!(report.contains("Jonathan"));
         assert!(report.contains("IMG_0231.JPG"));
-        assert!(report.contains("was not modified"));
+        assert!(report.contains("No original media was copied or modified"));
     }
 
     #[test]
@@ -514,12 +592,14 @@ mod tests {
     fn exporting_into_the_source_folder_is_refused() {
         let source = PathBuf::from("C:\\BGMS_Final_Shoot");
         assert!(validate_destination(Path::new("C:\\BGMS_Final_Shoot"), std::slice::from_ref(&source)).is_err());
-        assert!(validate_destination(Path::new("C:\\BGMS_Final_Shoot\\Export"), std::slice::from_ref(&source)).is_err());
+        assert!(
+            validate_destination(Path::new("C:\\BGMS_Final_Shoot\\Export"), std::slice::from_ref(&source)).is_err()
+        );
         assert!(validate_destination(Path::new("D:\\Export"), &[source]).is_ok());
     }
 
     #[test]
-    fn execute_copies_files_and_leaves_the_source_alone() {
+    fn execute_creates_shortcuts_and_leaves_the_source_alone() {
         let source_dir = tempfile::tempdir().unwrap();
         let dest_dir = tempfile::tempdir().unwrap();
 
@@ -538,8 +618,8 @@ mod tests {
         let progress = execute(&plan, dest_dir.path(), &ExportOptions::default(), || true, |_| {}).unwrap();
         assert_eq!(progress.files_done, 1);
 
-        let exported = dest_dir.path().join("Jonathan").join("Photos").join("IMG_0231.JPG");
-        assert_eq!(std::fs::read(&exported).unwrap(), b"original bytes");
+        let exported = native_shortcut_path(&dest_dir.path().join("Jonathan").join("Photos").join("IMG_0231.JPG"));
+        assert!(exported.is_file());
         // The source must be untouched and still present.
         assert_eq!(std::fs::read(&source_file).unwrap(), b"original bytes");
     }
@@ -559,9 +639,17 @@ mod tests {
             }],
             folders: vec!["Jonathan".into()],
         };
-        let options = ExportOptions { existing: ExistingFilePolicy::Skip, ..Default::default() };
+        let options = ExportOptions {
+            existing: ExistingFilePolicy::Skip,
+            ..Default::default()
+        };
 
-        assert_eq!(execute(&plan, dest_dir.path(), &options, || true, |_| {}).unwrap().files_done, 1);
+        assert_eq!(
+            execute(&plan, dest_dir.path(), &options, || true, |_| {})
+                .unwrap()
+                .files_done,
+            1
+        );
         let second = execute(&plan, dest_dir.path(), &options, || true, |_| {}).unwrap();
         assert_eq!(second.files_done, 0);
         assert_eq!(second.files_skipped, 1);

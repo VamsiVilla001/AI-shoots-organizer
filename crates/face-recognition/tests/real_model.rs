@@ -23,28 +23,28 @@ fn model_dir() -> Option<PathBuf> {
     let dir = if cfg!(windows) {
         PathBuf::from(std::env::var("APPDATA").ok()?).join("com.skwad.mediaorganiser/models")
     } else {
-        PathBuf::from(std::env::var("HOME").ok()?)
-            .join("Library/Application Support/com.skwad.mediaorganiser/models")
+        PathBuf::from(std::env::var("HOME").ok()?).join("Library/Application Support/com.skwad.mediaorganiser/models")
     };
     dir.is_dir().then_some(dir)
 }
 
 fn find_embedder() -> Option<PathBuf> {
     let dir = model_dir()?;
-    std::fs::read_dir(dir)
-        .ok()?
-        .flatten()
-        .map(|e| e.path())
-        .find(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.contains("w600k") || n.contains("arcface"))
-        })
+    std::fs::read_dir(dir).ok()?.flatten().map(|e| e.path()).find(|p| {
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.contains("w600k") || n.contains("arcface"))
+    })
 }
 
 fn face_at(x: f32, y: f32) -> Detection {
     Detection {
-        bbox: Rect { x1: x, y1: y, x2: x + 100.0, y2: y + 100.0 },
+        bbox: Rect {
+            x1: x,
+            y1: y,
+            x2: x + 100.0,
+            y2: y + 100.0,
+        },
         score: 0.9,
         landmarks: None,
     }
@@ -59,7 +59,9 @@ fn batched_embedding_is_correct_and_quiet() {
 
     // Print ORT's logging to stderr so a suppressed message is visibly absent
     // and an unsuppressed one is visibly present.
-    let _ = tracing_subscriber::fmt().with_max_level(tracing::Level::TRACE).try_init();
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .try_init();
 
     let mut embedder = ArcFaceEmbedder::load(&model, &SessionConfig::default()).expect("failed to load model");
 
@@ -78,7 +80,10 @@ fn batched_embedding_is_correct_and_quiet() {
         let embedding = result.as_ref().unwrap_or_else(|e| panic!("face {i} failed: {e}"));
         assert_eq!(embedding.dim(), embedder.dim());
         let norm: f32 = embedding.as_slice().iter().map(|v| v * v).sum::<f32>().sqrt();
-        assert!((norm - 1.0).abs() < 1e-3, "face {i} embedding is not unit length: {norm}");
+        assert!(
+            (norm - 1.0).abs() < 1e-3,
+            "face {i} embedding is not unit length: {norm}"
+        );
     }
 
     // Different crops of a gradient must not collapse to the same vector —
@@ -112,7 +117,10 @@ fn every_provider_embeds_a_whole_frame_correctly() {
     let detections: Vec<Detection> = (0..9).map(|i| face_at(20.0 + i as f32 * 130.0, 40.0)).collect();
 
     for accelerator in [Accelerator::Cpu, Accelerator::Auto] {
-        let config = SessionConfig { accelerator, ..SessionConfig::default() };
+        let config = SessionConfig {
+            accelerator,
+            ..SessionConfig::default()
+        };
         let mut embedder = match ArcFaceEmbedder::load(&model, &config) {
             Ok(e) => e,
             Err(e) => {
@@ -130,6 +138,10 @@ fn every_provider_embeds_a_whole_frame_correctly() {
             let norm: f32 = embedding.as_slice().iter().map(|v| v * v).sum::<f32>().sqrt();
             assert!((norm - 1.0).abs() < 1e-3, "{accelerator:?} face {i} not unit length");
         }
-        println!("{accelerator:?}: {} faces embedded, max_batch = {}", embeddings.len(), embedder.max_batch());
+        println!(
+            "{accelerator:?}: {} faces embedded, max_batch = {}",
+            embeddings.len(),
+            embedder.max_batch()
+        );
     }
 }

@@ -397,7 +397,9 @@ pub fn refresh_person_counts(conn: &Connection, shoot_id: i64) -> Result<()> {
 pub fn existing_content_keys(conn: &Connection, shoot_id: i64) -> Result<std::collections::HashMap<String, String>> {
     let mut stmt = conn.prepare("SELECT path, content_key FROM media WHERE shoot_id = ?1")?;
     let mut out = std::collections::HashMap::new();
-    let rows = stmt.query_map(params![shoot_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+    let rows = stmt.query_map(params![shoot_id], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+    })?;
     for row in rows {
         let (path, key) = row?;
         out.insert(path, key);
@@ -419,7 +421,11 @@ pub fn pending(conn: &Connection, shoot_id: i64, limit: i64) -> Result<Vec<Media
 }
 
 pub fn count_for_shoot(conn: &Connection, shoot_id: i64) -> Result<i64> {
-    Ok(conn.query_row("SELECT COUNT(*) FROM media WHERE shoot_id = ?1", params![shoot_id], |r| r.get(0))?)
+    Ok(conn.query_row(
+        "SELECT COUNT(*) FROM media WHERE shoot_id = ?1",
+        params![shoot_id],
+        |r| r.get(0),
+    )?)
 }
 
 /// The media grid query. Built as dynamic SQL because the filters in §23 and
@@ -558,7 +564,11 @@ mod tests {
                     shoot_id: shoot.id,
                     path: format!("C:\\shoot\\{name}"),
                     filename: name.to_string(),
-                    media_type: if name.ends_with("mp4") { MediaType::Video } else { MediaType::Photo },
+                    media_type: if name.ends_with("mp4") {
+                        MediaType::Video
+                    } else {
+                        MediaType::Photo
+                    },
                     extension: name.split('.').next_back().unwrap().to_string(),
                     file_size: 100 + i as i64,
                     content_key: format!("key{i}"),
@@ -658,7 +668,11 @@ mod tests {
         let shoot_id = seed(&conn);
         let videos = query(
             &conn,
-            &MediaQuery { shoot_id: Some(shoot_id), media_type: Some("video".into()), ..Default::default() },
+            &MediaQuery {
+                shoot_id: Some(shoot_id),
+                media_type: Some("video".into()),
+                ..Default::default()
+            },
         )
         .unwrap();
         assert_eq!(videos.len(), 1);
@@ -708,7 +722,10 @@ mod tests {
         let shoot_id = seed(&conn);
         let all = query(
             &conn,
-            &MediaQuery { shoot_id: Some(shoot_id), ..Default::default() },
+            &MediaQuery {
+                shoot_id: Some(shoot_id),
+                ..Default::default()
+            },
         )
         .unwrap();
 

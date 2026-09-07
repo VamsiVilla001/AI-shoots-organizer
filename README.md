@@ -7,8 +7,7 @@ export the originals into a folder per group — on a NAS share or any other
 destination.
 
 **Current stable release:** 1.0.0
-
-**Active development branch:** 1.2.0
+**V2 prototype:** 2.0.0-alpha.1 on branch `V2.0`
 
 > Reduce hours of manual footage sorting into a short review pass: name a group
 > once in the app and every file you put in it lands in a folder of that name.
@@ -16,8 +15,9 @@ destination.
 **Platforms:** Windows 10/11 · macOS (Apple Silicon)
 **Stack:** Tauri 2 · React + TypeScript · Rust · ONNX Runtime · LibRaw · FFmpeg · GStreamer · optional OpenCV tracking · SQLite
 
-Everything runs locally. No cloud APIs, no uploads; the source folder is only
-ever read — every export copies originals into a new destination.
+AI analysis, originals, proxies, thumbnails, crops and face embeddings remain
+local. V2 can publish an encrypted metadata-only `.skwad` catalogue to an
+authorised Supabase workspace; source media is never uploaded or copied.
 
 ## Repository layout
 
@@ -30,7 +30,10 @@ crates/
   face-recognition/      Landmark alignment, ArcFace embeddings
   clustering/            Player matching + unknown-face clustering
   video-analysis/        Scene detection and frame sampling over FFmpeg
-  export-engine/         Group-wise folder export (copy, never move)
+  export-engine/         Group-wise native shortcut export
+  catalogue/             Encrypted package, portable schema and path safety
+services/backend/        Backend-only validation, signing and key rewrapping
+supabase/                Local Supabase configuration, schema and RLS policies
 packages/shared-types/   TypeScript mirrors of every IPC type
 models/                  ONNX models (fetched, not committed)
 scripts/                 fetch-models, icon generation
@@ -115,7 +118,7 @@ npm run typecheck      # TypeScript
    into it, and see at a glance what is still unsorted. One click seeds the
    groups from the AI players so you correct instead of sorting from scratch,
    and manual grouping survives a re-analysis untouched.
-8. **Export** — originals are *copied* into one folder per group
+8. **Export** — native references are created in one folder per group
    (`Group/Photos|Videos`) with collision-safe names, plus a report of what
    went where; the source folder is never written to. Exporting the AI albums
    directly is still one toggle away.
@@ -131,3 +134,6 @@ noteworthy 1.0 feature inventory, and [docs/roadmap.md](docs/roadmap.md) for the
 1.2 and 2.0 product plan. Active 1.2 work is tracked in
 [docs/v1.2-progress.md](docs/v1.2-progress.md). The original plan in `docs/`
 remains the historical product specification.
+
+The V2 encrypted package boundary and local cloud startup are documented in
+[docs/skwad-v2-security.md](docs/skwad-v2-security.md).

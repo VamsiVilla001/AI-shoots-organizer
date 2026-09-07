@@ -4,10 +4,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use tauri::AppHandle;
 use skwad_database::models::{AlbumType, ExportStatus};
 use skwad_database::repo::{albums, exports, groups as groups_repo, logs, media as media_repo, shoots};
 use skwad_export_engine::{ExportGroup, ExportMode, ExportOptions, ExportPlan, SourceFile};
+use tauri::AppHandle;
 
 use crate::events;
 use crate::state::AppState;
@@ -35,7 +35,7 @@ pub fn build_groups(db: &skwad_database::Database, shoot_id: i64, options: &Expo
     }
 }
 
-/// Reads a group's membership into the files the export will copy. Files that
+/// Reads a group's membership into the files the export will reference. Files that
 /// have gone missing from the source folder since the scan are skipped with a
 /// log line rather than failing the run.
 fn collect_files(conn: &skwad_database::rusqlite::Connection, media_ids: &[i64]) -> Result<Vec<SourceFile>> {
@@ -87,7 +87,11 @@ fn build_from_manual_groups(
     Ok(out)
 }
 
-fn build_from_albums(db: &skwad_database::Database, shoot_id: i64, options: &ExportOptions) -> Result<Vec<ExportGroup>> {
+fn build_from_albums(
+    db: &skwad_database::Database,
+    shoot_id: i64,
+    options: &ExportOptions,
+) -> Result<Vec<ExportGroup>> {
     let conn = db.conn()?;
     let all = albums::list(&conn, shoot_id)?;
     let mut groups = Vec::new();
@@ -205,12 +209,7 @@ fn run(
         || !cancel.load(std::sync::atomic::Ordering::Relaxed),
         move |progress| {
             if let Ok(conn) = progress_state.db.conn() {
-                let _ = exports::set_progress(
-                    &conn,
-                    export_id,
-                    progress.files_done as i64,
-                    progress.bytes_done as i64,
-                );
+                let _ = exports::set_progress(&conn, export_id, progress.files_done as i64, progress.bytes_done as i64);
             }
             events::emit(
                 &progress_app,
@@ -267,12 +266,12 @@ fn run(
     );
 
     match error {
-        Some(message) => events::notice(&app, "error", format!("Copy failed: {message}")),
-        None if status == ExportStatus::Cancelled => events::notice(&app, "warn", "Copy cancelled."),
+        Some(message) => events::notice(&app, "error", format!("Shortcut export failed: {message}")),
+        None if status == ExportStatus::Cancelled => events::notice(&app, "warn", "Shortcut export cancelled."),
         None => events::notice(
             &app,
             "success",
-            format!("Copied {done} file(s) to {}", destination.display()),
+            format!("Created {done} native shortcut(s) in {}", destination.display()),
         ),
     }
 }
@@ -321,7 +320,12 @@ mod tests {
                 &NewFace {
                     media_id,
                     shoot_id: shoot.id,
-                    bbox: BoundingBox { x: 0.0, y: 0.0, w: 0.1, h: 0.1 },
+                    bbox: BoundingBox {
+                        x: 0.0,
+                        y: 0.0,
+                        w: 0.1,
+                        h: 0.1,
+                    },
                     landmarks: None,
                     detection_confidence: 0.9,
                     embedding: Some(vec![1.0, 0.0]),
@@ -422,7 +426,9 @@ mod tests {
         let result = preview(&db, shoot_id, scratch.path(), &album_options());
         assert!(matches!(
             result,
-            Err(ExportRunError::Engine(skwad_export_engine::ExportError::DestinationInsideSource))
+            Err(ExportRunError::Engine(
+                skwad_export_engine::ExportError::DestinationInsideSource
+            ))
         ));
     }
 
@@ -479,7 +485,7 @@ mod tests {
     }
 
     /// The whole point of the feature, end to end: names typed in the app
-    /// become folders on the destination, holding copies of the originals,
+    /// become folders on the destination, holding native shortcuts to originals,
     /// while the source folder is left exactly as it was.
     #[test]
     fn sorting_into_groups_writes_those_folders_and_leaves_the_source_alone() {
@@ -496,7 +502,10 @@ mod tests {
             let conn = db.conn().unwrap();
             let all: Vec<i64> = media_repo::query(
                 &conn,
-                &skwad_database::models::MediaQuery { shoot_id: Some(shoot_id), ..Default::default() },
+                &skwad_database::models::MediaQuery {
+                    shoot_id: Some(shoot_id),
+                    ..Default::default()
+                },
             )
             .unwrap()
             .into_iter()
@@ -511,15 +520,17 @@ mod tests {
 
         let options = ExportOptions::default();
         let plan = preview(&db, shoot_id, destination.path(), &options).unwrap();
-        let progress =
-            skwad_export_engine::execute(&plan, destination.path(), &options, || true, |_| {}).unwrap();
+        let progress = skwad_export_engine::execute(&plan, destination.path(), &options, || true, |_| {}).unwrap();
         assert_eq!(progress.files_done, 3);
 
         // The names became folders — with the colon sanitised out, since a
         // Windows path cannot hold one.
         assert!(destination.path().join("Jonathan").join("Photos").is_dir());
         assert!(destination.path().join("Mavi_ Day 2").join("Videos").is_dir());
-        assert!(destination.path().join(skwad_export_engine::MANIFEST_FILENAME).is_file());
+        assert!(destination
+            .path()
+            .join(skwad_export_engine::MANIFEST_FILENAME)
+            .is_file());
 
         // The source folder is untouched: same entries, no new subfolders.
         let after: Vec<String> = std::fs::read_dir(scratch.path())
@@ -532,8 +543,7 @@ mod tests {
         }
 
         // Re-running is cheap and does not duplicate anything.
-        let again =
-            skwad_export_engine::execute(&plan, destination.path(), &options, || true, |_| {}).unwrap();
+        let again = skwad_export_engine::execute(&plan, destination.path(), &options, || true, |_| {}).unwrap();
         assert_eq!(again.files_done, 0);
         assert_eq!(again.files_skipped, 3);
     }
@@ -590,7 +600,10 @@ mod tests {
         let default_groups = build_groups(&db, shoot_id, &album_options()).unwrap();
         assert!(!default_groups.iter().any(|g| g.name == "Single"));
 
-        let opted_in = ExportOptions { include_group_size: true, ..album_options() };
+        let opted_in = ExportOptions {
+            include_group_size: true,
+            ..album_options()
+        };
         let groups = build_groups(&db, shoot_id, &opted_in).unwrap();
         assert!(
             groups.iter().any(|g| g.name == "Single"),

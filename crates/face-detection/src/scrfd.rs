@@ -63,7 +63,12 @@ impl ScrfdDetector {
             .unwrap_or("scrfd")
             .to_string();
 
-        Ok(Self { session, input_name, config, name })
+        Ok(Self {
+            session,
+            input_name,
+            config,
+            name,
+        })
     }
 
     pub fn config(&self) -> &DetectorConfig {
@@ -137,7 +142,11 @@ impl FaceDetector for ScrfdDetector {
                 .try_extract_tensor::<f32>()
                 .map_err(|e| FaceError::BadOutput(format!("output {index}: {e}")))?;
             let channels = shape.last().copied().unwrap_or(1).max(1) as usize;
-            planes.push(Plane { rows: data.len() / channels, channels, data });
+            planes.push(Plane {
+                rows: data.len() / channels,
+                channels,
+                data,
+            });
         }
 
         let mut scores: Vec<&Plane<'_>> = planes.iter().filter(|p| p.channels == 1).collect();
@@ -208,7 +217,11 @@ impl FaceDetector for ScrfdDetector {
             }
         }
 
-        Ok(non_max_suppression(detections, self.config.nms_threshold, self.config.max_faces))
+        Ok(non_max_suppression(
+            detections,
+            self.config.nms_threshold,
+            self.config.max_faces,
+        ))
     }
 }
 

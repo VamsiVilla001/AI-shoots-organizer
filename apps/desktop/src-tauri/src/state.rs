@@ -8,6 +8,7 @@ use parking_lot::{Mutex, RwLock};
 use skwad_database::Database;
 use skwad_media_core::{ThumbnailCache, VideoProxyCache};
 
+use crate::catalogue::LoadedCatalogue;
 use crate::paths::AppPaths;
 use crate::settings::AppSettings;
 
@@ -30,6 +31,7 @@ pub struct AppState {
     /// Global pause for the worker pool.
     paused: AtomicBool,
     shutdown: Arc<AtomicBool>,
+    pub loaded_catalogues: Mutex<HashMap<String, LoadedCatalogue>>,
 }
 
 impl AppState {
@@ -47,6 +49,7 @@ impl AppState {
             cancellations: Mutex::new(HashMap::new()),
             paused: AtomicBool::new(false),
             shutdown: Arc::new(AtomicBool::new(false)),
+            loaded_catalogues: Mutex::new(HashMap::new()),
         }
     }
 

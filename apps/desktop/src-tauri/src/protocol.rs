@@ -18,9 +18,9 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use skwad_database::repo::media as media_repo;
 use tauri::http::{header, Request, Response, StatusCode};
 use tauri::{AppHandle, Manager, UriSchemeResponder};
-use skwad_database::repo::media as media_repo;
 
 use crate::state::AppState;
 

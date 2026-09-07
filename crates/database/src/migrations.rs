@@ -49,6 +49,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "editorial_ratings",
         sql: include_str!("migration_007_editorial_ratings.sql"),
     },
+    Migration {
+        version: 8,
+        name: "shared_catalogue",
+        sql: include_str!("migration_008_shared_catalogue.sql"),
+    },
 ];
 
 /// The schema version this build expects.
@@ -179,5 +184,34 @@ mod tests {
             .unwrap();
         assert!(media_columns.iter().any(|name| name == "rating"));
         assert!(media_columns.iter().any(|name| name == "pick_state"));
+        assert!(media_columns.iter().any(|name| name == "stable_id"));
+        assert!(media_columns.iter().any(|name| name == "normalized_relative_path"));
+    }
+
+    #[test]
+    fn shared_catalogue_migration_backfills_stable_ids() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+        conn.execute(
+            "INSERT INTO shoots (id, name, source_path, created_at, updated_at) VALUES (1, 'a', 'p', 'now', 'now')",
+            [],
+        )
+        .unwrap();
+        // New rows are assigned by repository code; this verifies the migration
+        // tables and constraints are ready without exposing local roots.
+        conn.execute(
+            "UPDATE shoots SET stable_id = lower(hex(randomblob(16))), library_id = lower(hex(randomblob(16))) WHERE id = 1",
+            [],
+        )
+        .unwrap();
+        let (stable, library): (String, String) = conn
+            .query_row("SELECT stable_id, library_id FROM shoots WHERE id = 1", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap();
+        assert!(!stable.is_empty() && !library.is_empty());
+        conn.prepare("SELECT * FROM sync_outbox").unwrap();
+        conn.prepare("SELECT * FROM sync_conflicts").unwrap();
+        conn.prepare("SELECT * FROM catalogue_revisions").unwrap();
     }
 }

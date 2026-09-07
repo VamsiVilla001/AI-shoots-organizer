@@ -7,9 +7,9 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tauri::AppHandle;
 use skwad_database::models::{Job, JobKind, JobState, ProcessingStatus};
 use skwad_database::repo::{jobs, logs, media as media_repo};
+use tauri::AppHandle;
 
 use crate::events;
 use crate::pipeline::{Engine, PipelineError};
@@ -333,7 +333,11 @@ fn run_media_job(
     job: &Job,
     engine: &mut Option<Engine>,
     engine_version: &mut u64,
-    action: impl FnOnce(&mut Engine, &skwad_database::Database, &skwad_database::models::Media) -> crate::pipeline::Result<()>,
+    action: impl FnOnce(
+        &mut Engine,
+        &skwad_database::Database,
+        &skwad_database::models::Media,
+    ) -> crate::pipeline::Result<()>,
 ) -> JobOutcome {
     let item = match load_media(state, job) {
         Ok(item) => item,
