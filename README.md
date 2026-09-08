@@ -15,12 +15,10 @@ export native references to the untouched originals in a folder per group.
 **Stack:** Tauri 2 · React + TypeScript · Rust · ONNX Runtime · LibRaw · FFmpeg · GStreamer · optional OpenCV tracking · SQLite
 
 AI analysis, originals, proxies, thumbnails, crops and face embeddings remain
-local. V2 can publish an encrypted metadata-only `.skwad` catalogue to an
-authorised Supabase workspace; source media is never uploaded or copied.
-The V2 desktop uses the same self-hostable Supabase service for email/password
-accounts and own-user-only cloud profiles. Development and permanent LAN
-servers are selected through environment configuration rather than hard-coded
-addresses.
+local. V2 publishes encrypted metadata-only `.skwad` catalogues; source media
+is never uploaded or copied. Authentication is local and uses a JSON credential
+file containing Argon2id password hashes. Profiles stay in the local SQLite
+database and device sessions stay in the operating-system credential manager.
 
 ## Repository layout
 
@@ -36,7 +34,7 @@ crates/
   export-engine/         Group-wise native shortcut export
   catalogue/             Encrypted package, portable schema and path safety
 services/backend/        Backend-only validation, signing and key rewrapping
-supabase/                Local Supabase configuration, schema and RLS policies
+supabase/                Retained prototype migrations; not used by local auth
 packages/shared-types/   TypeScript mirrors of every IPC type
 models/                  ONNX models (fetched, not committed)
 scripts/                 fetch-models, icon generation
@@ -63,6 +61,10 @@ npm run dev
 # package an installer
 npm run build
 ```
+
+Before signing in, provision a local account with the no-echo credential tool.
+It writes to the application-data file by default; `SKWAD_AUTH_FILE` can point
+the desktop at a shared local/LAN copy. See [local authentication](docs/local-auth.md).
 
 To test the Windows OpenCV-assisted video path, download its project-local SDK
 and launch the feature build. The normal command above remains the

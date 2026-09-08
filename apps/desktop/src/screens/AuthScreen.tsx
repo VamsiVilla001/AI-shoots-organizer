@@ -3,68 +3,71 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import * as api from '../api'
 import { useUi } from '../store'
 
-type Mode = 'signin' | 'signup'
+type Mode = 'signin' | 'changePassword'
 
 export function AuthScreen() {
   const queryClient = useQueryClient()
   const pushNotice = useUi((state) => state.pushNotice)
   const [mode, setMode] = useState<Mode>('signin')
-  const [displayName, setDisplayName] = useState('')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
+  const [newPassword, setNewPassword] = useState('')
   const [confirmation, setConfirmation] = useState('')
 
   const authenticate = useMutation({
     mutationFn: async () => {
-      if (mode === 'signup') {
-        if (password !== confirmation) throw new Error('Passwords do not match.')
-        return api.signUpSkwad(email.trim(), password, displayName.trim())
+      if (mode === 'changePassword') {
+        if (newPassword !== confirmation) throw new Error('Passwords do not match.')
+        return api.changeInitialPassword(email.trim(), password, newPassword)
       }
-      await api.signInSkwad(email.trim(), password)
-      return { signedIn: true, confirmationRequired: false }
+      return api.signInSkwad(email.trim(), password)
     },
     onSuccess: async (result) => {
       setPassword('')
-      setConfirmation('')
-      if (result.signedIn) {
-        await queryClient.invalidateQueries({ queryKey: ['catalogueSession'] })
-        pushNotice({ level: 'success', message: mode === 'signup' ? 'Your SKWAD account is ready.' : 'Signed in securely.' })
-      } else if (result.confirmationRequired) {
-        setMode('signin')
-        pushNotice({ level: 'info', message: 'Check your email to confirm the account, then sign in.' })
+      if (result.passwordChangeRequired) {
+        setMode('changePassword')
+        pushNotice({ level: 'info', message: 'Change the temporary password before continuing.' })
+        return
       }
+      setNewPassword('')
+      setConfirmation('')
+      await queryClient.invalidateQueries({ queryKey: ['catalogueSession'] })
+      pushNotice({ level: 'success', message: 'Signed in securely.' })
     },
     onError: (error) => pushNotice({ level: 'error', message: error instanceof Error ? error.message : String(error) }),
   })
 
   const submit = (event: FormEvent) => {
     event.preventDefault()
-    if (!email.trim() || !password || (mode === 'signup' && !displayName.trim())) return
+    if (!email.trim() || !password) return
+    if (mode === 'changePassword' && (!newPassword || !confirmation)) return
     authenticate.mutate()
   }
 
   return <div className="auth-shell">
     <section className="auth-panel">
       <div className="auth-brand"><span>SKWAD</span> Media Organiser</div>
-      <h1>{mode === 'signin' ? 'Welcome back' : 'Create your profile'}</h1>
-      <p className="hint">Your account controls encrypted catalogue access across authorised devices.</p>
-
-      <div className="auth-tabs" role="tablist">
-        <button role="tab" aria-selected={mode === 'signin'} className={mode === 'signin' ? 'active' : ''} type="button" onClick={() => setMode('signin')}>Sign in</button>
-        <button role="tab" aria-selected={mode === 'signup'} className={mode === 'signup' ? 'active' : ''} type="button" onClick={() => setMode('signup')}>Create account</button>
-      </div>
+      <h1>{mode === 'signin' ? 'Welcome back' : 'Set your private password'}</h1>
+      <p className="hint">
+        {mode === 'signin'
+          ? 'Sign in with an account from the local SKWAD credential file.'
+          : 'Enter the temporary password once, then choose a password used only by you.'}
+      </p>
 
       <form className="auth-form" onSubmit={submit}>
-        {mode === 'signup' && <label className="field"><span>Display name</span><input value={displayName} maxLength={80} autoComplete="name" onChange={(event) => setDisplayName(event.target.value)} /></label>}
-        <label className="field"><span>Email</span><input type="email" value={email} autoComplete="email" onChange={(event) => setEmail(event.target.value)} /></label>
-        <label className="field"><span>Password</span><input type="password" value={password} minLength={mode === 'signup' ? 8 : undefined} autoComplete={mode === 'signin' ? 'current-password' : 'new-password'} onChange={(event) => setPassword(event.target.value)} /></label>
-        {mode === 'signup' && <label className="field"><span>Confirm password</span><input type="password" value={confirmation} minLength={8} autoComplete="new-password" onChange={(event) => setConfirmation(event.target.value)} /></label>}
+        <label className="field"><span>Email</span><input type="email" value={email} autoComplete="email" disabled={mode === 'changePassword'} onChange={(event) => setEmail(event.target.value)} /></label>
+        <label className="field"><span>{mode === 'signin' ? 'Password' : 'Temporary password'}</span><input type="password" value={password} autoComplete="current-password" onChange={(event) => setPassword(event.target.value)} /></label>
+        {mode === 'changePassword' && <>
+          <label className="field"><span>New password</span><input type="password" value={newPassword} minLength={10} autoComplete="new-password" onChange={(event) => setNewPassword(event.target.value)} /></label>
+          <label className="field"><span>Confirm new password</span><input type="password" value={confirmation} minLength={10} autoComplete="new-password" onChange={(event) => setConfirmation(event.target.value)} /></label>
+        </>}
         <button className="primary auth-submit" disabled={authenticate.isPending}>
-          {authenticate.isPending ? 'Please wait…' : mode === 'signin' ? 'Sign in' : 'Create account'}
+          {authenticate.isPending ? 'Please wait…' : mode === 'signin' ? 'Sign in' : 'Change password and sign in'}
         </button>
+        {mode === 'changePassword' && <button type="button" onClick={() => { setMode('signin'); setPassword(''); setNewPassword(''); setConfirmation('') }}>Back to sign in</button>}
       </form>
 
-      <p className="auth-security">Passwords are hashed by Supabase Auth. Device keys and cached sessions stay in Windows Credential Manager or macOS Keychain—not in the media database.</p>
+      <p className="auth-security">Passwords are Argon2id-hashed in the local JSON credential file. Device keys and the signed-in session stay in Windows Credential Manager or macOS Keychain.</p>
     </section>
   </div>
 }

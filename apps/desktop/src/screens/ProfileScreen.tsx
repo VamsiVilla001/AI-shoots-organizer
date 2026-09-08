@@ -63,13 +63,13 @@ export function ProfileScreen() {
 
   return <>
     <div className="workspace-header">
-      <div><h1>Profile</h1><p>Account details stored in your protected SKWAD cloud profile.</p></div>
+      <div><h1>Profile</h1><p>Account details stored only in this SKWAD installation.</p></div>
       <button className="danger" onClick={() => signOut.mutate()} disabled={signOut.isPending}>Sign out</button>
     </div>
 
     <section className="card profile-card">
       {profile.isPending && <p className="hint">Loading profile…</p>}
-      {profile.isError && <div className="empty"><p>The cloud profile could not be loaded.</p><button onClick={() => profile.refetch()}>Try again</button></div>}
+      {profile.isError && <div className="empty"><p>The local profile could not be loaded.</p><button onClick={() => profile.refetch()}>Try again</button></div>}
       {profile.data && <form onSubmit={submit}>
         <div className="profile-heading">
           <div className="profile-avatar">{initial}</div>
@@ -77,7 +77,7 @@ export function ProfileScreen() {
         </div>
         <div className="profile-grid">
           <label className="field"><span>Display name</span><input required maxLength={80} value={form.displayName} onChange={(event) => update('displayName', event.target.value)} /></label>
-          <label className="field"><span>Email</span><input value={profile.data.email} disabled /><span className="hint">Managed by the authentication provider.</span></label>
+          <label className="field"><span>Email</span><input value={profile.data.email} disabled /><span className="hint">Managed by the local credential file.</span></label>
           <label className="field"><span>Job title</span><input maxLength={120} value={form.jobTitle ?? ''} onChange={(event) => update('jobTitle', event.target.value)} /></label>
           <label className="field"><span>Organisation</span><input maxLength={160} value={form.organisation ?? ''} onChange={(event) => update('organisation', event.target.value)} /></label>
           <label className="field"><span>Location</span><input maxLength={120} value={form.location ?? ''} onChange={(event) => update('location', event.target.value)} /></label>

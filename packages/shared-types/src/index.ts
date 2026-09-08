@@ -55,14 +55,10 @@ export type Accelerator = 'auto' | 'cpu' | 'directMl' | 'coreMl' | 'cuda'
 
 export interface CatalogueSessionStatus {
   authenticatedOnce: boolean
+  passwordChangeRequired: boolean
   accountId: string | null
   email: string | null
   deviceKeyId: string | null
-}
-
-export interface SignUpResult {
-  signedIn: boolean
-  confirmationRequired: boolean
 }
 
 export interface UserProfile {

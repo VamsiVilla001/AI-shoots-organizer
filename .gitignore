@@ -19,6 +19,8 @@ apps/desktop/src-tauri/gen/
 # Local data / scratch
 .env
 !.env.example
+credentials.json
+credentials.*.json
 supabase/.temp/
 *.db
 *.db-wal

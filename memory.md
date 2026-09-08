@@ -743,3 +743,105 @@ job title, organisation, location and bio.
 - Migrating accounts requires the Supabase `auth` schema as well as the
   application `public` schema. Moving only `profiles` does not move password
   hashes; changing the JWT secret invalidates cached sessions.
+
+## 22. Current handoff: local JSON authentication replaces Supabase
+
+This section supersedes section 21. The user explicitly rejected Supabase for
+authentication and requested a JSON credential source that can later live on a
+local/LAN server. The current implementation is local-only and is still an
+**uncommitted working-tree change** on branch `V2.0`; branch HEAD remains
+`e4d9b75 feat(auth): add application login and user profiles`.
+
+### Implemented locally
+
+- Desktop sign-in no longer calls Supabase Auth or Supabase profile tables.
+- Credentials are read from `SKWAD_AUTH_FILE` when set. The default Windows
+  path is `%APPDATA%\com.skwad.mediaorganiser\auth\credentials.json`.
+- The credential format is versioned JSON with `id`, `email`, `displayName`,
+  `passwordHash`, `enabled`, and `mustChangePassword` per user.
+- Only Argon2id PHC password hashes are accepted. `deny_unknown_fields` rejects
+  accidental plaintext `password` fields, and the file is capped at 1 MiB.
+- Email matching is case-insensitive. Missing users and wrong passwords return
+  the same generic error.
+- One initial account has been provisioned in the real app-data credential
+  file. Do not copy its email, temporary password, or hash into source,
+  documentation, logs, tests, commits, or chat responses.
+- The shared temporary-password workflow is supported. Provisioned/reset users
+  have `mustChangePassword: true`; the first valid login returns a forced
+  password-change state instead of establishing a session. The replacement
+  must contain at least 10 characters and differ from the temporary password.
+  After a successful change, the Argon2id hash is replaced and
+  `mustChangePassword` becomes false.
+- The authenticated device identity, device private key, and cached session
+  remain in Windows Credential Manager/macOS Keychain. Session status also
+  re-checks that the JSON account is enabled and no longer requires a password
+  change, so disabling a user or resetting the password prevents cached-session
+  bypass.
+- Editable profile fields are local SQLite data, stored through the existing
+  `settings` repository under `local_user_profile:<account-id>`. Credential
+  JSON contains only access identity fields, not the editable profile.
+- `skwad-credentials` is a new no-echo provisioning binary. It adds a user or
+  resets an existing user and always marks the credential for first-login
+  password change. Usage and schema are documented in
+  `docs/local-auth.md`.
+- SKWAD package signing now uses `SKWAD_BACKEND_AUTH_TOKEN` against the local
+  backend. Desktop publication no longer creates Supabase draft rows, uploads
+  packages to Supabase Storage, or refreshes Supabase sessions.
+- The backend now accepts only the configured local backend token; its Supabase
+  role-check fallback and `reqwest` dependency were removed. Encrypted package
+  signing/rewrapping still requires the separate local backend and its signing
+  and wrapping keys.
+- Supabase migrations remain in the repository as prototype history, but they
+  are not used by the current login/runtime path.
+
+### UI and command changes
+
+- The Create Account tab was removed. Accounts are administered through the
+  JSON provisioning tool.
+- `sign_in_skwad` now validates the local credential file.
+- New command `change_initial_password` verifies the temporary password,
+  rewrites its hash, clears the first-login flag, creates the local profile and
+  establishes the protected device session.
+- `CatalogueSessionStatus` now includes `passwordChangeRequired`.
+- The auth screen switches to a mandatory temporary/new/confirm password form
+  after the first successful login attempt.
+- Profile screen language now says the profile and email authority are local,
+  not cloud-hosted.
+
+### Verification completed
+
+- `cargo test -p skwad-desktop --lib`: 72 passed.
+- `cargo test -p skwad-backend`: 1 passed.
+- Strict Clippy for desktop and backend with warnings denied: passed.
+- TypeScript workspace typecheck: passed.
+- Vite production web build: passed (105 modules).
+- `git diff --check`: no whitespace errors; only expected LF/CRLF warnings.
+- Tests explicitly cover correct/wrong passwords, case-insensitive email,
+  first-change state removal, old temporary-password invalidation, new password
+  acceptance, and rejection of plaintext password fields.
+- The real credential file was inspected without printing secrets: it is
+  version 1, contains one enabled user, has an Argon2id hash, contains no
+  plaintext `password` property, and requires the first password change.
+
+The real UI password replacement has deliberately not been completed by an
+agent because the user must choose the private replacement password. Unit tests
+verify the transition. The Tauri development app is currently running via
+`npm run dev`; it is not a packaged build.
+
+### Dirty files to preserve
+
+The local-auth work currently modifies `.env.example`, `.gitignore`,
+`Cargo.lock`, `README.md`, desktop/backend Cargo manifests and Rust sources,
+the auth/profile TypeScript screens and shared types. New files are
+`apps/desktop/src-tauri/src/bin/skwad-credentials.rs` and
+`docs/local-auth.md`. Run `git status --short` for the exact list before doing
+anything, and do not discard or overwrite these changes.
+
+### Separate unresolved Windows packaging issue
+
+The previously built OpenCV-enabled installer still omits
+`opencv_world4130.dll`, causing Windows loader failure. The SDK/runtime DLL is
+present in `.opencv` and beside the direct Cargo executable, but Tauri bundle
+configuration has not yet been changed. The user explicitly stopped installer
+work and asked to run the localhost/Tauri development app instead. Do not claim
+the installer problem is fixed; resume it only when requested.

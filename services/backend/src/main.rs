@@ -20,9 +20,7 @@ const MAX_PACKAGE_BYTES: usize = 513 * 1024 * 1024;
 
 #[derive(Clone)]
 struct BackendState {
-    auth_token: Option<String>,
-    supabase_url: Option<String>,
-    supabase_anon_key: Option<String>,
+    auth_token: String,
     signing: SigningKeyPair,
     wrapping: DeviceKeyPair,
 }
@@ -126,26 +124,7 @@ async fn authorised_owner(headers: &HeaderMap, state: &BackendState) -> bool {
     else {
         return false;
     };
-    if state.auth_token.as_deref() == Some(bearer) {
-        return true;
-    }
-    let (Some(url), Some(anon)) = (&state.supabase_url, &state.supabase_anon_key) else {
-        return false;
-    };
-    let Some(workspace_id) = header_text(headers, "x-skwad-workspace-id") else {
-        return false;
-    };
-    let response = reqwest::Client::new()
-        .post(format!("{}/rest/v1/rpc/workspace_role_for", url.trim_end_matches('/')))
-        .bearer_auth(bearer)
-        .header("apikey", anon)
-        .json(&serde_json::json!({"target_workspace":workspace_id}))
-        .send()
-        .await;
-    let Ok(response) = response else {
-        return false;
-    };
-    response.status().is_success() && response.json::<String>().await.is_ok_and(|role| role == "owner")
+    bearer == state.auth_token
 }
 
 fn header_text(headers: &HeaderMap, name: &str) -> Option<String> {
@@ -159,13 +138,9 @@ fn error_response(error: impl std::fmt::Display) -> Response {
 
 impl BackendState {
     fn from_env() -> Result<Self, String> {
-        let auth_token = env::var("SKWAD_BACKEND_AUTH_TOKEN")
-            .ok()
-            .filter(|value| value.len() >= 24);
-        let supabase_url = env::var("SKWAD_SUPABASE_URL").ok();
-        let supabase_anon_key = env::var("SKWAD_SUPABASE_ANON_KEY").ok();
-        if auth_token.is_none() && (supabase_url.is_none() || supabase_anon_key.is_none()) {
-            return Err("configure either SKWAD_BACKEND_AUTH_TOKEN or the Supabase URL and anon key".into());
+        let auth_token = required("SKWAD_BACKEND_AUTH_TOKEN")?;
+        if auth_token.len() < 24 {
+            return Err("SKWAD_BACKEND_AUTH_TOKEN must contain at least 24 characters".into());
         }
         let signing_key_id = required("SKWAD_SIGNING_KEY_ID")?;
         let signing_secret = decode_fixed::<32>(&required("SKWAD_SIGNING_PRIVATE_KEY")?)?;
@@ -178,8 +153,6 @@ impl BackendState {
             .map_err(|_| "invalid wrapping public key")?;
         Ok(Self {
             auth_token,
-            supabase_url,
-            supabase_anon_key,
             signing: SigningKeyPair::from_bytes(signing_key_id, signing_secret),
             wrapping: DeviceKeyPair::from_bytes(wrapping_key_id, wrapping_private, wrapping_public)
                 .map_err(|e| e.to_string())?,
@@ -238,9 +211,7 @@ mod tests {
         let verifying = signing.verifying_key_bytes();
         let wrapping = generate_device_keypair("test-wrapping");
         let state = Arc::new(BackendState {
-            auth_token: Some("a-development-token-with-24-chars".into()),
-            supabase_url: None,
-            supabase_anon_key: None,
+            auth_token: "a-development-token-with-24-chars".into(),
             signing,
             wrapping,
         });

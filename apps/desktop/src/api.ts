@@ -43,7 +43,6 @@ import type {
   CatalogueMedia,
   PublishSkwadResult,
   ProfileUpdate,
-  SignUpResult,
   UserProfile,
 } from '@skwad/shared-types'
 
@@ -70,8 +69,8 @@ export const modelStatus = () => call<ModelStatus>('model_status')
 export const catalogueSessionStatus = () => call<CatalogueSessionStatus>('catalogue_session_status')
 export const signInSkwad = (email: string, password: string) =>
   call<CatalogueSessionStatus>('sign_in_skwad', { email, password })
-export const signUpSkwad = (email: string, password: string, displayName: string) =>
-  call<SignUpResult>('sign_up_skwad', { email, password, displayName })
+export const changeInitialPassword = (email: string, currentPassword: string, newPassword: string) =>
+  call<CatalogueSessionStatus>('change_initial_password', { email, currentPassword, newPassword })
 export const signOutSkwad = () => call<void>('sign_out_skwad')
 export const getUserProfile = () => call<UserProfile>('get_user_profile')
 export const updateUserProfile = (update: ProfileUpdate) =>

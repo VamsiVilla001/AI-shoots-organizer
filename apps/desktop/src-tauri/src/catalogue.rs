@@ -9,6 +9,10 @@ use std::{
     sync::Arc,
 };
 
+use argon2::{
+    password_hash::{PasswordHasher, SaltString},
+    Argon2, PasswordHash, PasswordVerifier,
+};
 use base64::{engine::general_purpose::STANDARD_NO_PAD as B64, Engine};
 use serde::{Deserialize, Serialize};
 use skwad_catalogue::{
@@ -30,6 +34,9 @@ use crate::{
 const CREDENTIAL_SERVICE: &str = "com.skwad.mediaorganiser";
 const CREDENTIAL_ACCOUNT: &str = "authenticated-device";
 const DEFAULT_BACKEND: &str = "http://127.0.0.1:8787";
+const LOCAL_AUTH_VERSION: u32 = 1;
+const MAX_AUTH_FILE_BYTES: u64 = 1024 * 1024;
+const PROFILE_KEY_PREFIX: &str = "local_user_profile:";
 
 pub struct LoadedCatalogue {
     pub package_id: String,
@@ -42,16 +49,10 @@ pub struct LoadedCatalogue {
 #[serde(rename_all = "camelCase")]
 pub struct SessionStatus {
     pub authenticated_once: bool,
+    pub password_change_required: bool,
     pub account_id: Option<String>,
     pub email: Option<String>,
     pub device_key_id: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SignUpResult {
-    pub signed_in: bool,
-    pub confirmation_required: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,8 +106,13 @@ struct StoredIdentity {
     account_id: String,
     #[serde(default)]
     email: String,
+    #[serde(default)]
+    display_name: String,
+    #[serde(default)]
     workspace_id: String,
+    #[serde(default)]
     access_token: String,
+    #[serde(default)]
     refresh_token: String,
     device_id: String,
     device_key_id: String,
@@ -124,45 +130,55 @@ struct BackendKeys {
     wrapping_public_key: String,
 }
 
-#[derive(Debug, Deserialize)]
-struct AuthResponse {
-    access_token: String,
-    refresh_token: String,
-    user: AuthUser,
-}
-#[derive(Debug, Deserialize)]
-struct AuthUser {
-    id: String,
-}
-#[derive(Debug, Deserialize)]
-struct WorkspaceRow {
-    id: String,
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LocalAuthFile {
+    version: u32,
+    users: Vec<LocalCredential>,
 }
 
-#[derive(Debug, Deserialize)]
-struct ProfileRow {
-    user_id: String,
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LocalCredential {
+    #[serde(default)]
+    id: Option<String>,
+    email: String,
     display_name: String,
-    avatar_url: Option<String>,
-    job_title: Option<String>,
-    organisation: Option<String>,
-    location: Option<String>,
-    bio: Option<String>,
-    created_at: String,
-    updated_at: String,
+    password_hash: String,
+    #[serde(default = "default_enabled")]
+    enabled: bool,
+    #[serde(default)]
+    must_change_password: bool,
+}
+
+#[derive(Debug)]
+struct LocalAccount {
+    id: String,
+    email: String,
+    display_name: String,
 }
 
 #[tauri::command]
-pub fn catalogue_session_status() -> Result<SessionStatus> {
-    match load_identity() {
-        Ok(identity) => Ok(SessionStatus {
+pub fn catalogue_session_status(state: State<'_, Arc<AppState>>) -> Result<SessionStatus> {
+    let identity = load_identity().ok();
+    let active_identity = identity.and_then(|identity| {
+        let auth = load_local_auth(&state).ok()?;
+        auth.users
+            .iter()
+            .any(|user| user.enabled && !user.must_change_password && user.email.eq_ignore_ascii_case(&identity.email))
+            .then_some(identity)
+    });
+    match active_identity {
+        Some(identity) => Ok(SessionStatus {
             authenticated_once: true,
+            password_change_required: false,
             account_id: Some(identity.account_id),
             email: Some(identity.email),
             device_key_id: Some(identity.device_key_id),
         }),
-        Err(_) => Ok(SessionStatus {
+        None => Ok(SessionStatus {
             authenticated_once: false,
+            password_change_required: false,
             account_id: None,
             email: None,
             device_key_id: None,
@@ -171,80 +187,50 @@ pub fn catalogue_session_status() -> Result<SessionStatus> {
 }
 
 #[tauri::command]
-pub async fn sign_in_skwad(email: String, password: String) -> Result<SessionStatus> {
+pub async fn sign_in_skwad(state: State<'_, Arc<AppState>>, email: String, password: String) -> Result<SessionStatus> {
     let password = Zeroizing::new(password);
-    let auth = password_authentication(&email, &password).await?;
-    establish_identity(auth, &email).await
+    let account = authenticate_local(&state, &email, &password)?;
+    let auth = load_local_auth(&state)?;
+    let requires_change = auth
+        .users
+        .iter()
+        .any(|user| user.enabled && user.email.eq_ignore_ascii_case(&account.email) && user.must_change_password);
+    if requires_change {
+        return Ok(SessionStatus {
+            authenticated_once: false,
+            password_change_required: true,
+            account_id: Some(account.id),
+            email: Some(account.email),
+            device_key_id: None,
+        });
+    }
+    establish_local_identity(&state, account).await
 }
 
 #[tauri::command]
-pub async fn sign_up_skwad(email: String, password: String, display_name: String) -> Result<SignUpResult> {
-    let display_name = display_name.trim();
-    if display_name.is_empty() || display_name.chars().count() > 80 {
-        return Err(command_error("display name must contain between 1 and 80 characters"));
+pub async fn change_initial_password(
+    state: State<'_, Arc<AppState>>,
+    email: String,
+    current_password: String,
+    new_password: String,
+) -> Result<SessionStatus> {
+    if new_password.chars().count() < 10 {
+        return Err(command_error("the new password must contain at least 10 characters"));
     }
-    if password.chars().count() < 8 {
-        return Err(command_error("password must contain at least 8 characters"));
-    }
-    let url = std::env::var("SKWAD_SUPABASE_URL").map_err(|_| command_error("SKWAD_SUPABASE_URL is not configured"))?;
-    let anon = std::env::var("SKWAD_SUPABASE_ANON_KEY")
-        .map_err(|_| command_error("SKWAD_SUPABASE_ANON_KEY is not configured"))?;
-    let password = Zeroizing::new(password);
-    let response = reqwest::Client::new()
-        .post(format!("{}/auth/v1/signup", url.trim_end_matches('/')))
-        .header("apikey", &anon)
-        .json(&serde_json::json!({
-            "email": email,
-            "password": password.as_str(),
-            "data": {"display_name": display_name}
-        }))
-        .send()
-        .await
-        .map_err(command_error)?;
-    if !response.status().is_success() {
+    if current_password == new_password {
         return Err(command_error(
-            "SKWAD account creation failed; check the email and password requirements",
+            "choose a new password different from the temporary password",
         ));
     }
-    let body: serde_json::Value = response.json().await.map_err(command_error)?;
-    if body.get("access_token").and_then(|value| value.as_str()).is_none() {
-        return Ok(SignUpResult {
-            signed_in: false,
-            confirmation_required: true,
-        });
-    }
-    let auth: AuthResponse = serde_json::from_value(body).map_err(command_error)?;
-    establish_identity(auth, &email).await?;
-    Ok(SignUpResult {
-        signed_in: true,
-        confirmation_required: false,
-    })
+    let current_password = Zeroizing::new(current_password);
+    let new_password = Zeroizing::new(new_password);
+    let account = authenticate_local(&state, &email, &current_password)?;
+    update_local_password(&state, &account.email, &new_password)?;
+    establish_local_identity(&state, account).await
 }
 
-async fn password_authentication(email: &str, password: &str) -> Result<AuthResponse> {
-    let url = std::env::var("SKWAD_SUPABASE_URL").map_err(|_| command_error("SKWAD_SUPABASE_URL is not configured"))?;
-    let anon = std::env::var("SKWAD_SUPABASE_ANON_KEY")
-        .map_err(|_| command_error("SKWAD_SUPABASE_ANON_KEY is not configured"))?;
-    let response = reqwest::Client::new()
-        .post(format!(
-            "{}/auth/v1/token?grant_type=password",
-            url.trim_end_matches('/')
-        ))
-        .header("apikey", &anon)
-        .json(&serde_json::json!({"email": email, "password": password}))
-        .send()
-        .await
-        .map_err(command_error)?;
-    if !response.status().is_success() {
-        return Err(command_error("SKWAD account sign-in failed"));
-    }
-    response.json().await.map_err(command_error)
-}
-
-async fn establish_identity(auth: AuthResponse, email: &str) -> Result<SessionStatus> {
-    let (url, anon) = supabase_config()?;
-    let account_id = auth.user.id;
-    let workspace_id = personal_workspace(&url, &anon, &auth.access_token, &account_id, email).await?;
+async fn establish_local_identity(state: &AppState, account: LocalAccount) -> Result<SessionStatus> {
+    let account_id = account.id;
     let existing = load_identity()
         .ok()
         .filter(|identity| identity.account_id == account_id);
@@ -270,21 +256,14 @@ async fn establish_identity(auth: AuthResponse, email: &str) -> Result<SessionSt
     if let Ok(backend_keys) = fetch_backend_keys().await {
         trusted_signing_keys.insert(backend_keys.signing_key_id, backend_keys.signing_public_key);
     }
-    let registration = reqwest::Client::new().post(format!("{}/rest/v1/devices?on_conflict=id", url.trim_end_matches('/')))
-        .header("apikey", &anon).bearer_auth(&auth.access_token).header("Prefer", "resolution=merge-duplicates")
-        .json(&serde_json::json!({"id": device_id, "user_id": account_id, "opaque_key_id": device_key_id, "hpke_public_key": device_public_key, "label": std::env::var("COMPUTERNAME").unwrap_or_else(|_| "SKWAD desktop".into())}))
-        .send().await.map_err(command_error)?;
-    if !registration.status().is_success() {
-        return Err(command_error(
-            "signed in, but the device public key could not be registered",
-        ));
-    }
+    ensure_local_profile(state, &account_id, &account.email, &account.display_name)?;
     save_identity(&StoredIdentity {
         account_id: account_id.clone(),
-        email: email.trim().to_owned(),
-        workspace_id,
-        access_token: auth.access_token,
-        refresh_token: auth.refresh_token,
+        email: account.email.clone(),
+        display_name: account.display_name,
+        workspace_id: format!("local-{account_id}"),
+        access_token: String::new(),
+        refresh_token: String::new(),
         device_id,
         device_key_id: device_key_id.clone(),
         device_private_key,
@@ -293,8 +272,9 @@ async fn establish_identity(auth: AuthResponse, email: &str) -> Result<SessionSt
     })?;
     Ok(SessionStatus {
         authenticated_once: true,
+        password_change_required: false,
         account_id: Some(account_id),
-        email: Some(email.trim().to_owned()),
+        email: Some(account.email),
         device_key_id: Some(device_key_id),
     })
 }
@@ -306,32 +286,20 @@ pub fn clear_authenticated_session() -> Result<()> {
 }
 
 #[tauri::command]
-pub async fn sign_out_skwad(state: State<'_, Arc<AppState>>) -> Result<()> {
-    if let Ok(identity) = load_identity() {
-        if let Ok((url, anon)) = supabase_config() {
-            let _ = reqwest::Client::new()
-                .post(format!("{url}/auth/v1/logout"))
-                .header("apikey", anon)
-                .bearer_auth(identity.access_token)
-                .send()
-                .await;
-        }
-    }
+pub fn sign_out_skwad(state: State<'_, Arc<AppState>>) -> Result<()> {
     state.loaded_catalogues.lock().clear();
     clear_authenticated_session()
 }
 
 #[tauri::command]
-pub async fn get_user_profile() -> Result<UserProfile> {
-    let mut identity = load_identity().map_err(|_| command_error("sign in to view your profile"))?;
-    refresh_session(&mut identity).await?;
-    fetch_profile(&identity).await
+pub fn get_user_profile(state: State<'_, Arc<AppState>>) -> Result<UserProfile> {
+    let identity = load_identity().map_err(|_| command_error("sign in to view your profile"))?;
+    load_local_profile(&state, &identity)
 }
 
 #[tauri::command]
-pub async fn update_user_profile(update: ProfileUpdate) -> Result<UserProfile> {
-    let mut identity = load_identity().map_err(|_| command_error("sign in to update your profile"))?;
-    refresh_session(&mut identity).await?;
+pub fn update_user_profile(state: State<'_, Arc<AppState>>, update: ProfileUpdate) -> Result<UserProfile> {
+    let identity = load_identity().map_err(|_| command_error("sign in to update your profile"))?;
 
     let display_name = update.display_name.trim().to_owned();
     if display_name.is_empty() || display_name.chars().count() > 80 {
@@ -344,34 +312,21 @@ pub async fn update_user_profile(update: ProfileUpdate) -> Result<UserProfile> {
             return Err(command_error("avatar URL must use HTTPS or HTTP"));
         }
     }
-    let body = serde_json::json!({
-        "display_name": display_name,
-        "avatar_url": avatar_url,
-        "job_title": clean_optional(update.job_title, 120, "job title")?,
-        "organisation": clean_optional(update.organisation, 160, "organisation")?,
-        "location": clean_optional(update.location, 120, "location")?,
-        "bio": clean_optional(update.bio, 500, "bio")?,
-    });
-    let (url, anon) = supabase_config()?;
-    let response = reqwest::Client::new()
-        .patch(format!(
-            "{url}/rest/v1/profiles?user_id=eq.{}&select=user_id,display_name,avatar_url,job_title,organisation,location,bio,created_at,updated_at",
-            identity.account_id
-        ))
-        .header("apikey", anon)
-        .bearer_auth(&identity.access_token)
-        .header("Prefer", "return=representation")
-        .json(&body)
-        .send()
-        .await
-        .map_err(command_error)?
-        .error_for_status()
-        .map_err(command_error)?;
-    let rows: Vec<ProfileRow> = response.json().await.map_err(command_error)?;
-    rows.into_iter()
-        .next()
-        .map(|row| profile_from_row(row, &identity.email))
-        .ok_or_else(|| command_error("the profile was not found"))
+    let previous = load_local_profile(&state, &identity)?;
+    let profile = UserProfile {
+        user_id: identity.account_id.clone(),
+        email: identity.email.clone(),
+        display_name,
+        avatar_url,
+        job_title: clean_optional(update.job_title, 120, "job title")?,
+        organisation: clean_optional(update.organisation, 160, "organisation")?,
+        location: clean_optional(update.location, 120, "location")?,
+        bio: clean_optional(update.bio, 500, "bio")?,
+        created_at: previous.created_at,
+        updated_at: chrono::Utc::now().to_rfc3339(),
+    };
+    save_local_profile(&state, &profile)?;
+    Ok(profile)
 }
 
 #[tauri::command]
@@ -383,7 +338,6 @@ pub async fn publish_skwad(
 ) -> Result<PublishResult> {
     let mut identity =
         load_identity().map_err(|_| command_error("sign in once before publishing a SKWAD catalogue"))?;
-    refresh_session(&mut identity).await?;
     let keys = fetch_backend_keys().await?;
     identity
         .trusted_signing_keys
@@ -460,20 +414,9 @@ pub async fn publish_skwad(
         .await
         .map_err(command_error)??;
 
-    begin_cloud_revision(
-        &identity,
-        package_id,
-        revision_id,
-        unsigned.2,
-        &unsigned.3,
-        &unsigned.4,
-        &unsigned.5,
-    )
-    .await?;
-
     let signed = reqwest::Client::new()
         .post(format!("{}/v1/packages/sign", backend_url()))
-        .bearer_auth(&identity.access_token)
+        .bearer_auth(backend_auth_token()?)
         .header("x-skwad-workspace-id", &identity.workspace_id)
         .header(reqwest::header::CONTENT_TYPE, "application/vnd.skwad.catalogue")
         .body(unsigned.0)
@@ -487,7 +430,6 @@ pub async fn publish_skwad(
         )));
     }
     let package = signed.bytes().await.map_err(command_error)?;
-    finish_cloud_revision(&identity, package_id, revision_id, &package).await?;
     let destination = package_destination(&destination);
     if let Some(parent) = destination.parent() {
         std::fs::create_dir_all(parent).map_err(command_error)?;
@@ -697,42 +639,145 @@ fn loaded_info(
     })
 }
 
-async fn fetch_profile(identity: &StoredIdentity) -> Result<UserProfile> {
-    let (url, anon) = supabase_config()?;
-    let rows: Vec<ProfileRow> = reqwest::Client::new()
-        .get(format!(
-            "{url}/rest/v1/profiles?select=user_id,display_name,avatar_url,job_title,organisation,location,bio,created_at,updated_at&user_id=eq.{}&limit=1",
-            identity.account_id
-        ))
-        .header("apikey", anon)
-        .bearer_auth(&identity.access_token)
-        .send()
-        .await
-        .map_err(command_error)?
-        .error_for_status()
-        .map_err(command_error)?
-        .json()
-        .await
-        .map_err(command_error)?;
-    rows.into_iter()
-        .next()
-        .map(|row| profile_from_row(row, &identity.email))
-        .ok_or_else(|| command_error("the profile was not found"))
+fn auth_file_path(state: &AppState) -> PathBuf {
+    std::env::var_os("SKWAD_AUTH_FILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| state.paths.root.join("auth").join("credentials.json"))
 }
 
-fn profile_from_row(row: ProfileRow, email: &str) -> UserProfile {
-    UserProfile {
-        user_id: row.user_id,
-        email: email.to_owned(),
-        display_name: row.display_name,
-        avatar_url: row.avatar_url,
-        job_title: row.job_title,
-        organisation: row.organisation,
-        location: row.location,
-        bio: row.bio,
-        created_at: row.created_at,
-        updated_at: row.updated_at,
+fn load_local_auth(state: &AppState) -> Result<LocalAuthFile> {
+    let path = auth_file_path(state);
+    let metadata = std::fs::metadata(&path).map_err(|_| {
+        command_error(format!(
+            "local credential file not found at {}; set SKWAD_AUTH_FILE or create the default file",
+            path.display()
+        ))
+    })?;
+    if metadata.len() > MAX_AUTH_FILE_BYTES {
+        return Err(command_error("local credential file exceeds the 1 MiB safety limit"));
     }
+    let bytes = std::fs::read(&path).map_err(command_error)?;
+    let auth: LocalAuthFile = serde_json::from_slice(&bytes)
+        .map_err(|error| command_error(format!("local credential file is invalid: {error}")))?;
+    if auth.version != LOCAL_AUTH_VERSION {
+        return Err(command_error(format!(
+            "unsupported local credential file version {}",
+            auth.version
+        )));
+    }
+    Ok(auth)
+}
+
+fn authenticate_local(state: &AppState, email: &str, password: &str) -> Result<LocalAccount> {
+    let email = email.trim();
+    let auth = load_local_auth(state)?;
+    let user = auth
+        .users
+        .iter()
+        .find(|user| user.enabled && user.email.eq_ignore_ascii_case(email))
+        .ok_or_else(|| command_error("email or password is incorrect"))?;
+    let parsed = PasswordHash::new(&user.password_hash)
+        .map_err(|_| command_error("the credential file contains an invalid password hash"))?;
+    Argon2::default()
+        .verify_password(password.as_bytes(), &parsed)
+        .map_err(|_| command_error("email or password is incorrect"))?;
+    let canonical_email = user.email.trim().to_lowercase();
+    let id = user
+        .id
+        .clone()
+        .filter(|id| !id.trim().is_empty())
+        .unwrap_or_else(|| format!("local-{}", &blake3::hash(canonical_email.as_bytes()).to_hex()[..32]));
+    let display_name = user.display_name.trim();
+    if canonical_email.is_empty() || display_name.is_empty() || display_name.chars().count() > 80 {
+        return Err(command_error("the credential file contains an invalid user record"));
+    }
+    Ok(LocalAccount {
+        id,
+        email: canonical_email,
+        display_name: display_name.to_owned(),
+    })
+}
+
+fn update_local_password(state: &AppState, email: &str, new_password: &str) -> Result<()> {
+    let path = auth_file_path(state);
+    let mut auth = load_local_auth(state)?;
+    let user = auth
+        .users
+        .iter_mut()
+        .find(|user| user.enabled && user.email.eq_ignore_ascii_case(email))
+        .ok_or_else(|| command_error("the local account no longer exists"))?;
+    let salt = SaltString::encode_b64(Uuid::new_v4().as_bytes()).map_err(command_error)?;
+    user.password_hash = Argon2::default()
+        .hash_password(new_password.as_bytes(), &salt)
+        .map_err(command_error)?
+        .to_string();
+    user.must_change_password = false;
+    let encoded = serde_json::to_vec_pretty(&auth).map_err(command_error)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| command_error("credential file path has no parent directory"))?;
+    std::fs::create_dir_all(parent).map_err(command_error)?;
+    let temporary = path.with_extension("json.tmp");
+    std::fs::write(&temporary, &encoded).map_err(command_error)?;
+    std::fs::copy(&temporary, &path).map_err(command_error)?;
+    let _ = std::fs::remove_file(temporary);
+    Ok(())
+}
+
+fn profile_key(account_id: &str) -> String {
+    format!("{PROFILE_KEY_PREFIX}{account_id}")
+}
+
+fn ensure_local_profile(state: &AppState, account_id: &str, email: &str, display_name: &str) -> Result<()> {
+    let conn = state.db.conn().map_err(command_error)?;
+    let key = profile_key(account_id);
+    if skwad_database::repo::settings::get_raw(&conn, &key)
+        .map_err(command_error)?
+        .is_some()
+    {
+        return Ok(());
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    let profile = UserProfile {
+        user_id: account_id.to_owned(),
+        email: email.to_owned(),
+        display_name: display_name.to_owned(),
+        avatar_url: None,
+        job_title: None,
+        organisation: None,
+        location: None,
+        bio: None,
+        created_at: now.clone(),
+        updated_at: now,
+    };
+    skwad_database::repo::settings::set(&conn, &key, &profile).map_err(command_error)
+}
+
+fn load_local_profile(state: &AppState, identity: &StoredIdentity) -> Result<UserProfile> {
+    ensure_local_profile(
+        state,
+        &identity.account_id,
+        &identity.email,
+        if identity.display_name.is_empty() {
+            identity.email.split('@').next().unwrap_or("SKWAD user")
+        } else {
+            &identity.display_name
+        },
+    )?;
+    let conn = state.db.conn().map_err(command_error)?;
+    skwad_database::repo::settings::get_raw(&conn, &profile_key(&identity.account_id))
+        .map_err(command_error)?
+        .ok_or_else(|| command_error("the local profile was not found"))
+        .and_then(|value| serde_json::from_str(&value).map_err(command_error))
+}
+
+fn save_local_profile(state: &AppState, profile: &UserProfile) -> Result<()> {
+    let conn = state.db.conn().map_err(command_error)?;
+    skwad_database::repo::settings::set(&conn, &profile_key(&profile.user_id), profile).map_err(command_error)
+}
+
+fn default_enabled() -> bool {
+    true
 }
 
 fn clean_optional(value: Option<String>, max: usize, label: &str) -> Result<Option<String>> {
@@ -762,140 +807,11 @@ async fn fetch_backend_keys() -> Result<BackendKeys> {
         .map_err(command_error)
 }
 
-async fn refresh_session(identity: &mut StoredIdentity) -> Result<()> {
-    let url = std::env::var("SKWAD_SUPABASE_URL").map_err(|_| command_error("SKWAD_SUPABASE_URL is not configured"))?;
-    let anon = std::env::var("SKWAD_SUPABASE_ANON_KEY")
-        .map_err(|_| command_error("SKWAD_SUPABASE_ANON_KEY is not configured"))?;
-    let response = reqwest::Client::new()
-        .post(format!(
-            "{}/auth/v1/token?grant_type=refresh_token",
-            url.trim_end_matches('/')
-        ))
-        .header("apikey", anon)
-        .json(&serde_json::json!({"refresh_token": identity.refresh_token}))
-        .send()
-        .await
-        .map_err(command_error)?;
-    if !response.status().is_success() {
-        return Err(command_error(
-            "your SKWAD session expired; sign in again before publishing",
-        ));
-    }
-    let auth: AuthResponse = response.json().await.map_err(command_error)?;
-    if auth.user.id != identity.account_id {
-        return Err(command_error("refreshed account does not match this device"));
-    }
-    identity.access_token = auth.access_token;
-    identity.refresh_token = auth.refresh_token;
-    save_identity(identity)
-}
-
-async fn personal_workspace(url: &str, anon: &str, token: &str, account_id: &str, email: &str) -> Result<String> {
-    let client = reqwest::Client::new();
-    let rows: Vec<WorkspaceRow> = client
-        .get(format!(
-            "{}/rest/v1/workspaces?select=id&kind=eq.personal&owner_id=eq.{}&limit=1",
-            url.trim_end_matches('/'),
-            account_id
-        ))
-        .header("apikey", anon)
-        .bearer_auth(token)
-        .send()
-        .await
-        .map_err(command_error)?
-        .error_for_status()
-        .map_err(command_error)?
-        .json()
-        .await
-        .map_err(command_error)?;
-    if let Some(row) = rows.into_iter().next() {
-        return Ok(row.id);
-    }
-    let created: Vec<WorkspaceRow> = client.post(format!("{}/rest/v1/workspaces", url.trim_end_matches('/')))
-        .header("apikey", anon).bearer_auth(token).header("Prefer", "return=representation")
-        .json(&serde_json::json!({"kind":"personal","name":format!("{}'s workspace", email.split('@').next().unwrap_or("SKWAD")),"owner_id":account_id}))
-        .send().await.map_err(command_error)?.error_for_status().map_err(command_error)?.json().await.map_err(command_error)?;
-    created
-        .into_iter()
-        .next()
-        .map(|row| row.id)
-        .ok_or_else(|| command_error("Supabase did not create a personal workspace"))
-}
-
-async fn begin_cloud_revision(
-    identity: &StoredIdentity,
-    package_id: Uuid,
-    revision_id: Uuid,
-    revision_number: i64,
-    library_id: &str,
-    shoot_id: &str,
-    shoot_name: &str,
-) -> Result<()> {
-    let (url, anon) = supabase_config()?;
-    let client = reqwest::Client::new();
-    for (endpoint, body) in [
-        (
-            "libraries",
-            serde_json::json!({"id":library_id,"workspace_id":identity.workspace_id,"label":shoot_name}),
-        ),
-        (
-            "shoots",
-            serde_json::json!({"id":shoot_id,"workspace_id":identity.workspace_id,"library_id":library_id,"name":shoot_name,"cloud_revision":revision_number}),
-        ),
-    ] {
-        client
-            .post(format!("{}/rest/v1/{}?on_conflict=id", url, endpoint))
-            .header("apikey", &anon)
-            .bearer_auth(&identity.access_token)
-            .header("Prefer", "resolution=merge-duplicates")
-            .json(&body)
-            .send()
-            .await
-            .map_err(command_error)?
-            .error_for_status()
-            .map_err(command_error)?;
-    }
-    client.post(format!("{url}/rest/v1/catalogue_revisions")).header("apikey", &anon).bearer_auth(&identity.access_token)
-        .json(&serde_json::json!({"id":revision_id,"package_id":package_id,"workspace_id":identity.workspace_id,"shoot_id":shoot_id,"revision_number":revision_number,"state":"draft","created_by":identity.account_id}))
-        .send().await.map_err(command_error)?.error_for_status().map_err(command_error)?;
-    Ok(())
-}
-
-async fn finish_cloud_revision(
-    identity: &StoredIdentity,
-    package_id: Uuid,
-    revision_id: Uuid,
-    package: &[u8],
-) -> Result<()> {
-    let (url, anon) = supabase_config()?;
-    let object_key = format!("{}/{}/{}.skwad", identity.workspace_id, package_id, revision_id);
-    let client = reqwest::Client::new();
-    client
-        .post(format!("{url}/storage/v1/object/skwad-packages/{object_key}"))
-        .header("apikey", &anon)
-        .bearer_auth(&identity.access_token)
-        .header(reqwest::header::CONTENT_TYPE, "application/vnd.skwad.catalogue")
-        .body(package.to_vec())
-        .send()
-        .await
-        .map_err(command_error)?
-        .error_for_status()
-        .map_err(command_error)?;
-    client.patch(format!("{url}/rest/v1/catalogue_revisions?id=eq.{revision_id}")).header("apikey", &anon).bearer_auth(&identity.access_token)
-        .json(&serde_json::json!({"state":"published","object_key":object_key,"ciphertext_blake3":blake3::hash(package).to_hex().to_string(),"published_at":chrono::Utc::now().to_rfc3339()}))
-        .send().await.map_err(command_error)?.error_for_status().map_err(command_error)?;
-    Ok(())
-}
-
-fn supabase_config() -> Result<(String, String)> {
-    Ok((
-        std::env::var("SKWAD_SUPABASE_URL")
-            .map_err(|_| command_error("SKWAD_SUPABASE_URL is not configured"))?
-            .trim_end_matches('/')
-            .to_owned(),
-        std::env::var("SKWAD_SUPABASE_ANON_KEY")
-            .map_err(|_| command_error("SKWAD_SUPABASE_ANON_KEY is not configured"))?,
-    ))
+fn backend_auth_token() -> Result<String> {
+    std::env::var("SKWAD_BACKEND_AUTH_TOKEN")
+        .ok()
+        .filter(|token| token.len() >= 24)
+        .ok_or_else(|| command_error("SKWAD_BACKEND_AUTH_TOKEN is not configured"))
 }
 
 fn backend_url() -> String {
@@ -962,7 +878,19 @@ impl StoredIdentity {
 
 #[cfg(test)]
 mod tests {
-    use super::clean_optional;
+    use std::sync::Arc;
+
+    use argon2::{
+        password_hash::{PasswordHasher, SaltString},
+        Argon2,
+    };
+    use skwad_database::Database;
+    use uuid::Uuid;
+
+    use super::{
+        authenticate_local, clean_optional, load_local_auth, update_local_password, LocalAuthFile, LocalCredential,
+    };
+    use crate::{paths::AppPaths, settings::AppSettings, state::AppState};
 
     #[test]
     fn optional_profile_fields_are_trimmed() {
@@ -981,5 +909,53 @@ mod tests {
     #[test]
     fn oversized_profile_fields_are_rejected() {
         assert!(clean_optional(Some("12345".into()), 4, "field").is_err());
+    }
+
+    #[test]
+    fn local_credentials_require_a_hash_and_forceable_first_change() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = AppPaths::create(temp.path()).unwrap();
+        let auth_dir = paths.root.join("auth");
+        std::fs::create_dir_all(&auth_dir).unwrap();
+        let salt = SaltString::encode_b64(Uuid::new_v4().as_bytes()).unwrap();
+        let hash = Argon2::default()
+            .hash_password(b"temporary-password", &salt)
+            .unwrap()
+            .to_string();
+        let document = LocalAuthFile {
+            version: 1,
+            users: vec![LocalCredential {
+                id: Some("local-test-user".into()),
+                email: "person@example.com".into(),
+                display_name: "Person".into(),
+                password_hash: hash,
+                enabled: true,
+                must_change_password: true,
+            }],
+        };
+        std::fs::write(
+            auth_dir.join("credentials.json"),
+            serde_json::to_vec_pretty(&document).unwrap(),
+        )
+        .unwrap();
+        let state = Arc::new(AppState::new(
+            Database::open_in_memory().unwrap(),
+            paths,
+            AppSettings::default(),
+            "skwadmedia://".into(),
+        ));
+
+        assert!(authenticate_local(&state, "PERSON@example.com", "temporary-password").is_ok());
+        assert!(authenticate_local(&state, "person@example.com", "wrong-password").is_err());
+        update_local_password(&state, "person@example.com", "a-new-private-password").unwrap();
+        assert!(authenticate_local(&state, "person@example.com", "temporary-password").is_err());
+        assert!(authenticate_local(&state, "person@example.com", "a-new-private-password").is_ok());
+        assert!(!load_local_auth(&state).unwrap().users[0].must_change_password);
+    }
+
+    #[test]
+    fn plaintext_password_fields_are_rejected() {
+        let json = r#"{"version":1,"users":[{"email":"person@example.com","displayName":"Person","password":"unsafe","passwordHash":"hash","enabled":true}]}"#;
+        assert!(serde_json::from_str::<LocalAuthFile>(json).is_err());
     }
 }
