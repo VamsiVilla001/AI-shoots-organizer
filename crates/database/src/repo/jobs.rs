@@ -7,7 +7,7 @@
 use rusqlite::{params, Connection, OptionalExtension, Row};
 
 use super::get;
-use crate::models::{Job, JobKind, JobState, ProcessingProgress};
+use crate::models::{ActiveJob, Job, JobKind, JobState, ProcessingProgress, StageProgress};
 use crate::{now, Result};
 
 /// A job is abandoned after this many failed attempts, so one corrupt file
@@ -131,6 +131,95 @@ pub fn claim_next_compute(conn: &Connection) -> Result<Option<Job>> {
     Ok(job)
 }
 
+/// Each lane rotates independently across shoots. Multiple compute workers
+/// share its cursor at the application level and claim distinct media.
+#[derive(Debug, Clone, Copy)]
+pub enum WorkerLane {
+    All,
+    Io,
+    Compute,
+}
+
+/// Atomically claim the next ready shoot's head job after `last_shoot`.
+/// Priority and FIFO still apply within each shoot. A pending dependency does
+/// not consume attempts or block ready work belonging to another shoot.
+pub fn claim_next_fair(conn: &Connection, lane: WorkerLane, last_shoot: Option<i64>) -> Result<Option<Job>> {
+    claim_next_parallel(conn, lane, last_shoot, &[])
+}
+
+/// Multiple compute workers may analyse distinct media in the same shoot.
+/// Finishing stages are exclusive within a shoot and must wait for all media.
+pub fn claim_next_parallel(
+    conn: &Connection,
+    lane: WorkerLane,
+    last_shoot: Option<i64>,
+    paused_shoots: &[i64],
+) -> Result<Option<Job>> {
+    let lane_filter = match lane {
+        WorkerLane::All => "1 = 1",
+        WorkerLane::Io => "kind IN ('scan', 'thumbnail', 'proxy')",
+        WorkerLane::Compute => "kind NOT IN ('scan', 'thumbnail', 'proxy')",
+    };
+    // Both interpolations are application constants, never user-supplied SQL.
+    let sql = format!(
+        "WITH heads AS (
+            SELECT (
+                SELECT candidate.id FROM jobs candidate
+                 WHERE shoot_id = s.id AND state = 'queued' AND {lane_filter}
+                   AND NOT EXISTS (
+                       SELECT 1 FROM jobs busy
+                        WHERE busy.state = 'running' AND busy.media_id = candidate.media_id
+                   )
+                   AND (
+                       candidate.kind NOT IN ('scan', 'thumbnail', 'proxy')
+                       OR NOT EXISTS (
+                           SELECT 1 FROM jobs busy WHERE busy.shoot_id = s.id
+                             AND busy.state = 'running' AND busy.kind IN ('scan', 'thumbnail', 'proxy')
+                       )
+                   )
+                 ORDER BY candidate.priority, candidate.id LIMIT 1
+            ) AS job_id
+            FROM shoots s
+            WHERE s.id NOT IN (SELECT value FROM json_each(?3)) AND NOT EXISTS (
+                SELECT 1 FROM jobs
+                 WHERE shoot_id = s.id AND state = 'running'
+                   AND kind IN ('recognise', 'cluster', 'albums')
+            )
+        )
+        UPDATE jobs SET state = 'running', started_at = ?1, attempts = attempts + 1
+        WHERE id = (
+            SELECT j.id FROM heads h JOIN jobs j ON j.id = h.job_id
+            WHERE (
+                j.kind NOT IN ('analysePhoto', 'analyseVideo')
+                OR NOT EXISTS (
+                    SELECT 1 FROM media m
+                     WHERE m.id = j.media_id AND m.processing_status = 'pending'
+                )
+            ) AND (
+                j.kind NOT IN ('recognise', 'cluster', 'albums')
+                OR NOT EXISTS (
+                    SELECT 1 FROM jobs dependency
+                     WHERE dependency.shoot_id = j.shoot_id
+                       AND dependency.state IN ('queued', 'running')
+                       AND (dependency.kind IN ('scan', 'thumbnail', 'analysePhoto', 'analyseVideo')
+                            OR (dependency.id != j.id AND dependency.kind IN ('recognise', 'cluster', 'albums')
+                                AND dependency.priority < j.priority))
+                )
+            )
+            ORDER BY (SELECT COUNT(*) FROM jobs running
+                       WHERE running.shoot_id = j.shoot_id AND running.state = 'running'
+                         AND running.kind IN ('analysePhoto', 'analyseVideo')),
+                     CASE WHEN ?2 IS NULL OR j.shoot_id > ?2 THEN 0 ELSE 1 END,
+                     j.shoot_id
+            LIMIT 1
+        ) RETURNING *"
+    );
+    Ok(conn
+        .prepare(&sql)?
+        .query_row(params![now(), last_shoot, serde_json::to_string(paused_shoots)?], map)
+        .optional()?)
+}
+
 pub fn complete(conn: &Connection, id: i64) -> Result<()> {
     conn.execute(
         "UPDATE jobs SET state = 'done', finished_at = ?2, error = NULL WHERE id = ?1",
@@ -205,6 +294,86 @@ pub fn list_failed(conn: &Connection, shoot_id: i64, limit: i64) -> Result<Vec<J
     Ok(rows)
 }
 
+/// How many running jobs the progress panel names. The pool is a handful of
+/// threads, so this is a safety bound rather than a real limit.
+const ACTIVE_JOB_LIMIT: i64 = 8;
+
+/// Pipeline order for the per-stage breakdown — the same order the queue works
+/// through, so the panel reads top to bottom as the work actually happens.
+/// Proxies come last because they are deliberately the lowest priority.
+const STAGE_ORDER: [JobKind; 8] = [
+    JobKind::Scan,
+    JobKind::Thumbnail,
+    JobKind::AnalysePhoto,
+    JobKind::AnalyseVideo,
+    JobKind::Recognise,
+    JobKind::Cluster,
+    JobKind::Albums,
+    JobKind::Proxy,
+];
+
+/// Counts every job of the shoot by kind and state.
+///
+/// Only kinds that have at least one job are returned: a photo-only shoot
+/// should not show an empty "video analysis" step. Cancelled jobs are left out
+/// — they are neither done nor outstanding.
+pub fn stage_breakdown(conn: &Connection, shoot_id: i64) -> Result<Vec<StageProgress>> {
+    let mut stmt = conn.prepare(
+        "SELECT kind,
+                SUM(CASE WHEN state = 'queued'  THEN 1 ELSE 0 END),
+                SUM(CASE WHEN state = 'running' THEN 1 ELSE 0 END),
+                SUM(CASE WHEN state = 'done'    THEN 1 ELSE 0 END),
+                SUM(CASE WHEN state = 'failed'  THEN 1 ELSE 0 END)
+           FROM jobs WHERE shoot_id = ?1 GROUP BY kind",
+    )?;
+    let counted = stmt
+        .query_map(params![shoot_id], |r| {
+            Ok(StageProgress {
+                kind: r.get(0)?,
+                queued: r.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                running: r.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                done: r.get::<_, Option<i64>>(3)?.unwrap_or(0),
+                failed: r.get::<_, Option<i64>>(4)?.unwrap_or(0),
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let mut ordered: Vec<StageProgress> = STAGE_ORDER
+        .iter()
+        .filter_map(|kind| counted.iter().find(|s| s.kind == kind.as_str()).cloned())
+        .filter(|s| s.total() > 0)
+        .collect();
+    // Anything the queue grows later still shows up rather than vanishing.
+    ordered.extend(
+        counted
+            .into_iter()
+            .filter(|s| s.total() > 0 && !STAGE_ORDER.iter().any(|kind| kind.as_str() == s.kind)),
+    );
+    Ok(ordered)
+}
+
+/// The jobs currently executing, newest claim last, with the file each one is
+/// working on so the panel can name it.
+pub fn running_jobs(conn: &Connection, shoot_id: i64, limit: i64) -> Result<Vec<ActiveJob>> {
+    let mut stmt = conn.prepare(
+        "SELECT j.id, j.kind, m.filename, j.started_at
+           FROM jobs j LEFT JOIN media m ON m.id = j.media_id
+          WHERE j.shoot_id = ?1 AND j.state = 'running'
+          ORDER BY j.started_at ASC, j.id ASC LIMIT ?2",
+    )?;
+    let rows = stmt
+        .query_map(params![shoot_id, limit], |r| {
+            Ok(ActiveJob {
+                job_id: r.get(0)?,
+                kind: r.get(1)?,
+                filename: r.get(2)?,
+                started_at: r.get(3)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
 /// The numbers rendered in the progress panel.
 pub fn progress(conn: &Connection, shoot_id: i64) -> Result<ProcessingProgress> {
     let mut p = ProcessingProgress {
@@ -229,6 +398,18 @@ pub fn progress(conn: &Connection, shoot_id: i64) -> Result<ProcessingProgress> 
     )?;
 
     conn.query_row(
+        "SELECT SUM(CASE WHEN media_type = 'photo' THEN 1 ELSE 0 END),
+                SUM(CASE WHEN media_type = 'video' THEN 1 ELSE 0 END)
+           FROM media WHERE shoot_id = ?1",
+        params![shoot_id],
+        |r| {
+            p.photos_total = r.get::<_, Option<i64>>(0)?.unwrap_or(0);
+            p.videos_total = r.get::<_, Option<i64>>(1)?.unwrap_or(0);
+            Ok(())
+        },
+    )?;
+
+    conn.query_row(
         "SELECT COUNT(*),
                 SUM(CASE WHEN person_id IS NOT NULL THEN 1 ELSE 0 END),
                 SUM(CASE WHEN person_id IS NULL AND assignment != 'ignored' THEN 1 ELSE 0 END)
@@ -242,19 +423,14 @@ pub fn progress(conn: &Connection, shoot_id: i64) -> Result<ProcessingProgress> 
         },
     )?;
 
-    conn.query_row(
-        "SELECT SUM(CASE WHEN state = 'queued'  THEN 1 ELSE 0 END),
-                SUM(CASE WHEN state = 'running' THEN 1 ELSE 0 END),
-                SUM(CASE WHEN state = 'failed'  THEN 1 ELSE 0 END)
-           FROM jobs WHERE shoot_id = ?1",
-        params![shoot_id],
-        |r| {
-            p.jobs_queued = r.get::<_, Option<i64>>(0)?.unwrap_or(0);
-            p.jobs_running = r.get::<_, Option<i64>>(1)?.unwrap_or(0);
-            p.jobs_failed = r.get::<_, Option<i64>>(2)?.unwrap_or(0);
-            Ok(())
-        },
-    )?;
+    p.stages = stage_breakdown(conn, shoot_id)?;
+    for stage in &p.stages {
+        p.jobs_queued += stage.queued;
+        p.jobs_running += stage.running;
+        p.jobs_failed += stage.failed;
+        p.jobs_done += stage.done;
+    }
+    p.active = running_jobs(conn, shoot_id, ACTIVE_JOB_LIMIT)?;
 
     // Percentage is measured in media files rather than jobs: job counts move
     // as new work is discovered, which would make the bar travel backwards.
@@ -287,6 +463,246 @@ mod tests {
     use super::*;
     use crate::repo::shoots;
     use crate::Database;
+
+    #[test]
+    fn parallel_videos_in_one_shoot_keep_finishing_exclusive() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+        let shoot = shoots::create(&conn, "Parallel", "P").unwrap();
+        let mut video_jobs = Vec::new();
+        for filename in ["a.mp4", "b.mp4"] {
+            conn.execute("INSERT INTO media (shoot_id,path,filename,media_type,extension,content_key,indexed_at,processing_status) VALUES (?1,?2,?2,'video','mp4',?2,'now','thumbnailed')", params![shoot.id, filename]).unwrap();
+            let media_id = conn.last_insert_rowid();
+            video_jobs.push(enqueue(&conn, shoot.id, JobKind::AnalyseVideo, Some(media_id), 120, None).unwrap());
+        }
+        let recognise = enqueue(&conn, shoot.id, JobKind::Recognise, None, 300, None).unwrap();
+        let cluster = enqueue(&conn, shoot.id, JobKind::Cluster, None, 400, None).unwrap();
+        for id in &video_jobs {
+            assert_eq!(
+                claim_next_parallel(&conn, WorkerLane::Compute, None, &[])
+                    .unwrap()
+                    .unwrap()
+                    .id,
+                *id
+            );
+        }
+        assert!(claim_next_parallel(&conn, WorkerLane::Compute, None, &[])
+            .unwrap()
+            .is_none());
+        complete(&conn, video_jobs[0]).unwrap();
+        assert!(claim_next_parallel(&conn, WorkerLane::Compute, None, &[])
+            .unwrap()
+            .is_none());
+        complete(&conn, video_jobs[1]).unwrap();
+        assert_eq!(
+            claim_next_parallel(&conn, WorkerLane::Compute, None, &[])
+                .unwrap()
+                .unwrap()
+                .id,
+            recognise
+        );
+        assert!(claim_next_parallel(&conn, WorkerLane::Compute, None, &[])
+            .unwrap()
+            .is_none());
+        complete(&conn, recognise).unwrap();
+        assert_eq!(
+            claim_next_parallel(&conn, WorkerLane::Compute, None, &[])
+                .unwrap()
+                .unwrap()
+                .id,
+            cluster
+        );
+    }
+
+    #[test]
+    fn duplicate_media_jobs_never_run_together() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+        let shoot = shoots::create(&conn, "S", "S").unwrap();
+        conn.execute("INSERT INTO media (shoot_id,path,filename,media_type,extension,content_key,indexed_at,processing_status) VALUES (?1,'a','a','video','mp4','a','now','thumbnailed')", [shoot.id]).unwrap();
+        let media_id = conn.last_insert_rowid();
+        let first = enqueue(&conn, shoot.id, JobKind::AnalyseVideo, Some(media_id), 120, None).unwrap();
+        enqueue(&conn, shoot.id, JobKind::AnalyseVideo, Some(media_id), 120, None).unwrap();
+        assert_eq!(
+            claim_next_parallel(&conn, WorkerLane::Compute, None, &[])
+                .unwrap()
+                .unwrap()
+                .id,
+            first
+        );
+        assert!(claim_next_parallel(&conn, WorkerLane::Compute, None, &[])
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn fair_compute_admits_new_shoot_before_old_backlog_finishes() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+        let old = shoots::create(&conn, "Quarter Finals", "C:/old").unwrap();
+        let first = enqueue(&conn, old.id, JobKind::AnalyseVideo, None, 120, None).unwrap();
+        let second = enqueue(&conn, old.id, JobKind::AnalyseVideo, None, 120, None).unwrap();
+        let started = claim_next_fair(&conn, WorkerLane::Compute, None).unwrap().unwrap();
+        assert_eq!(started.id, first);
+        let new = shoots::create(&conn, "GDR", "C:/new").unwrap();
+        let gdr = enqueue(&conn, new.id, JobKind::AnalyseVideo, None, 120, None).unwrap();
+        complete(&conn, first).unwrap();
+        let next = claim_next_fair(&conn, WorkerLane::Compute, Some(old.id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(next.id, gdr);
+        complete(&conn, gdr).unwrap();
+        assert_eq!(
+            claim_next_fair(&conn, WorkerLane::Compute, Some(new.id))
+                .unwrap()
+                .unwrap()
+                .id,
+            second
+        );
+    }
+
+    #[test]
+    fn fair_lanes_rotate_three_shoots_preserving_local_priority_and_fifo() {
+        for lane in [WorkerLane::Io, WorkerLane::Compute, WorkerLane::All] {
+            let db = Database::open_in_memory().unwrap();
+            let conn = db.conn().unwrap();
+            let kind = if matches!(lane, WorkerLane::Io) {
+                JobKind::Thumbnail
+            } else {
+                JobKind::AnalyseVideo
+            };
+            let mut ids = Vec::new();
+            let mut expected = Vec::new();
+            for name in ["A", "B", "C"] {
+                let s = shoots::create(&conn, name, name).unwrap();
+                ids.push(s.id);
+                let later = enqueue(&conn, s.id, kind, None, 120, None).unwrap();
+                let first = enqueue(&conn, s.id, kind, None, 100, None).unwrap();
+                let last = enqueue(&conn, s.id, kind, None, 120, None).unwrap();
+                expected.push([first, later, last]);
+            }
+            let mut cursor = None;
+            for turn in 0..3 {
+                for (i, shoot) in ids.iter().enumerate() {
+                    let job = claim_next_fair(&conn, lane, cursor).unwrap().unwrap();
+                    assert_eq!(job.shoot_id, *shoot);
+                    assert_eq!(job.id, expected[i][turn]);
+                    assert_eq!(job.attempts, 1);
+                    complete(&conn, job.id).unwrap();
+                    cursor = Some(job.shoot_id);
+                }
+            }
+            assert!(claim_next_fair(&conn, lane, cursor).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn fair_claim_skips_unindexed_shoot_without_charging_retries() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+        let waiting = shoots::create(&conn, "Waiting", "C:/waiting").unwrap();
+        conn.execute("INSERT INTO media (shoot_id, path, filename, media_type, extension, content_key, indexed_at) VALUES (?1, 'a.mp4', 'a.mp4', 'video', 'mp4', 'key', 'now')", [waiting.id]).unwrap();
+        let media_id = conn.last_insert_rowid();
+        let blocked = enqueue(&conn, waiting.id, JobKind::AnalyseVideo, Some(media_id), 120, None).unwrap();
+        let ready = shoots::create(&conn, "Ready", "C:/ready").unwrap();
+        let runnable = enqueue(&conn, ready.id, JobKind::AnalyseVideo, None, 120, None).unwrap();
+        assert_eq!(
+            claim_next_fair(&conn, WorkerLane::Compute, None).unwrap().unwrap().id,
+            runnable
+        );
+        assert!(claim_next_fair(&conn, WorkerLane::Compute, Some(ready.id))
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            conn.query_row("SELECT attempts FROM jobs WHERE id = ?1", [blocked], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        conn.execute(
+            "UPDATE media SET processing_status = 'thumbnailed' WHERE id = ?1",
+            [media_id],
+        )
+        .unwrap();
+        assert_eq!(
+            claim_next_fair(&conn, WorkerLane::Compute, Some(ready.id))
+                .unwrap()
+                .unwrap()
+                .id,
+            blocked
+        );
+    }
+
+    #[test]
+    fn fair_finishing_waits_only_for_its_own_shoot() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+        let a = shoots::create(&conn, "A", "A").unwrap();
+        let b = shoots::create(&conn, "B", "B").unwrap();
+        let thumb = enqueue(&conn, a.id, JobKind::Thumbnail, None, 50, None).unwrap();
+        let recognise_a = enqueue(&conn, a.id, JobKind::Recognise, None, 300, None).unwrap();
+        let recognise_b = enqueue(&conn, b.id, JobKind::Recognise, None, 300, None).unwrap();
+        let cluster_b = enqueue(&conn, b.id, JobKind::Cluster, None, 400, None).unwrap();
+        assert_eq!(
+            claim_next_fair(&conn, WorkerLane::Compute, None).unwrap().unwrap().id,
+            recognise_b
+        );
+        // Cannot run clustering concurrently with recognition in the same shoot.
+        assert!(claim_next_fair(&conn, WorkerLane::Compute, None).unwrap().is_none());
+        assert_eq!(claim_next_fair(&conn, WorkerLane::Io, None).unwrap().unwrap().id, thumb);
+        complete(&conn, thumb).unwrap();
+        assert_eq!(
+            claim_next_fair(&conn, WorkerLane::Compute, Some(b.id))
+                .unwrap()
+                .unwrap()
+                .id,
+            recognise_a
+        );
+        complete(&conn, recognise_b).unwrap();
+        assert_eq!(
+            claim_next_fair(&conn, WorkerLane::Compute, Some(a.id))
+                .unwrap()
+                .unwrap()
+                .id,
+            cluster_b
+        );
+    }
+
+    #[test]
+    fn fair_cancel_retry_and_deleted_cursor_do_not_hold_other_shoots() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+        let a = shoots::create(&conn, "A", "A").unwrap();
+        let b = shoots::create(&conn, "B", "B").unwrap();
+        let first = enqueue(&conn, a.id, JobKind::AnalyseVideo, None, 120, None).unwrap();
+        let second = enqueue(&conn, b.id, JobKind::AnalyseVideo, None, 120, None).unwrap();
+        assert_eq!(
+            claim_next_fair(&conn, WorkerLane::Compute, None).unwrap().unwrap().id,
+            first
+        );
+        fail(&conn, first, "temporary failure").unwrap();
+        assert_eq!(
+            claim_next_fair(&conn, WorkerLane::Compute, Some(a.id))
+                .unwrap()
+                .unwrap()
+                .id,
+            second
+        );
+        complete(&conn, second).unwrap();
+        cancel_for_shoot(&conn, a.id).unwrap();
+        assert!(claim_next_fair(&conn, WorkerLane::Compute, Some(b.id))
+            .unwrap()
+            .is_none());
+        conn.execute("DELETE FROM shoots WHERE id = ?1", [b.id]).unwrap();
+        let later = enqueue(&conn, a.id, JobKind::AnalyseVideo, None, 120, None).unwrap();
+        assert_eq!(
+            claim_next_fair(&conn, WorkerLane::Compute, Some(b.id))
+                .unwrap()
+                .unwrap()
+                .id,
+            later
+        );
+    }
 
     #[test]
     fn claim_is_exclusive_and_ordered_by_priority() {
@@ -383,5 +799,54 @@ mod tests {
         assert!(enqueue_unique(&conn, shoot.id, JobKind::Cluster, None, 400)
             .unwrap()
             .is_some());
+    }
+
+    #[test]
+    fn the_breakdown_separates_finished_running_and_waiting_work() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+        let shoot = shoots::create(&conn, "S", "C:\\s").unwrap();
+
+        // Queued out of pipeline order to prove the breakdown re-orders them.
+        enqueue(&conn, shoot.id, JobKind::Albums, None, 500, None).unwrap();
+        let scan = enqueue(&conn, shoot.id, JobKind::Scan, None, 10, None).unwrap();
+        for _ in 0..3 {
+            enqueue(&conn, shoot.id, JobKind::AnalysePhoto, None, 100, None).unwrap();
+        }
+        complete(&conn, scan).unwrap();
+        let running = claim_next_compute(&conn).unwrap().unwrap();
+        assert_eq!(running.kind, JobKind::AnalysePhoto.as_str());
+
+        let stages = stage_breakdown(&conn, shoot.id).unwrap();
+        let kinds: Vec<&str> = stages.iter().map(|s| s.kind.as_str()).collect();
+        assert_eq!(kinds, vec!["scan", "analysePhoto", "albums"], "pipeline order");
+
+        assert_eq!(stages[0].done, 1);
+        assert_eq!((stages[1].done, stages[1].running, stages[1].queued), (0, 1, 2));
+        assert_eq!(stages[2].queued, 1);
+
+        // The panel names the file each running job is working on.
+        let active = running_jobs(&conn, shoot.id, 8).unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].job_id, running.id);
+        assert_eq!(active[0].filename, None, "shoot-wide jobs have no file");
+
+        let progress = progress(&conn, shoot.id).unwrap();
+        assert_eq!(progress.jobs_done, 1);
+        assert_eq!(progress.jobs_running, 1);
+        assert_eq!(progress.jobs_queued, 3);
+    }
+
+    #[test]
+    fn a_cancelled_shoot_leaves_no_outstanding_steps() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+        let shoot = shoots::create(&conn, "S", "C:\\s").unwrap();
+        enqueue(&conn, shoot.id, JobKind::AnalysePhoto, None, 100, None).unwrap();
+        cancel_for_shoot(&conn, shoot.id).unwrap();
+
+        // Cancelled work is neither done nor pending, so it drops out entirely
+        // rather than sitting in the panel as a step that never finishes.
+        assert!(stage_breakdown(&conn, shoot.id).unwrap().is_empty());
     }
 }

@@ -54,28 +54,96 @@ pub struct VideoInfo {
     pub creation_time: Option<String>,
 }
 
-impl Ffmpeg {
-    /// Looks for FFmpeg next to an explicitly configured directory first, then
-    /// on `PATH`. Returns `None` when it is not installed — the application
-    /// stays usable for JPEG/PNG shoots without it.
-    pub fn discover(hint_dir: Option<&Path>) -> Option<Self> {
-        let exe = |stem: &str| -> Option<PathBuf> {
-            if let Some(dir) = hint_dir {
-                let candidate = dir.join(if cfg!(windows) {
-                    format!("{stem}.exe")
-                } else {
-                    stem.to_string()
-                });
-                if candidate.is_file() {
-                    return Some(candidate);
+/// The executable file name for a tool on this platform.
+fn exe_name(stem: &str) -> String {
+    if cfg!(windows) {
+        format!("{stem}.exe")
+    } else {
+        stem.to_string()
+    }
+}
+
+/// Where package managers put FFmpeg, searched when `PATH` does not have it.
+///
+/// A `PATH` miss does not mean FFmpeg is absent. Every Windows installer
+/// updates the *persisted* environment, but a process inherits its `PATH` at
+/// launch and keeps it for life — so an application started from a shell that
+/// predates the install cannot see a perfectly working FFmpeg until it is
+/// restarted. Looking where the installers actually put things turns that
+/// confusing "not found" into working video analysis.
+fn well_known_dirs() -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    let env_dir = |key: &str| std::env::var_os(key).map(PathBuf::from);
+
+    if cfg!(windows) {
+        if let Some(local) = env_dir("LOCALAPPDATA") {
+            // winget shims, then the package itself: its build directory is
+            // named after the version, so the level below has to be walked.
+            dirs.push(local.join("Microsoft\\WinGet\\Links"));
+            let packages = local.join("Microsoft\\WinGet\\Packages");
+            if let Ok(entries) = std::fs::read_dir(&packages) {
+                for package in entries
+                    .flatten()
+                    .filter(|e| e.file_name().to_string_lossy().to_ascii_lowercase().contains("ffmpeg"))
+                {
+                    dirs.push(package.path().join("bin"));
+                    if let Ok(builds) = std::fs::read_dir(package.path()) {
+                        dirs.extend(builds.flatten().map(|build| build.path().join("bin")));
+                    }
                 }
             }
-            which::which(stem).ok()
+            dirs.push(local.join("Programs\\ffmpeg\\bin"));
+        }
+        if let Some(profile) = env_dir("USERPROFILE") {
+            dirs.push(profile.join("scoop\\shims"));
+        }
+        let program_data = env_dir("ProgramData").unwrap_or_else(|| PathBuf::from("C:\\ProgramData"));
+        dirs.push(program_data.join("chocolatey\\bin"));
+        dirs.push(program_data.join("chocolatey\\lib\\ffmpeg\\tools\\ffmpeg\\bin"));
+        if let Some(program_files) = env_dir("ProgramFiles") {
+            dirs.push(program_files.join("ffmpeg\\bin"));
+        }
+        dirs.push(PathBuf::from("C:\\ffmpeg\\bin"));
+    } else {
+        // Homebrew (Apple Silicon, then Intel) and MacPorts.
+        dirs.push(PathBuf::from("/opt/homebrew/bin"));
+        dirs.push(PathBuf::from("/usr/local/bin"));
+        dirs.push(PathBuf::from("/opt/local/bin"));
+    }
+
+    dirs
+}
+
+impl Ffmpeg {
+    /// Looks for FFmpeg in an explicitly configured directory first, then on
+    /// `PATH`, then in the locations package managers install it. Returns
+    /// `None` when it really is not installed — the application stays usable
+    /// for JPEG/PNG shoots without it.
+    pub fn discover(hint_dir: Option<&Path>) -> Option<Self> {
+        let in_dir = |dir: &Path, stem: &str| -> Option<PathBuf> {
+            let candidate = dir.join(exe_name(stem));
+            candidate.is_file().then_some(candidate)
+        };
+
+        let exe = |stem: &str| -> Option<PathBuf> {
+            if let Some(found) = hint_dir.and_then(|dir| in_dir(dir, stem)) {
+                return Some(found);
+            }
+            if let Ok(found) = which::which(stem) {
+                return Some(found);
+            }
+            well_known_dirs().iter().find_map(|dir| in_dir(dir, stem))
         };
 
         let ffmpeg = exe("ffmpeg")?;
-        let ffprobe = exe("ffprobe")
-            .unwrap_or_else(|| ffmpeg.with_file_name(if cfg!(windows) { "ffprobe.exe" } else { "ffprobe" }));
+        // ffprobe ships beside ffmpeg in every distribution, so prefer its
+        // sibling over a differently-versioned one found elsewhere.
+        let sibling = ffmpeg.with_file_name(exe_name("ffprobe"));
+        let ffprobe = if sibling.is_file() {
+            sibling
+        } else {
+            exe("ffprobe").unwrap_or(sibling)
+        };
 
         Some(Self { ffmpeg, ffprobe })
     }

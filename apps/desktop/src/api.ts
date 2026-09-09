@@ -62,6 +62,8 @@ async function call<T>(command: string, args?: Record<string, unknown>): Promise
 // --- application -----------------------------------------------------------
 
 export const appInfo = () => call<AppInfo>('app_info')
+export const getShootStorage = (shootId: number) =>
+  call<{ recordBytes: number; previewBytes: number }>('get_shoot_storage', { shootId })
 export const getSettings = () => call<AppSettings>('get_settings')
 export const updateSettings = (settings: AppSettings) =>
   call<AppSettings>('update_settings', { settings })
@@ -103,7 +105,8 @@ export const clearSelectedScannedData = (shootIds: number[]) =>
   call<number>('clear_selected_scanned_data', { shootIds })
 export const clearScannedData = () => call<number>('clear_scanned_data')
 export const resumeProcessing = (shootId: number) => call<number>('resume_processing', { shootId })
-export const pauseProcessing = (paused: boolean) => call<boolean>('pause_processing', { paused })
+export const pauseProcessing = (shootId: number, paused: boolean) =>
+  call<boolean>('pause_processing', { shootId, paused })
 export const cancelProcessing = (shootId: number) => call<number>('cancel_processing', { shootId })
 export const reanalyseShoot = (shootId: number) => call<number>('reanalyse_shoot', { shootId })
 export const getProgress = (shootId: number) => call<ProcessingProgress>('get_progress', { shootId })

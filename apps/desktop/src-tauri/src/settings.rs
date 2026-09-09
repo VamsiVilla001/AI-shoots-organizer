@@ -12,9 +12,13 @@ use skwad_face_detection::{Accelerator, DetectorConfig, SessionConfig};
 use skwad_video_analysis::VideoAnalysisConfig;
 
 const KEY: &str = "app_settings";
-/// More than two concurrent decoders and ONNX engine pairs makes the desktop
-/// shell compete with its own background work for RAM, CPU and GPU time.
+/// Legacy setting retained for saved configuration compatibility. Runtime
+/// concurrency now uses `ai_workers` plus a separate I/O worker.
 const MAX_BACKGROUND_WORKERS: usize = 2;
+/// Independent model pairs; keep concurrency explicit and bounded. The upper
+/// limit is intentionally generous for workstation benchmarking; the default
+/// remains conservative because every active worker owns its own model pair.
+pub const MAX_AI_WORKERS: usize = 10;
 /// Leave CPU capacity for the webview, SQLite and image decoding even on large
 /// workstations. ONNX inference scales poorly beyond this per-session limit.
 const MAX_INFERENCE_THREADS: usize = 4;
@@ -28,9 +32,10 @@ pub struct AppSettings {
     pub accelerator: Accelerator,
     /// Threads per inference session.
     pub inference_threads: usize,
-    /// How many files are analysed at once. AI sessions are memory-hungry, so
-    /// this is deliberately conservative.
+    /// Legacy background-worker count; retained for settings compatibility.
     pub worker_threads: usize,
+    /// Concurrent media analysis jobs, in addition to the indexing worker.
+    pub ai_workers: usize,
 
     // --- Detection --------------------------------------------------------
     pub detection_threshold: f32,
@@ -61,6 +66,9 @@ pub struct AppSettings {
     pub video_scene_threshold: f64,
     pub video_sample_interval: f64,
     pub video_max_frames: usize,
+    /// Overlap short-video frame preparation and use bounded parallel decode
+    /// segments for long videos.
+    pub video_frame_prefetch: bool,
 
     // --- Scanning ---------------------------------------------------------
     pub scan_recursive: bool,
@@ -76,6 +84,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         let cores = num_cpus::get();
         let worker_threads = cores.clamp(1, MAX_BACKGROUND_WORKERS);
+        let ai_workers = cores.clamp(1, 2);
         let background_cores = cores.saturating_sub(1).max(1);
         Self {
             accelerator: Accelerator::Auto,
@@ -83,8 +92,9 @@ impl Default for AppSettings {
             // each in full. The previous default gave every worker `cores / 2`,
             // so on a 16-core machine four workers asked for 32 threads and
             // spent much of their time fighting each other for cores.
-            inference_threads: (background_cores / worker_threads).clamp(1, MAX_INFERENCE_THREADS),
+            inference_threads: (background_cores / ai_workers).clamp(1, MAX_INFERENCE_THREADS),
             worker_threads,
+            ai_workers,
 
             detection_threshold: 0.5,
             detection_nms_threshold: 0.4,
@@ -106,6 +116,7 @@ impl Default for AppSettings {
             video_scene_threshold: 0.3,
             video_sample_interval: 5.0,
             video_max_frames: 60,
+            video_frame_prefetch: true,
 
             scan_recursive: true,
             ffmpeg_directory: None,
@@ -144,8 +155,9 @@ impl AppSettings {
     pub fn sanitised(mut self) -> Self {
         let cores = num_cpus::get();
         self.worker_threads = self.worker_threads.clamp(1, cores.clamp(1, MAX_BACKGROUND_WORKERS));
+        self.ai_workers = self.ai_workers.clamp(1, cores.clamp(1, MAX_AI_WORKERS));
         let background_cores = cores.saturating_sub(1).max(1);
-        let max_threads = (background_cores / self.worker_threads).clamp(1, MAX_INFERENCE_THREADS);
+        let max_threads = (background_cores / self.ai_workers).clamp(1, MAX_INFERENCE_THREADS);
         self.inference_threads = self.inference_threads.clamp(1, max_threads);
 
         self.detection_threshold = self.detection_threshold.clamp(0.05, 0.99);
@@ -223,6 +235,16 @@ impl AppSettings {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn old_settings_enable_two_ai_workers_and_new_values_are_bounded() {
+        let settings: super::AppSettings = serde_json::from_str(r#"{"workerThreads":2}"#).unwrap();
+        assert_eq!(settings.ai_workers, num_cpus::get().clamp(1, 2));
+        let mut settings = settings;
+        settings.ai_workers = usize::MAX;
+        let settings = settings.sanitised();
+        assert!(settings.ai_workers <= super::MAX_AI_WORKERS);
+        assert!(settings.ai_workers * settings.inference_threads <= num_cpus::get().max(1));
+    }
     use super::*;
 
     #[test]
@@ -241,9 +263,9 @@ mod tests {
         let settings = AppSettings::default();
         let cores = num_cpus::get();
         assert!(
-            settings.worker_threads * settings.inference_threads <= cores.max(1),
+            settings.ai_workers * settings.inference_threads <= cores.max(1),
             "{} workers x {} threads exceeds {cores} cores",
-            settings.worker_threads,
+            settings.ai_workers,
             settings.inference_threads
         );
         assert!(settings.inference_threads >= 1);

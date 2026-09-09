@@ -11,6 +11,7 @@ pub mod protocol;
 pub mod settings;
 pub mod stages;
 pub mod state;
+pub mod storage;
 pub mod worker;
 
 use std::sync::Arc;
@@ -104,6 +105,7 @@ pub fn run() {
             commands::cancel_processing,
             commands::reanalyse_shoot,
             commands::get_progress,
+            storage::get_shoot_storage,
             commands::list_failed_jobs,
             // media
             commands::list_media,

@@ -27,7 +27,7 @@ cargo run -p skwad-desktop --bin skwad-credentials -- `
 
 Running it for an existing email resets that account to the entered temporary
 password. New and reset accounts receive `mustChangePassword: true`. After a
-successful login, SKWAD requires a different password of at least 10 characters
+successful login, SKWAD requires a different password of at least 6 characters
 and changes the JSON record to `mustChangePassword: false`.
 
 ## File shape

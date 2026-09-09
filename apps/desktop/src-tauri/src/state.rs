@@ -1,8 +1,9 @@
 //! Shared application state.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use parking_lot::{Mutex, RwLock};
 use skwad_database::Database;
@@ -28,13 +29,29 @@ pub struct AppState {
 
     /// Per-shoot cancellation flags, checked inside long-running stages.
     cancellations: Mutex<HashMap<i64, Arc<AtomicBool>>>,
+    /// Why a shoot's queue is stalled (missing FFmpeg, missing models), kept
+    /// only in memory: a blockage is a fact about this run, not about the
+    /// stored job. Entries age out on their own once work resumes.
+    blockages: Mutex<HashMap<i64, Blockage>>,
     /// Global pause for the worker pool.
     paused: AtomicBool,
+    scheduler: Mutex<Scheduler>,
     shutdown: Arc<AtomicBool>,
     pub loaded_catalogues: Mutex<HashMap<String, LoadedCatalogue>>,
 }
 
+#[derive(Default)]
+struct Scheduler {
+    paused_shoots: HashSet<i64>,
+    last_compute_shoot: Option<i64>,
+    last_io_shoot: Option<i64>,
+}
+
 impl AppState {
+    /// A blockage is re-recorded every few seconds while it persists, so an
+    /// entry older than this belongs to work that has since moved on.
+    const BLOCKAGE_TTL: Duration = Duration::from_secs(20);
+
     pub fn new(db: Database, paths: AppPaths, settings: AppSettings, media_url_base: String) -> Self {
         let thumbnails = ThumbnailCache::new(&paths.thumbnails);
         let proxies = VideoProxyCache::new(&paths.proxies);
@@ -47,7 +64,9 @@ impl AppState {
             settings: RwLock::new(settings),
             settings_version: AtomicU64::new(1),
             cancellations: Mutex::new(HashMap::new()),
+            blockages: Mutex::new(HashMap::new()),
             paused: AtomicBool::new(false),
+            scheduler: Mutex::new(Scheduler::default()),
             shutdown: Arc::new(AtomicBool::new(false)),
             loaded_catalogues: Mutex::new(HashMap::new()),
         }
@@ -76,6 +95,50 @@ impl AppState {
 
     pub fn set_paused(&self, paused: bool) {
         self.paused.store(paused, Ordering::Relaxed);
+    }
+
+    pub fn is_shoot_paused(&self, shoot_id: i64) -> bool {
+        self.is_paused() || self.scheduler.lock().paused_shoots.contains(&shoot_id)
+    }
+
+    pub fn set_shoot_paused(&self, shoot_id: i64, paused: bool) {
+        let mut scheduler = self.scheduler.lock();
+        if paused {
+            scheduler.paused_shoots.insert(shoot_id);
+        } else {
+            scheduler.paused_shoots.remove(&shoot_id);
+        }
+    }
+
+    /// Serialize only claims, never decoding/inference. All compute workers
+    /// share one cursor, so separate workers cannot each favour the first shoot.
+    pub fn claim_job(
+        &self,
+        conn: &skwad_database::rusqlite::Connection,
+        lane: skwad_database::repo::jobs::WorkerLane,
+    ) -> skwad_database::Result<Option<skwad_database::models::Job>> {
+        use skwad_database::repo::jobs::{self, WorkerLane};
+        let mut scheduler = self.scheduler.lock();
+        if self.is_paused() || self.is_shutting_down() {
+            return Ok(None);
+        }
+        let mut excluded: Vec<i64> = scheduler.paused_shoots.iter().copied().collect();
+        excluded.extend(
+            self.cancellations
+                .lock()
+                .iter()
+                .filter(|(_, flag)| flag.load(Ordering::Relaxed))
+                .map(|(id, _)| *id),
+        );
+        let cursor = match lane {
+            WorkerLane::Io => &mut scheduler.last_io_shoot,
+            _ => &mut scheduler.last_compute_shoot,
+        };
+        let job = jobs::claim_next_parallel(conn, lane, *cursor, &excluded)?;
+        if let Some(job) = &job {
+            *cursor = Some(job.shoot_id);
+        }
+        Ok(job)
     }
 
     pub fn shutdown_flag(&self) -> Arc<AtomicBool> {
@@ -110,6 +173,7 @@ impl AppState {
     /// Clears a shoot's cancellation so processing can be started again.
     pub fn resume_shoot(&self, shoot_id: i64) {
         self.cancellation(shoot_id).store(false, Ordering::Relaxed);
+        self.set_shoot_paused(shoot_id, false);
     }
 
     pub fn is_cancelled(&self, shoot_id: i64) -> bool {
@@ -118,6 +182,39 @@ impl AppState {
             .get(&shoot_id)
             .is_some_and(|f| f.load(Ordering::Relaxed))
     }
+
+    /// Records why a shoot's queue cannot move. Workers refresh this on every
+    /// blocked attempt, so it stays current while the blockage lasts.
+    pub fn record_blockage(&self, shoot_id: i64, kind: &str, reason: &str) {
+        self.blockages.lock().insert(
+            shoot_id,
+            Blockage {
+                kind: kind.to_string(),
+                reason: reason.to_string(),
+                at: Instant::now(),
+            },
+        );
+    }
+
+    /// The current blockage for a shoot, if a worker hit one recently.
+    ///
+    /// Nothing clears these explicitly: the moment work runs again the entry
+    /// stops being refreshed and expires, which is also how a blockage fixed
+    /// outside the app (installing FFmpeg) disappears from the UI on its own.
+    pub fn blockage(&self, shoot_id: i64) -> Option<Blockage> {
+        let mut blockages = self.blockages.lock();
+        blockages.retain(|_, blockage| blockage.at.elapsed() < Self::BLOCKAGE_TTL);
+        blockages.get(&shoot_id).cloned()
+    }
+}
+
+/// A stalled queue, remembered long enough to explain itself in the UI.
+#[derive(Debug, Clone)]
+pub struct Blockage {
+    /// The [`skwad_database::models::JobKind`] that could not run.
+    pub kind: String,
+    pub reason: String,
+    at: Instant,
 }
 
 #[cfg(test)]
@@ -168,6 +265,76 @@ mod tests {
 
         state.resume_shoot(1);
         assert!(!state.is_cancelled(1));
+    }
+
+    #[test]
+    fn pausing_one_shoot_does_not_pause_other_shoots_or_consume_attempts() {
+        use skwad_database::{
+            models::JobKind,
+            repo::{jobs, shoots},
+        };
+        let state = state();
+        let conn = state.db.conn().unwrap();
+        let a = shoots::create(&conn, "A", "A").unwrap();
+        let b = shoots::create(&conn, "B", "B").unwrap();
+        let a_job = jobs::enqueue(&conn, a.id, JobKind::AnalyseVideo, None, 120, None).unwrap();
+        let b_job = jobs::enqueue(&conn, b.id, JobKind::AnalyseVideo, None, 120, None).unwrap();
+        state.set_shoot_paused(a.id, true);
+        assert!(state.is_shoot_paused(a.id));
+        assert!(!state.is_shoot_paused(b.id));
+        assert!(!state.is_paused());
+        assert_eq!(
+            state.claim_job(&conn, jobs::WorkerLane::Compute).unwrap().unwrap().id,
+            b_job
+        );
+        assert!(state.claim_job(&conn, jobs::WorkerLane::Compute).unwrap().is_none());
+        assert_eq!(
+            conn.query_row("SELECT attempts FROM jobs WHERE id=?1", [a_job], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        state.set_shoot_paused(a.id, false);
+        assert_eq!(
+            state.claim_job(&conn, jobs::WorkerLane::Compute).unwrap().unwrap().id,
+            a_job
+        );
+    }
+
+    #[test]
+    fn parallel_worker_claims_are_distinct_and_shared_across_shoots() {
+        use skwad_database::{
+            models::JobKind,
+            repo::{jobs, shoots},
+        };
+        let state = Arc::new(state());
+        {
+            let conn = state.db.conn().unwrap();
+            for name in ["A", "B"] {
+                let shoot = shoots::create(&conn, name, name).unwrap();
+                for _ in 0..4 {
+                    jobs::enqueue(&conn, shoot.id, JobKind::AnalyseVideo, None, 120, None).unwrap();
+                }
+            }
+        }
+        let barrier = Arc::new(std::sync::Barrier::new(4));
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let state = Arc::clone(&state);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let conn = state.db.conn().unwrap();
+                    state.claim_job(&conn, jobs::WorkerLane::Compute).unwrap().unwrap()
+                })
+            })
+            .collect();
+        let jobs: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        assert_eq!(jobs.iter().map(|j| j.id).collect::<HashSet<_>>().len(), 4);
+        let mut counts = HashMap::new();
+        for job in jobs {
+            *counts.entry(job.shoot_id).or_insert(0) += 1;
+        }
+        assert_eq!(counts.values().copied().collect::<Vec<_>>(), vec![2, 2]);
     }
 
     #[test]

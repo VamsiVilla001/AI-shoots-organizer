@@ -61,6 +61,8 @@ export function SettingsScreen() {
       <input
         type="number"
         step={step}
+        min={key === 'aiWorkers' ? 1 : undefined}
+        max={key === 'aiWorkers' ? 10 : undefined}
         value={draft[key] as number}
         onChange={(e) => set(key, Number(e.target.value) as never)}
       />
@@ -104,7 +106,7 @@ export function SettingsScreen() {
               Falls back to CPU automatically when the GPU provider cannot start.
             </span>
           </label>
-          {number('Worker threads', 'workerThreads', 1, `Background workers (maximum 2). Face AI uses one GPU worker; the second assists scanning and thumbnails. ${info.data?.cpuCores ?? '?'} cores available.`)}
+          {number('Parallel AI workers', 'aiWorkers', 1, `1–10 simultaneous photo/video analyses, shared fairly across shoots. Default 2. Each worker uses additional RAM and GPU memory. A separate worker prepares thumbnails. Changes apply as current files finish. ${info.data?.cpuCores ?? '?'} CPU cores available.`)}
           {number('Analysis image size', 'analysisMaxDim', 64, 'Longest edge before detection. Lower is faster; higher finds smaller faces.')}
 
           <h2 style={{ marginTop: 8 }}>Models</h2>
@@ -146,6 +148,12 @@ export function SettingsScreen() {
 
         <div className="card">
           <h2>Video</h2>
+          <label className="checkbox-row">
+            <input type="checkbox" checked={draft.videoFramePrefetch}
+              onChange={(e) => set('videoFramePrefetch', e.target.checked)} />
+            Accelerate video frame decoding
+          </label>
+          <div className="hint">Short videos prepare one frame ahead. Videos longer than one minute decode sampled timestamps across up to four bounded segments. Sample coverage and AI settings stay the same.</div>
           <label className="checkbox-row">
             <input
               type="checkbox"

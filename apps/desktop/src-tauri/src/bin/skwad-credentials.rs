@@ -49,8 +49,8 @@ fn main() -> Result<(), String> {
         return Err("provide a valid email and display name".into());
     }
     let password = Zeroizing::new(rpassword::prompt_password("Temporary password: ").map_err(|e| e.to_string())?);
-    if password.chars().count() < 10 {
-        return Err("temporary password must contain at least 10 characters".into());
+    if password.chars().count() < 6 {
+        return Err("temporary password must contain at least 6 characters".into());
     }
     let salt = SaltString::encode_b64(Uuid::new_v4().as_bytes()).map_err(|e| e.to_string())?;
     let password_hash = Argon2::default()

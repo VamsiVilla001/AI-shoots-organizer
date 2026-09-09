@@ -214,8 +214,8 @@ pub async fn change_initial_password(
     current_password: String,
     new_password: String,
 ) -> Result<SessionStatus> {
-    if new_password.chars().count() < 10 {
-        return Err(command_error("the new password must contain at least 10 characters"));
+    if new_password.chars().count() < 6 {
+        return Err(command_error("the new password must contain at least 6 characters"));
     }
     if current_password == new_password {
         return Err(command_error(
@@ -234,7 +234,7 @@ async fn establish_local_identity(state: &AppState, account: LocalAccount) -> Re
     let existing = load_identity()
         .ok()
         .filter(|identity| identity.account_id == account_id);
-    let (device_id, device_key_id, device_private_key, device_public_key, mut trusted_signing_keys) = match existing {
+    let (device_id, device_key_id, device_private_key, device_public_key, trusted_signing_keys) = match existing {
         Some(identity) => (
             identity.device_id,
             identity.device_key_id,
@@ -253,9 +253,6 @@ async fn establish_local_identity(state: &AppState, account: LocalAccount) -> Re
             )
         }
     };
-    if let Ok(backend_keys) = fetch_backend_keys().await {
-        trusted_signing_keys.insert(backend_keys.signing_key_id, backend_keys.signing_public_key);
-    }
     ensure_local_profile(state, &account_id, &account.email, &account.display_name)?;
     save_identity(&StoredIdentity {
         account_id: account_id.clone(),

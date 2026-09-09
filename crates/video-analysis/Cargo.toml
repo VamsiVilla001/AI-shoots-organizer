@@ -11,6 +11,7 @@ build = "build.rs"
 skwad-media-core = { path = "../media-core" }
 serde = { version = "1.0", features = ["derive"] }
 image = "0.25"
+rayon = "1.12"
 tracing = "0.1"
 thiserror = "2.0"
 

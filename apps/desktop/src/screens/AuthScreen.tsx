@@ -58,8 +58,8 @@ export function AuthScreen() {
         <label className="field"><span>Email</span><input type="email" value={email} autoComplete="email" disabled={mode === 'changePassword'} onChange={(event) => setEmail(event.target.value)} /></label>
         <label className="field"><span>{mode === 'signin' ? 'Password' : 'Temporary password'}</span><input type="password" value={password} autoComplete="current-password" onChange={(event) => setPassword(event.target.value)} /></label>
         {mode === 'changePassword' && <>
-          <label className="field"><span>New password</span><input type="password" value={newPassword} minLength={10} autoComplete="new-password" onChange={(event) => setNewPassword(event.target.value)} /></label>
-          <label className="field"><span>Confirm new password</span><input type="password" value={confirmation} minLength={10} autoComplete="new-password" onChange={(event) => setConfirmation(event.target.value)} /></label>
+          <label className="field"><span>New password</span><input type="password" value={newPassword} minLength={6} autoComplete="new-password" onChange={(event) => setNewPassword(event.target.value)} /></label>
+          <label className="field"><span>Confirm new password</span><input type="password" value={confirmation} minLength={6} autoComplete="new-password" onChange={(event) => setConfirmation(event.target.value)} /></label>
         </>}
         <button className="primary auth-submit" disabled={authenticate.isPending}>
           {authenticate.isPending ? 'Please wait…' : mode === 'signin' ? 'Sign in' : 'Change password and sign in'}

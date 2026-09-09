@@ -256,6 +256,7 @@ impl Engine {
 
     /// Full analysis of a video: sample frames, then treat each like a photo.
     pub fn analyse_video(&mut self, db: &Database, item: &Media) -> Result<AnalysisOutcome> {
+        let analysis_started = Instant::now();
         let Some(ffmpeg) = self.ffmpeg.clone() else {
             return Err(PipelineError::FfmpegUnavailable);
         };
@@ -290,36 +291,69 @@ impl Engine {
         let mut decoded_frames = 0usize;
         let mut previous_frame: Option<PreviousVideoFrame> = None;
         let mut tracked_faces_recovered = 0usize;
-        for entry in &plan.timestamps {
-            match skwad_video_analysis::sample_frame(&ffmpeg, &path, entry, orientation, &config) {
-                Ok(frame) => {
-                    decoded_frames += 1;
-                    {
-                        let conn = db.conn()?;
-                        video_repo::insert_sample_frame(&conn, item.id, frame.timestamp)?;
+        let prefetch = self.settings.video_frame_prefetch;
+        let mut consume_frame =
+            |(at, sampled): (f64, skwad_video_analysis::Result<skwad_video_analysis::SampledFrame>)| -> Result<()> {
+                match sampled {
+                    Ok(frame) => {
+                        decoded_frames += 1;
+                        {
+                            let conn = db.conn()?;
+                            video_repo::insert_sample_frame(&conn, item.id, frame.timestamp)?;
+                        }
+                        let mut analysed_faces = self.detect_and_embed(&frame.image)?;
+                        if let Some(previous) = previous_frame.as_ref() {
+                            tracked_faces_recovered +=
+                                self.recover_tracked_faces(previous, &frame.image, &mut analysed_faces);
+                        }
+                        let frame_outcome =
+                            Self::store_analysed_faces(db, item, &frame.image, Some(frame.timestamp), &analysed_faces)?;
+                        outcome.faces_detected += frame_outcome.faces_detected;
+                        outcome.faces_embedded += frame_outcome.faces_embedded;
+                        outcome.frames_analysed += frame_outcome.frames_analysed;
+                        previous_frame = Some(PreviousVideoFrame {
+                            image: frame.image,
+                            faces: analysed_faces,
+                        });
+                        // Tracking retains one previous frame. Prefetch can hold
+                        // one additional downscaled frame, never an entire video.
                     }
-                    let mut analysed_faces = self.detect_and_embed(&frame.image)?;
-                    if let Some(previous) = previous_frame.as_ref() {
-                        tracked_faces_recovered +=
-                            self.recover_tracked_faces(previous, &frame.image, &mut analysed_faces);
+                    Err(error) => {
+                        tracing::debug!(video = %item.filename, at, %error, "frame decode failed");
                     }
-                    let frame_outcome =
-                        Self::store_analysed_faces(db, item, &frame.image, Some(frame.timestamp), &analysed_faces)?;
-                    outcome.faces_detected += frame_outcome.faces_detected;
-                    outcome.faces_embedded += frame_outcome.faces_embedded;
-                    outcome.frames_analysed += frame_outcome.frames_analysed;
-                    previous_frame = Some(PreviousVideoFrame {
-                        image: frame.image,
-                        faces: analysed_faces,
-                    });
-                    // Replacing `previous_frame` drops the older RGB buffer, so
-                    // only two downscaled frames are resident during tracking.
                 }
-                Err(error) => {
-                    tracing::debug!(video = %item.filename, at = entry.at, %error, "frame decode failed");
-                }
+                Ok(())
+            };
+
+        let (decode_time, frame_wait_time, frame_analysis_time, decoder_segments) = if prefetch
+            && item.duration.is_some_and(|duration| duration > 60.0)
+            && plan.len() > 1
+        {
+            let decode_started = Instant::now();
+            let decoded =
+                skwad_video_analysis::decoder::decode_plan(&ffmpeg, &path, &plan, item.duration, orientation, &config);
+            let decode_time = decode_started.elapsed();
+            let mut analysis_time = std::time::Duration::ZERO;
+            for frame in decoded.frames {
+                let started = Instant::now();
+                consume_frame(frame)?;
+                analysis_time += started.elapsed();
             }
-        }
+            (decode_time, decode_time, analysis_time, decoded.segments)
+        } else {
+            let timings = skwad_video_analysis::prefetch::consume_frames(
+                &plan.timestamps,
+                prefetch,
+                |entry| {
+                    (
+                        entry.at,
+                        skwad_video_analysis::sample_frame(&ffmpeg, &path, entry, orientation, &config),
+                    )
+                },
+                &mut consume_frame,
+            )?;
+            (timings.decode, timings.waiting, timings.analysis, 1)
+        };
 
         {
             let conn = db.conn()?;
@@ -327,13 +361,19 @@ impl Engine {
             media_repo::refresh_face_count(&conn, item.id)?;
         }
 
-        tracing::debug!(
+        tracing::info!(
             video = %item.filename,
             planned = plan.len(),
             decoded = decoded_frames,
             faces = outcome.faces_detected,
             tracked_faces_recovered,
             tracking_backend = ?skwad_video_analysis::tracking::backend(),
+            prefetch,
+            decoder_segments,
+            decode_ms = decode_time.as_millis(),
+            frame_wait_ms = frame_wait_time.as_millis(),
+            frame_analysis_ms = frame_analysis_time.as_millis(),
+            total_ms = analysis_started.elapsed().as_millis(),
             "video analysed"
         );
         Ok(outcome)

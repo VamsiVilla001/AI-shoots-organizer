@@ -33,7 +33,8 @@ pub struct WorkerPool {
 }
 
 impl WorkerPool {
-    /// Starts `worker_threads` workers plus one progress monitor.
+    /// One I/O worker and bounded AI slots. Disabled slots stay idle without
+    /// loading models, allowing concurrency changes without restarting the app.
     pub fn start(app: AppHandle, state: Arc<AppState>) -> Self {
         // Recover anything a previous run left mid-flight.
         match state.db.conn().and_then(|conn| jobs::requeue_stale(&conn)) {
@@ -42,17 +43,16 @@ impl WorkerPool {
             Err(e) => tracing::error!(error = %e, "could not recover interrupted jobs"),
         }
 
-        let worker_count = state.settings().worker_threads.max(1);
+        let worker_count = crate::settings::MAX_AI_WORKERS + 1;
         let mut handles = Vec::with_capacity(worker_count + 1);
 
         for index in 0..worker_count {
             let app = app.clone();
             let state = Arc::clone(&state);
-            let has_io_worker = worker_count > 1;
             handles.push(
                 std::thread::Builder::new()
                     .name(format!("skwad-worker-{index}"))
-                    .spawn(move || worker_loop(index, has_io_worker, app, state))
+                    .spawn(move || worker_loop(index, app, state))
                     .expect("failed to spawn worker thread"),
             );
         }
@@ -77,7 +77,7 @@ impl WorkerPool {
     }
 }
 
-fn worker_loop(index: usize, has_io_worker: bool, app: AppHandle, state: Arc<AppState>) {
+fn worker_loop(index: usize, app: AppHandle, state: Arc<AppState>) {
     tracing::debug!(worker = index, "worker started");
 
     // Built on first use: a session that only ever browses an existing shoot
@@ -90,25 +90,27 @@ fn worker_loop(index: usize, has_io_worker: bool, app: AppHandle, state: Arc<App
     let mut tools_version = state.settings_version();
     let mut ffmpeg = crate::pipeline::discover_ffmpeg(&state.settings());
     let mut gstreamer = skwad_media_core::Gstreamer::discover();
+    let lane = if index == 0 {
+        jobs::WorkerLane::Io
+    } else {
+        jobs::WorkerLane::Compute
+    };
 
     while !state.is_shutting_down() {
+        if index > state.settings().ai_workers.clamp(1, crate::settings::MAX_AI_WORKERS) {
+            engine = None;
+            engine_last_used = None;
+            std::thread::sleep(IDLE_POLL);
+            continue;
+        }
         if state.is_paused() {
             std::thread::sleep(IDLE_POLL);
             continue;
         }
 
-        // Worker zero owns AI and finishing stages. Extra workers stay on the
-        // lightweight I/O lane so only one detector/embedder pair occupies
-        // RAM and GPU memory, while thumbnails can still run in parallel.
-        let claimed = match state.db.conn().and_then(|conn| {
-            if !has_io_worker {
-                jobs::claim_next(&conn, None)
-            } else if index == 0 {
-                jobs::claim_next_compute(&conn)
-            } else {
-                jobs::claim_next_io(&conn)
-            }
-        }) {
+        // Each AI worker owns its model pair. A shared scheduler distributes
+        // distinct media fairly and holds finishing stages behind all analyses.
+        let claimed = match state.db.conn().and_then(|conn| state.claim_job(&conn, lane)) {
             Ok(job) => job,
             Err(e) => {
                 tracing::error!(worker = index, error = %e, "could not claim a job");
@@ -126,6 +128,14 @@ fn worker_loop(index: usize, has_io_worker: bool, app: AppHandle, state: Arc<App
             std::thread::sleep(IDLE_POLL);
             continue;
         };
+        // A pause can arrive just after an atomic claim. Give the job back
+        // without consuming an attempt; already executing files finish safely.
+        if state.is_shoot_paused(job.shoot_id) {
+            if let Ok(conn) = state.db.conn() {
+                requeue_without_attempt(&conn, job.id);
+            }
+            continue;
+        }
 
         // A cancelled shoot's remaining jobs are dropped rather than run.
         if state.is_cancelled(job.shoot_id) {
@@ -421,6 +431,9 @@ fn finish_job(app: &AppHandle, state: &Arc<AppState>, job: &Job, outcome: JobOut
             // The job goes back untouched. As soon as the missing piece is in
             // place, the next poll picks it up with no user action needed.
             tracing::warn!(job = job.id, kind = %job.kind, reason = %reason, "processing is blocked");
+            // The progress panel reads this so a stalled queue explains itself
+            // instead of looking like slow work.
+            state.record_blockage(job.shoot_id, &job.kind, &reason);
             if should_announce_blockage() {
                 events::notice(app, "warn", format!("Processing paused: {reason}"));
             }
@@ -504,13 +517,17 @@ fn monitor_loop(app: AppHandle, state: Arc<AppState>) {
         }
 
         for shoot_id in to_report {
-            if let Ok(progress) = jobs::progress(&conn, shoot_id) {
+            if let Ok(mut progress) = jobs::progress(&conn, shoot_id) {
+                if let Some(blockage) = state.blockage(shoot_id) {
+                    progress.blocked_kind = Some(blockage.kind);
+                    progress.blocked_reason = Some(blockage.reason);
+                }
                 events::emit(
                     &app,
                     events::PROGRESS,
                     events::ProgressEvent {
                         progress,
-                        paused: state.is_paused(),
+                        paused: state.is_shoot_paused(shoot_id),
                     },
                 );
             }
@@ -594,7 +611,7 @@ mod tests {
             let job = jobs::claim_next(&conn, None).unwrap().unwrap();
             assert_eq!(job.id, id);
             conn.execute(
-                "UPDATE jobs SET state = 'queued', started_at = NULL, attempts = MAX(attempts - 1, 0) WHERE id = ?1",
+        "UPDATE jobs SET state = 'queued', started_at = NULL, attempts = MAX(attempts - 1, 0) WHERE id = ?1 AND state = 'running'",
                 skwad_database::rusqlite::params![id],
             )
             .unwrap();

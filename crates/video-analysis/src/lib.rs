@@ -6,6 +6,8 @@
 //! changes, sample on a fixed cadence between those points, and analyse that
 //! handful of frames.
 
+pub mod decoder;
+pub mod prefetch;
 pub mod sampling;
 pub mod tracking;
 

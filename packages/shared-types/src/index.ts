@@ -374,6 +374,24 @@ export interface Job {
   finishedAt: string | null
 }
 
+/** One step of the pipeline, counted from the job queue. */
+export interface StageProgress {
+  /** The `JobKind` this step is built from. */
+  kind: string
+  queued: number
+  running: number
+  done: number
+  failed: number
+}
+
+/** A job the worker pool is executing right now. */
+export interface ActiveJob {
+  jobId: number
+  kind: string
+  filename: string | null
+  startedAt: string | null
+}
+
 export interface ProcessingProgress {
   shootId: number
   mediaTotal: number
@@ -383,11 +401,21 @@ export interface ProcessingProgress {
   facesDetected: number
   facesRecognised: number
   facesUnknown: number
+  photosTotal: number
+  videosTotal: number
   jobsQueued: number
   jobsRunning: number
   jobsFailed: number
+  jobsDone: number
   percent: number
   stage: string
+  /** Per-step counts, in the order the queue works through them. */
+  stages: StageProgress[]
+  active: ActiveJob[]
+  /** Set when the queue is stalled on something missing (FFmpeg, models). */
+  blockedReason: string | null
+  /** The `JobKind` that could not run, so the panel can mark that step. */
+  blockedKind: string | null
 }
 
 export interface ExportRecord {
@@ -461,6 +489,7 @@ export interface AppSettings {
   accelerator: Accelerator
   inferenceThreads: number
   workerThreads: number
+  aiWorkers: number
 
   detectionThreshold: number
   detectionNmsThreshold: number
@@ -482,6 +511,7 @@ export interface AppSettings {
   videoSceneThreshold: number
   videoSampleInterval: number
   videoMaxFrames: number
+  videoFramePrefetch: boolean
 
   scanRecursive: boolean
   ffmpegDirectory: string | null

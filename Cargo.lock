@@ -5315,6 +5315,7 @@ version = "2.0.0-alpha.1"
 dependencies = [
  "cc",
  "image",
+ "rayon",
  "serde",
  "skwad-media-core",
  "thiserror 2.0.20",

@@ -428,6 +428,36 @@ pub struct Job {
     pub finished_at: Option<String>,
 }
 
+/// One step of the pipeline, counted from the job queue. The panel renders
+/// these in queue order so a reader can see what has finished, what is moving
+/// and what has not started yet.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StageProgress {
+    /// The [`JobKind`] string this step is built from.
+    pub kind: String,
+    pub queued: i64,
+    pub running: i64,
+    pub done: i64,
+    pub failed: i64,
+}
+
+impl StageProgress {
+    pub fn total(&self) -> i64 {
+        self.queued + self.running + self.done + self.failed
+    }
+}
+
+/// A job the pool is executing right now, for the "working on" readout.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActiveJob {
+    pub job_id: i64,
+    pub kind: String,
+    pub filename: Option<String>,
+    pub started_at: Option<String>,
+}
+
 /// The counters behind the progress panel in §18.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -440,11 +470,25 @@ pub struct ProcessingProgress {
     pub faces_detected: i64,
     pub faces_recognised: i64,
     pub faces_unknown: i64,
+    pub photos_total: i64,
+    pub videos_total: i64,
     pub jobs_queued: i64,
     pub jobs_running: i64,
     pub jobs_failed: i64,
+    pub jobs_done: i64,
     pub percent: f64,
     pub stage: String,
+    /// Per-step counts, in the order the queue works through them.
+    pub stages: Vec<StageProgress>,
+    /// What the workers are executing at this instant.
+    pub active: Vec<ActiveJob>,
+    /// Set when the queue is stalled on something missing (FFmpeg, models)
+    /// rather than making progress. Attached by the caller, which owns the
+    /// worker state; the database itself cannot know it.
+    pub blocked_reason: Option<String>,
+    /// The [`JobKind`] that could not run, so the panel can mark the step it
+    /// belongs to rather than the whole shoot.
+    pub blocked_kind: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

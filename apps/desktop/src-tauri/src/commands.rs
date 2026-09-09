@@ -330,8 +330,8 @@ pub fn resume_processing(app: AppHandle, state: State<'_, Arc<AppState>>, shoot_
 }
 
 #[tauri::command]
-pub fn pause_processing(state: State<'_, Arc<AppState>>, paused: bool) -> Result<bool> {
-    state.set_paused(paused);
+pub fn pause_processing(state: State<'_, Arc<AppState>>, shoot_id: i64, paused: bool) -> Result<bool> {
+    state.set_shoot_paused(shoot_id, paused);
     Ok(paused)
 }
 
@@ -359,7 +359,12 @@ pub fn reanalyse_shoot(app: AppHandle, state: State<'_, Arc<AppState>>, shoot_id
 #[tauri::command]
 pub fn get_progress(state: State<'_, Arc<AppState>>, shoot_id: i64) -> Result<ProcessingProgress> {
     let conn = state.db.conn()?;
-    Ok(jobs::progress(&conn, shoot_id)?)
+    let mut progress = jobs::progress(&conn, shoot_id)?;
+    if let Some(blockage) = state.blockage(shoot_id) {
+        progress.blocked_kind = Some(blockage.kind);
+        progress.blocked_reason = Some(blockage.reason);
+    }
+    Ok(progress)
 }
 
 #[tauri::command]

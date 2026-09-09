@@ -14,6 +14,7 @@ pub mod media;
 pub mod people;
 pub mod settings;
 pub mod shoots;
+pub mod storage;
 pub mod video;
 
 use rusqlite::Row;

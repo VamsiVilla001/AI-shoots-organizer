@@ -92,6 +92,20 @@ button.small {
   border-radius: 6px;
 }
 
+/* A control that should stay available without competing with the actions
+ * beside it — used for "show more detail" style toggles. */
+button.ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-dim);
+}
+
+button.ghost:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: var(--border);
+  color: var(--text);
+}
+
 input,
 select,
 textarea {
@@ -821,6 +835,166 @@ h2 {
   color: var(--text);
   font-size: 15px;
   display: block;
+}
+
+.storage-details summary { cursor: pointer; }
+.storage-details > div { margin-top: 8px; line-height: 1.5; overflow-wrap: anywhere; }
+
+/* ---- pipeline breakdown --------------------------------------------- */
+
+.progress-headline {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 12.5px;
+  color: var(--text-dim);
+}
+
+.progress-headline strong {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.progress-blocked {
+  border: 1px solid rgba(255, 180, 84, 0.4);
+  background: rgba(255, 180, 84, 0.1);
+  color: var(--warn);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.progress-blocked strong { color: var(--warn); }
+
+.pipeline {
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.pipeline-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 4px;
+}
+
+/* Fixed columns keep the counts aligned down the list, so the eye can scan
+ * "what is left" without reading every row. */
+.pipeline-step {
+  display: grid;
+  grid-template-columns: 16px minmax(120px, 150px) minmax(80px, 100px) 1fr 84px;
+  align-items: center;
+  gap: 10px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+  padding: 3px 0;
+}
+
+.pipeline-mark {
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+.pipeline-label { color: var(--text); }
+
+.pipeline-count {
+  font-variant-numeric: tabular-nums;
+  font-family: Consolas, 'SF Mono', monospace;
+  font-size: 12px;
+}
+
+.pipeline-note {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pipeline-failed { color: var(--error); }
+
+.pipeline-track {
+  height: 4px;
+  border-radius: 99px;
+  background: var(--bg-hover);
+  overflow: hidden;
+}
+
+.pipeline-track > span {
+  display: block;
+  height: 100%;
+  background: var(--text-dim);
+  border-radius: 99px;
+  transition: width 400ms ease;
+}
+
+.pipeline-step.is-done .pipeline-mark { color: var(--ok); }
+.pipeline-step.is-done .pipeline-track > span { background: var(--ok); }
+.pipeline-step.is-running .pipeline-mark { color: var(--teal); }
+.pipeline-step.is-running .pipeline-label { font-weight: 600; }
+.pipeline-step.is-running .pipeline-note { color: var(--text); }
+.pipeline-step.is-running .pipeline-track > span {
+  background: linear-gradient(90deg, var(--accent), var(--teal));
+}
+.pipeline-step.is-blocked .pipeline-mark,
+.pipeline-step.is-blocked .pipeline-note { color: var(--warn); }
+.pipeline-step.is-failed .pipeline-mark,
+.pipeline-step.is-failed .pipeline-note { color: var(--error); }
+.pipeline-step.is-failed .pipeline-track > span { background: var(--error); }
+
+.pipeline-now {
+  margin-top: 6px;
+  border-top: 1px dashed var(--border);
+  padding-top: 8px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+}
+
+.pipeline-now-label {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 12px;
+}
+
+.pipeline-now ul {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.pipeline-now li {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pipeline-now em {
+  color: var(--text);
+  font-style: normal;
+  font-weight: 600;
+}
+
+@media (max-width: 900px) {
+  .pipeline-step {
+    grid-template-columns: 16px minmax(110px, 1fr) auto;
+  }
+  .pipeline-step .pipeline-note,
+  .pipeline-step .pipeline-track {
+    display: none;
+  }
 }
 
 /* ---- selection bar -------------------------------------------------- */
