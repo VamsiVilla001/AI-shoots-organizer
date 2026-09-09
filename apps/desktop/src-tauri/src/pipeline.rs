@@ -17,7 +17,7 @@ use skwad_database::Database;
 use skwad_face_detection::{Detection, FaceDetector, Rect, ScrfdDetector};
 use skwad_face_recognition::{ArcFaceEmbedder, Embedding, FaceEmbedder};
 use skwad_media_core::formats::{self, MediaKind};
-use skwad_media_core::{Ffmpeg, Gstreamer, ThumbnailCache, VideoProxyCache};
+use skwad_media_core::{Ffmpeg, Gstreamer, ProxyBackend, ThumbnailCache, VideoProxyCache};
 
 use crate::models::{ModelRegistry, ModelRole};
 use crate::paths::AppPaths;
@@ -682,7 +682,12 @@ pub fn index_media(db: &Database, thumbnails: &ThumbnailCache, ffmpeg: Option<&F
 /// Generates the full viewing proxy in the low-priority import lane. Keeping
 /// this separate from metadata/thumbnail indexing means a long 4K transcode
 /// never holds up the media grid or the recognition pipeline.
-pub fn generate_video_proxy(proxies: &VideoProxyCache, gstreamer: &Gstreamer, item: &Media) -> Result<()> {
+pub fn generate_video_proxy(
+    proxies: &VideoProxyCache,
+    ffmpeg: Option<&Ffmpeg>,
+    gstreamer: Option<&Gstreamer>,
+    item: &Media,
+) -> Result<()> {
     if item.media_type != MediaType::Video.as_str() {
         return Err(PipelineError::Other("proxy jobs require a video".into()));
     }
@@ -691,8 +696,29 @@ pub fn generate_video_proxy(proxies: &VideoProxyCache, gstreamer: &Gstreamer, it
         return Err(PipelineError::Other(format!("{} no longer exists", item.path)));
     }
     let target = proxies.path_for(&item.content_key);
-    gstreamer.create_video_proxy(path, &target, item.orientation.clamp(1, 8) as u16)?;
-    Ok(())
+    let orientation = item.orientation.clamp(1, 8) as u16;
+    if let Some(ffmpeg) = ffmpeg {
+        match ffmpeg.create_video_proxy(path, &target, orientation) {
+            Ok(backend) => {
+                if backend != ProxyBackend::Cached {
+                    tracing::info!(file = %item.path, ?backend, "video proxy generated");
+                }
+                return Ok(());
+            }
+            Err(error) if gstreamer.is_some() => {
+                tracing::warn!(file = %item.path, %error, "FFmpeg proxy failed; trying GStreamer fallback");
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    if let Some(gstreamer) = gstreamer {
+        gstreamer.create_video_proxy(path, &target, orientation)?;
+        tracing::info!(file = %item.path, backend = "GStreamer", "video proxy generated");
+        return Ok(());
+    }
+    Err(PipelineError::Other(
+        "FFmpeg is required for video proxies; GStreamer may be used as an optional fallback".into(),
+    ))
 }
 
 #[cfg(test)]

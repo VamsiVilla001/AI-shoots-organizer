@@ -14,8 +14,6 @@ export const fullUrl = (mediaId: number) => `${base}/full/${mediaId}`
 export const videoUrl = (mediaId: number) => `${base}/video/${mediaId}`
 export const videoFrameUrl = (mediaId: number, timestamp: number) =>
   `${base}/frame/${mediaId}?t=${timestamp.toFixed(3)}`
-export const videoPreviewUrl = (mediaId: number, contentKey: string, attempt = 0) =>
-  `${base}/preview-video/${mediaId}?key=${encodeURIComponent(contentKey)}&attempt=${attempt}`
 
 export function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) return '—'

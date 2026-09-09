@@ -634,7 +634,7 @@ adding novelty:
 
 ## 18. V2.0 encrypted shared catalogue prototype
 
-Branch `V2.0` is version `2.0.0-alpha.1`. It was created from verified V1.2
+Branch `V2.0` is version `2.0.0-alpha.2`. It was created from verified V1.2
 checkpoint `f26286c`; the SKWAD rebrand/migration checkpoint is `e1571da`.
 
 Implemented after that checkpoint:

@@ -34,8 +34,6 @@ pub mod priority {
     pub const RECOGNISE: i64 = 300;
     pub const CLUSTER: i64 = 400;
     pub const ALBUMS: i64 = 500;
-    /// Full-duration proxies are useful but must never delay indexing or AI.
-    pub const PROXY: i64 = 600;
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -159,9 +157,6 @@ pub fn scan_shoot(
                     MediaKind::Video => (JobKind::AnalyseVideo, priority::ANALYSE_VIDEO),
                 };
                 jobs::enqueue(conn, shoot_id, job_kind, Some(*media_id), job_priority, None)?;
-                if *kind == MediaKind::Video {
-                    jobs::enqueue(conn, shoot_id, JobKind::Proxy, Some(*media_id), priority::PROXY, None)?;
-                }
             }
             Ok(added)
         })?;
@@ -450,11 +445,6 @@ pub fn queue_pending_work(db: &Database, shoot_id: i64) -> Result<usize> {
                 priority::ANALYSE_PHOTO
             };
             if jobs::enqueue_unique(conn, shoot_id, kind, Some(item.id), job_priority)?.is_some() {
-                count += 1;
-            }
-            if item.media_type == MediaType::Video.as_str()
-                && jobs::enqueue_unique(conn, shoot_id, JobKind::Proxy, Some(item.id), priority::PROXY)?.is_some()
-            {
                 count += 1;
             }
         }

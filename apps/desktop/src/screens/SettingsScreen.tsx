@@ -117,10 +117,7 @@ export function SettingsScreen() {
             </div>
           ))}
           <div className="hint">
-            FFmpeg: {info.data?.ffmpegAvailable ? (info.data.ffmpegVersion ?? 'found') : 'not found — HEIC and video need it'}
-          </div>
-          <div className="hint">
-            GStreamer: {info.data?.gstreamerAvailable ? (info.data.gstreamerVersion ?? 'found') : 'not found — video proxies need it'}
+            FFmpeg: {info.data?.ffmpegAvailable ? (info.data.ffmpegVersion ?? 'found') : 'not found — HEIC and video analysis need it'}
           </div>
           <div className="hint">
             Video tracking: {info.data?.videoTrackingBackend ?? 'checking…'}
@@ -170,7 +167,7 @@ export function SettingsScreen() {
           <div className="hint mono">{info.data?.paths.root}</div>
           <div className="hint">Cache size: {formatBytes(info.data?.cacheBytes ?? 0)}</div>
           <button className="small" onClick={() => clearThumbs.mutate()}>
-            Clear thumbnail and proxy cache
+            Clear media cache
           </button>
 
           <h2 style={{ marginTop: 8 }}>Privacy</h2>

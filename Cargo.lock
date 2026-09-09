@@ -5155,7 +5155,7 @@ checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
 
 [[package]]
 name = "skwad-backend"
-version = "2.0.0-alpha.1"
+version = "2.0.0-alpha.2"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -5173,7 +5173,7 @@ dependencies = [
 
 [[package]]
 name = "skwad-catalogue"
-version = "2.0.0-alpha.1"
+version = "2.0.0-alpha.2"
 dependencies = [
  "argon2",
  "base64 0.22.1",
@@ -5195,7 +5195,7 @@ dependencies = [
 
 [[package]]
 name = "skwad-clustering"
-version = "2.0.0-alpha.1"
+version = "2.0.0-alpha.2"
 dependencies = [
  "rayon",
  "serde",
@@ -5204,7 +5204,7 @@ dependencies = [
 
 [[package]]
 name = "skwad-database"
-version = "2.0.0-alpha.1"
+version = "2.0.0-alpha.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -5219,7 +5219,7 @@ dependencies = [
 
 [[package]]
 name = "skwad-desktop"
-version = "2.0.0-alpha.1"
+version = "2.0.0-alpha.2"
 dependencies = [
  "anyhow",
  "argon2",
@@ -5256,7 +5256,7 @@ dependencies = [
 
 [[package]]
 name = "skwad-export-engine"
-version = "2.0.0-alpha.1"
+version = "2.0.0-alpha.2"
 dependencies = [
  "serde",
  "tempfile",
@@ -5267,7 +5267,7 @@ dependencies = [
 
 [[package]]
 name = "skwad-face-detection"
-version = "2.0.0-alpha.1"
+version = "2.0.0-alpha.2"
 dependencies = [
  "image",
  "num_cpus",
@@ -5279,7 +5279,7 @@ dependencies = [
 
 [[package]]
 name = "skwad-face-recognition"
-version = "2.0.0-alpha.1"
+version = "2.0.0-alpha.2"
 dependencies = [
  "image",
  "ort",
@@ -5292,7 +5292,7 @@ dependencies = [
 
 [[package]]
 name = "skwad-media-core"
-version = "2.0.0-alpha.1"
+version = "2.0.0-alpha.2"
 dependencies = [
  "anyhow",
  "blake3",
@@ -5311,7 +5311,7 @@ dependencies = [
 
 [[package]]
 name = "skwad-video-analysis"
-version = "2.0.0-alpha.1"
+version = "2.0.0-alpha.2"
 dependencies = [
  "cc",
  "image",

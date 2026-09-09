@@ -14,7 +14,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { BoundingBox } from '@skwad/shared-types'
 import * as api from '../api'
 import { FaceTagger } from './FaceTagger'
-import { formatConfidence, formatCount, formatTime, fullUrl, videoFrameUrl, videoPreviewUrl } from '../media'
+import { formatConfidence, formatCount, formatTime, fullUrl, videoFrameUrl, videoUrl } from '../media'
 import { useUi } from '../store'
 
 export function MediaViewer(props: { mediaId: number }) {
@@ -461,7 +461,7 @@ export function MediaViewer(props: { mediaId: number }) {
           ) : (
             <video
               ref={videoRef}
-              src={videoPreviewUrl(item.id, item.contentKey)}
+              src={videoUrl(item.id)}
               controls
               autoPlay
             />

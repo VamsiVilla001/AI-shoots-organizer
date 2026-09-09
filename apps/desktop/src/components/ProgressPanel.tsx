@@ -23,7 +23,6 @@ const STEPS: Record<string, { label: string; doing: string }> = {
   recognise: { label: 'Recognise players', doing: 'Matching faces against the player library' },
   cluster: { label: 'Group unknown faces', doing: 'Clustering whatever was not recognised' },
   albums: { label: 'Build albums', doing: 'Rebuilding player, team and group-size albums' },
-  proxy: { label: 'Video previews', doing: 'Building full-duration 512px proxies' },
 }
 
 type StepState = 'done' | 'running' | 'blocked' | 'waiting' | 'failed'

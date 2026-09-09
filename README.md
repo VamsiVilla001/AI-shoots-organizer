@@ -6,7 +6,7 @@ recognition propose the grouping, name and correct the groups by hand, then
 export native references to the untouched originals in a folder per group.
 
 **Current stable release:** 1.0.0
-**V2 prototype:** 2.0.0-alpha.1 on branch `V2.0`
+**V2 prototype:** 2.0.0-alpha.2 on branch `V2.0`
 
 > Reduce hours of manual footage sorting into a short review pass: name a group
 > once in the app and every file you put in it lands in a folder of that name.

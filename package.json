@@ -1,7 +1,7 @@
 {
   "name": "skwad-media-organiser",
   "private": true,
-  "version": "2.0.0-alpha.1",
+  "version": "2.0.0-alpha.2",
   "description": "SKWAD Media Organiser — local-first player-wise sorting for esports photo and video shoots",
   "workspaces": [
     "apps/*",

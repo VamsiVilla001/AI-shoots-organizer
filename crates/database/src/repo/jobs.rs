@@ -196,6 +196,14 @@ pub fn claim_next_parallel(
                      WHERE m.id = j.media_id AND m.processing_status = 'pending'
                 )
             ) AND (
+                j.kind != 'proxy'
+                OR NOT EXISTS (
+                    SELECT 1 FROM jobs dependency
+                     WHERE dependency.shoot_id = j.shoot_id
+                       AND dependency.state IN ('queued', 'running')
+                       AND dependency.kind IN ('scan', 'thumbnail', 'analysePhoto', 'analyseVideo')
+                )
+            ) AND (
                 j.kind NOT IN ('recognise', 'cluster', 'albums')
                 OR NOT EXISTS (
                     SELECT 1 FROM jobs dependency
@@ -533,6 +541,34 @@ mod tests {
         assert!(claim_next_parallel(&conn, WorkerLane::Compute, None, &[])
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn proxy_waits_for_analysis_in_its_shoot() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+        let shoot = shoots::create(&conn, "Proxy", "P").unwrap();
+        conn.execute("INSERT INTO media (shoot_id,path,filename,media_type,extension,content_key,indexed_at,processing_status) VALUES (?1,'a.mp4','a.mp4','video','mp4','a','now','thumbnailed')", [shoot.id]).unwrap();
+        let media_id = conn.last_insert_rowid();
+        let analyse = enqueue(&conn, shoot.id, JobKind::AnalyseVideo, Some(media_id), 120, None).unwrap();
+        let proxy = enqueue(&conn, shoot.id, JobKind::Proxy, Some(media_id), 200, None).unwrap();
+
+        assert_eq!(
+            claim_next_parallel(&conn, WorkerLane::Compute, None, &[])
+                .unwrap()
+                .unwrap()
+                .id,
+            analyse
+        );
+        assert!(claim_next_parallel(&conn, WorkerLane::Io, None, &[]).unwrap().is_none());
+        complete(&conn, analyse).unwrap();
+        assert_eq!(
+            claim_next_parallel(&conn, WorkerLane::Io, None, &[])
+                .unwrap()
+                .unwrap()
+                .id,
+            proxy
+        );
     }
 
     #[test]

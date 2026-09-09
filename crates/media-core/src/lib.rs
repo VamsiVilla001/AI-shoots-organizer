@@ -16,7 +16,7 @@ pub mod raw;
 pub mod scanner;
 pub mod thumbnails;
 
-pub use ffmpeg::Ffmpeg;
+pub use ffmpeg::{Ffmpeg, ProxyBackend};
 pub use formats::{Decoder, MediaKind};
 pub use gstreamer::Gstreamer;
 pub use metadata::{Metadata, Orientation};

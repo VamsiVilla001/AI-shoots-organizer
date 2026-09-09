@@ -11,7 +11,6 @@
 //!     how HEIC and camera raw become viewable at all
 //!   * `frame/<media id>?t=<seconds>` — one analysed video sample frame, used
 //!     by the reviewer to click and name the faces detected at that timestamp
-//!   * `preview-video/<media id>` — a cached, grid-sized H.264 hover preview
 //!   * `video/<media id>` — the original video, with range support so the
 //!     player can seek to a detection timestamp (§9)
 
@@ -85,7 +84,6 @@ fn route(app: &AppHandle, request: &Request<Vec<u8>>) -> Response<Vec<u8>> {
         "thumb" => serve_thumbnail(&media),
         "full" => serve_full(&state, &media),
         "frame" => serve_video_frame(&state, request, &media),
-        "preview-video" => serve_video_preview(&state, request, &media),
         "video" => serve_video(request, &media),
         _ => error(StatusCode::NOT_FOUND, "unknown route"),
     }
@@ -175,39 +173,6 @@ fn serve_video_frame(
         }
         Err(e) => error(StatusCode::UNSUPPORTED_MEDIA_TYPE, &e.to_string()),
     }
-}
-
-/// Serves the complete 512px H.264 proxy generated during import. A one-time
-/// fallback creates it for shoots indexed by an older build. The original
-/// remains read-only.
-fn serve_video_preview(
-    state: &Arc<AppState>,
-    request: &Request<Vec<u8>>,
-    media: &skwad_database::models::Media,
-) -> Response<Vec<u8>> {
-    if media.media_type != skwad_database::models::MediaType::Video.as_str() {
-        return error(StatusCode::BAD_REQUEST, "previews are only available for videos");
-    }
-    let source = Path::new(&media.path);
-    if !source.is_file() {
-        return error(StatusCode::NOT_FOUND, "the original file has moved or been deleted");
-    }
-
-    let target = state.proxies.path_for(&media.content_key);
-    if !target.is_file() {
-        let Some(gstreamer) = skwad_media_core::Gstreamer::discover() else {
-            return error(
-                StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                "GStreamer is required for video proxies",
-            );
-        };
-        let orientation = media.orientation.clamp(1, 8) as u16;
-        if let Err(preview_error) = gstreamer.create_video_proxy(source, &target, orientation) {
-            return error(StatusCode::UNSUPPORTED_MEDIA_TYPE, &preview_error.to_string());
-        }
-    }
-
-    serve_video_path(request, &target, "video/mp4", true)
 }
 
 fn parse_frame_timestamp(query: &str) -> Option<f64> {
@@ -408,11 +373,6 @@ mod tests {
         assert_eq!(parse_frame_timestamp("t=-1"), None);
         assert_eq!(parse_frame_timestamp("t=NaN"), None);
         assert_eq!(parse_frame_timestamp("x=1"), None);
-    }
-
-    #[test]
-    fn hover_proxies_stay_at_thumbnail_scale() {
-        assert_eq!(skwad_media_core::VIDEO_PROXY_WIDTH, skwad_media_core::THUMBNAIL_MAX_DIM);
     }
 
     #[test]

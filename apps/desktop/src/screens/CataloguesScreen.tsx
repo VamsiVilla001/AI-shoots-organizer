@@ -75,7 +75,7 @@ export function CataloguesScreen() {
 
   return <>
     <div className="workspace-header">
-      <div><h1>Shared Catalogues</h1><p>Encrypted metadata only. Originals, proxies, thumbnails, face crops and embeddings stay local.</p></div>
+      <div><h1>Shared Catalogues</h1><p>Encrypted metadata only. Originals, thumbnails, face crops and embeddings stay local.</p></div>
       <div className="actions"><button onClick={load}>Load .skwad</button><button className="primary" onClick={publish} disabled={activeShootId === null || !session.data?.authenticatedOnce}>Publish current shoot</button></div>
     </div>
     <div className="settings-grid">

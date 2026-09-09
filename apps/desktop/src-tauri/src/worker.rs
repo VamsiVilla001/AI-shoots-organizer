@@ -42,7 +42,6 @@ impl WorkerPool {
             Ok(_) => {}
             Err(e) => tracing::error!(error = %e, "could not recover interrupted jobs"),
         }
-
         let worker_count = crate::settings::MAX_AI_WORKERS + 1;
         let mut handles = Vec::with_capacity(worker_count + 1);
 
@@ -89,7 +88,6 @@ fn worker_loop(index: usize, app: AppHandle, state: Arc<AppState>) {
     // indexing works with no models installed.
     let mut tools_version = state.settings_version();
     let mut ffmpeg = crate::pipeline::discover_ffmpeg(&state.settings());
-    let mut gstreamer = skwad_media_core::Gstreamer::discover();
     let lane = if index == 0 {
         jobs::WorkerLane::Io
     } else {
@@ -154,19 +152,10 @@ fn worker_loop(index: usize, app: AppHandle, state: Arc<AppState>) {
                 engine_last_used = None;
             }
             ffmpeg = crate::pipeline::discover_ffmpeg(&state.settings());
-            gstreamer = skwad_media_core::Gstreamer::discover();
             tools_version = state.settings_version();
         }
 
-        let outcome = run_job(
-            &app,
-            &state,
-            &job,
-            &mut engine,
-            &mut engine_version,
-            ffmpeg.as_ref(),
-            gstreamer.as_ref(),
-        );
+        let outcome = run_job(&app, &state, &job, &mut engine, &mut engine_version, ffmpeg.as_ref());
         if matches!(
             JobKind::parse(&job.kind),
             Some(JobKind::AnalysePhoto | JobKind::AnalyseVideo)
@@ -219,7 +208,6 @@ fn run_job(
     engine: &mut Option<Engine>,
     engine_version: &mut u64,
     ffmpeg: Option<&skwad_media_core::Ffmpeg>,
-    gstreamer: Option<&skwad_media_core::Gstreamer>,
 ) -> JobOutcome {
     let Some(kind) = JobKind::parse(&job.kind) else {
         return JobOutcome::Failed(format!("unknown job kind '{}'", job.kind));
@@ -264,19 +252,9 @@ fn run_job(
             Err(outcome) => outcome,
         },
 
-        JobKind::Proxy => match load_media(state, job) {
-            Ok(item) => match gstreamer {
-                Some(runtime) => match crate::pipeline::generate_video_proxy(&state.proxies, runtime, &item) {
-                    Ok(()) => JobOutcome::Done,
-                    Err(error) => JobOutcome::Failed(error.to_string()),
-                },
-                None => {
-                    tracing::warn!(file = %item.path, "GStreamer is unavailable; skipped video proxy");
-                    JobOutcome::Done
-                }
-            },
-            Err(outcome) => outcome,
-        },
+        // Proxy generation is currently disabled. Complete legacy queued jobs
+        // without touching the source media or starting a transcoder.
+        JobKind::Proxy => JobOutcome::Done,
 
         JobKind::AnalysePhoto | JobKind::AnalyseVideo => {
             run_media_job(state, job, engine, engine_version, |engine, db, item| {

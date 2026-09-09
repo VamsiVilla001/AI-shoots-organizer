@@ -8,9 +8,11 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, OnceLock};
 
 use image::RgbImage;
 
+use crate::proxies::VIDEO_PROXY_WIDTH;
 use crate::{MediaError, Result};
 
 #[cfg(windows)]
@@ -24,6 +26,14 @@ const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x0000_4000;
 /// responsive.
 const DECODE_THREADS: &str = "2";
 const FILTER_THREADS: &str = "1";
+const PROXY_VIDEO_BITRATE: &str = "1200k";
+const PROXY_AUDIO_BITRATE: &str = "96k";
+
+/// Proxy generation is deliberately single-file. Analysis already uses the
+/// available GPU in parallel; several simultaneous transcodes would contend
+/// for decoder, encoder and disk bandwidth without improving interactivity.
+static PROXY_GENERATION_GATE: Mutex<()> = Mutex::new(());
+static NVENC_AVAILABLE: OnceLock<bool> = OnceLock::new();
 
 /// Suppresses the console window that would otherwise flash up on Windows for
 /// every single invocation.
@@ -42,6 +52,23 @@ fn command(program: &Path) -> Command {
 pub struct Ffmpeg {
     ffmpeg: PathBuf,
     ffprobe: PathBuf,
+}
+
+/// The path FFmpeg used to create a proxy. This is logged so a machine with an
+/// outdated NVIDIA driver never silently falls back to CPU conversion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProxyBackend {
+    Cached,
+    Cuda,
+    Nvenc,
+    Cpu,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ProxyMode {
+    Cuda,
+    Nvenc,
+    Cpu,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -159,6 +186,217 @@ impl Ffmpeg {
             .lines()
             .next()
             .map(|l| l.trim().to_string())
+    }
+
+    /// Whether FFmpeg can start the NVIDIA H.264 encoder with the installed
+    /// driver. Listing `h264_nvenc` alone is insufficient because the build
+    /// may require a newer driver API than the machine provides.
+    pub fn nvenc_available(&self) -> bool {
+        *NVENC_AVAILABLE.get_or_init(|| self.probe_nvenc())
+    }
+
+    /// Creates a complete, browser-compatible 512px H.264/AAC proxy.
+    ///
+    /// Supported NVIDIA sources stay on the GPU for decode, resize and encode.
+    /// Camera formats that NVDEC cannot decode (notably HEVC 10-bit 4:2:2) use
+    /// the CPU decoder and NVIDIA encoder. If NVENC is unavailable, a tightly
+    /// bounded two-thread x264 conversion keeps proxy creation functional.
+    pub fn create_video_proxy(&self, source: &Path, target: &Path, orientation: u16) -> Result<ProxyBackend> {
+        if target.is_file() {
+            return Ok(ProxyBackend::Cached);
+        }
+        let _guard = PROXY_GENERATION_GATE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if target.is_file() {
+            return Ok(ProxyBackend::Cached);
+        }
+
+        let info = self.probe(source)?;
+        let keyframe_interval = info.frame_rate.unwrap_or(30.0).round().clamp(1.0, 240.0) as u32;
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| MediaError::Io(format!("create {}: {error}", parent.display())))?;
+        }
+        let temporary = target.with_extension("mp4.part");
+        let _ = std::fs::remove_file(&temporary);
+
+        let nvenc = self.nvenc_available();
+        let mut failures = Vec::new();
+        if nvenc && orientation == 1 {
+            match self.run_proxy_attempt(source, &temporary, orientation, keyframe_interval, ProxyMode::Cuda) {
+                Ok(()) => return self.finish_proxy(&temporary, target, ProxyBackend::Cuda),
+                Err(error) => failures.push(format!("CUDA decode/scale: {error}")),
+            }
+        }
+        if nvenc {
+            match self.run_proxy_attempt(source, &temporary, orientation, keyframe_interval, ProxyMode::Nvenc) {
+                Ok(()) => return self.finish_proxy(&temporary, target, ProxyBackend::Nvenc),
+                Err(error) => failures.push(format!("NVENC: {error}")),
+            }
+        }
+
+        match self.run_proxy_attempt(source, &temporary, orientation, keyframe_interval, ProxyMode::Cpu) {
+            Ok(()) => {
+                if !failures.is_empty() {
+                    tracing::warn!(file = %source.display(), failures = %failures.join("; "),
+                        "GPU proxy conversion unavailable; used limited CPU conversion");
+                }
+                self.finish_proxy(&temporary, target, ProxyBackend::Cpu)
+            }
+            Err(error) => {
+                failures.push(format!("CPU: {error}"));
+                let _ = std::fs::remove_file(&temporary);
+                Err(MediaError::Ffmpeg(format!(
+                    "could not create proxy for {}: {}",
+                    source.display(),
+                    failures.join("; ")
+                )))
+            }
+        }
+    }
+
+    fn probe_nvenc(&self) -> bool {
+        let output = command(&self.ffmpeg)
+            .args([
+                "-nostdin",
+                "-hide_banner",
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=size=256x144:rate=1",
+                "-frames:v",
+                "1",
+                "-an",
+                "-c:v",
+                "h264_nvenc",
+                "-f",
+                "null",
+                "-",
+            ])
+            .stdin(Stdio::null())
+            .output();
+        match output {
+            Ok(output) if output.status.success() => true,
+            Ok(output) => {
+                tracing::warn!(error = %stderr_tail(&output.stderr),
+                    "NVIDIA proxy encoding is unavailable; update the NVIDIA driver to enable it");
+                false
+            }
+            Err(error) => {
+                tracing::warn!(%error, "could not test NVIDIA proxy encoding");
+                false
+            }
+        }
+    }
+
+    fn run_proxy_attempt(
+        &self,
+        source: &Path,
+        temporary: &Path,
+        orientation: u16,
+        keyframe_interval: u32,
+        mode: ProxyMode,
+    ) -> std::result::Result<(), String> {
+        let _ = std::fs::remove_file(temporary);
+        let mut cmd = self.proxy_command(source, temporary, orientation, keyframe_interval, mode);
+        let output = cmd
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|error| format!("process failed to start: {error}"))?;
+        let complete = temporary.metadata().map(|metadata| metadata.len() > 0).unwrap_or(false);
+        if output.status.success() && complete {
+            Ok(())
+        } else {
+            let _ = std::fs::remove_file(temporary);
+            Err(stderr_tail(&output.stderr))
+        }
+    }
+
+    fn finish_proxy(&self, temporary: &Path, target: &Path, backend: ProxyBackend) -> Result<ProxyBackend> {
+        std::fs::rename(temporary, target)
+            .map_err(|error| MediaError::Io(format!("finalise {}: {error}", target.display())))?;
+        Ok(backend)
+    }
+
+    fn proxy_command(
+        &self,
+        source: &Path,
+        temporary: &Path,
+        orientation: u16,
+        keyframe_interval: u32,
+        mode: ProxyMode,
+    ) -> Command {
+        let mut cmd = command(&self.ffmpeg);
+        cmd.args([
+            "-nostdin",
+            "-hide_banner",
+            "-y",
+            "-v",
+            "error",
+            "-threads",
+            DECODE_THREADS,
+            "-filter_threads",
+            FILTER_THREADS,
+            "-noautorotate",
+        ]);
+        if matches!(mode, ProxyMode::Cuda) {
+            cmd.args(["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]);
+        }
+        cmd.arg("-i").arg(source);
+        cmd.args(["-map", "0:v:0", "-map", "0:a:0?", "-map_metadata", "-1"]);
+
+        let filter = match mode {
+            ProxyMode::Cuda => format!("scale_cuda={VIDEO_PROXY_WIDTH}:-2:format=nv12"),
+            ProxyMode::Nvenc | ProxyMode::Cpu => proxy_filter(orientation),
+        };
+        cmd.args(["-vf", &filter]);
+
+        match mode {
+            ProxyMode::Cuda | ProxyMode::Nvenc => {
+                cmd.args(["-c:v", "h264_nvenc", "-preset", "p1", "-tune", "ll", "-rc", "vbr"]);
+            }
+            ProxyMode::Cpu => {
+                cmd.args([
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "ultrafast",
+                    "-tune",
+                    "fastdecode",
+                    "-threads",
+                    "2",
+                ]);
+            }
+        }
+        cmd.args([
+            "-b:v",
+            PROXY_VIDEO_BITRATE,
+            "-maxrate",
+            "1800k",
+            "-bufsize",
+            "2400k",
+            "-g",
+            &keyframe_interval.to_string(),
+            "-keyint_min",
+            &keyframe_interval.to_string(),
+            "-bf",
+            "0",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            PROXY_AUDIO_BITRATE,
+            "-movflags",
+            "+faststart",
+            "-f",
+            "mp4",
+        ]);
+        cmd.arg(temporary);
+        cmd
     }
 
     /// Container and stream facts, read without decoding any frames.
@@ -352,6 +590,36 @@ impl Ffmpeg {
     }
 }
 
+fn proxy_filter(orientation: u16) -> String {
+    let orientation_filter = match orientation {
+        2 => "hflip,",
+        3 => "hflip,vflip,",
+        4 => "vflip,",
+        5 => "hflip,transpose=clock,",
+        6 => "transpose=clock,",
+        7 => "hflip,transpose=cclock,",
+        8 => "transpose=cclock,",
+        _ => "",
+    };
+    format!("{orientation_filter}scale={VIDEO_PROXY_WIDTH}:-2:flags=fast_bilinear,format=yuv420p")
+}
+
+fn stderr_tail(stderr: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stderr);
+    let mut tail: String = text
+        .chars()
+        .rev()
+        .take(2000)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    if tail.trim().is_empty() {
+        tail = "FFmpeg exited without an error message".into();
+    }
+    tail.trim().replace(['\r', '\n'], " ")
+}
+
 /// Parses ffprobe's `30000/1001` style frame rates.
 fn parse_rational(value: &str) -> Option<f64> {
     match value.split_once('/') {
@@ -396,5 +664,69 @@ mod tests {
         assert!(args.windows(2).any(|pair| pair == ["-hwaccel", "auto"]));
         assert!(args.windows(2).any(|pair| pair == ["-vcodec", "ppm"]));
         assert!(!args.iter().any(|arg| arg == "png"));
+    }
+
+    #[test]
+    fn proxy_commands_prefer_cuda_and_keep_cpu_fallback_bounded() {
+        let ffmpeg = Ffmpeg {
+            ffmpeg: "ffmpeg".into(),
+            ffprobe: "ffprobe".into(),
+        };
+        let cuda = ffmpeg.proxy_command(Path::new("clip.mp4"), Path::new("proxy.part"), 1, 60, ProxyMode::Cuda);
+        let cuda_args: Vec<_> = cuda.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect();
+        assert!(cuda_args.windows(2).any(|pair| pair == ["-hwaccel", "cuda"]));
+        assert!(cuda_args.iter().any(|arg| arg.starts_with("scale_cuda=512:")));
+        assert!(cuda_args.windows(2).any(|pair| pair == ["-c:v", "h264_nvenc"]));
+
+        let cpu = ffmpeg.proxy_command(Path::new("clip.mp4"), Path::new("proxy.part"), 6, 60, ProxyMode::Cpu);
+        let cpu_args: Vec<_> = cpu.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect();
+        assert!(cpu_args
+            .iter()
+            .any(|arg| arg == "transpose=clock,scale=512:-2:flags=fast_bilinear,format=yuv420p"));
+        assert!(cpu_args.windows(2).any(|pair| pair == ["-c:v", "libx264"]));
+        assert!(cpu_args.windows(2).any(|pair| pair == ["-threads", "2"]));
+    }
+
+    #[test]
+    #[ignore = "requires an installed FFmpeg runtime"]
+    fn installed_ffmpeg_creates_a_playable_proxy() {
+        let ffmpeg = Ffmpeg::discover(None).expect("FFmpeg is not installed");
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.mp4");
+        let target = directory.path().join("proxy.mp4");
+        let generated = command(ffmpeg.ffmpeg_path())
+            .args([
+                "-nostdin",
+                "-hide_banner",
+                "-y",
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=1280x720:rate=30:duration=2",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=2",
+                "-c:v",
+                "libx264",
+                "-c:a",
+                "aac",
+            ])
+            .arg(&source)
+            .status()
+            .unwrap();
+        assert!(generated.success());
+
+        let backend = ffmpeg.create_video_proxy(&source, &target, 1).unwrap();
+        assert!(matches!(
+            backend,
+            ProxyBackend::Cuda | ProxyBackend::Nvenc | ProxyBackend::Cpu
+        ));
+        assert!(target.metadata().unwrap().len() > 0);
+        let info = ffmpeg.probe(&target).unwrap();
+        assert_eq!(info.width, Some(VIDEO_PROXY_WIDTH));
+        assert_eq!(info.height, Some(288));
     }
 }
