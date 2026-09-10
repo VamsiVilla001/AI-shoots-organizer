@@ -167,6 +167,9 @@ function ShootCard({
   const statusLabel = working ? `Processing ${progress.percent.toFixed(0)}%` : shoot.status
   const badgeClass =
     shoot.status === 'completed' ? 'completed' : shoot.status === 'failed' ? 'failed' : working ? 'processing' : ''
+  const timing = shoot.processingStartedAt
+    ? `${formatDateTime(shoot.processingStartedAt)} · ${shoot.processingCompletedAt ? formatElapsed(shoot.processingDurationMs) : 'running'}`
+    : null
 
   return (
     <div className={`card shoot-card${selected ? ' selected' : ''}`} onClick={() => openShoot(shoot.id)}>
@@ -193,6 +196,7 @@ function ShootCard({
           )}
         </span>
         <span className="hint">{formatDate(shoot.createdAt)}</span>
+        {timing && <span className="hint">Processed: {timing}</span>}
       </div>
       <div
         style={{ display: 'flex', gap: 6, marginTop: 10 }}
@@ -224,6 +228,26 @@ function ShootCard({
       </div>
     </div>
   )
+}
+
+function formatDateTime(iso: string): string {
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return '—'
+  return date.toLocaleString(undefined, {
+    day: '2-digit',
+    month: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+
+function formatElapsed(milliseconds: number | null): string {
+  if (milliseconds === null) return '—'
+  const seconds = Math.max(0, Math.round(milliseconds / 1000))
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes}m ${String(seconds % 60).padStart(2, '0')}s`
+  return `${Math.floor(minutes / 60)}h ${String(minutes % 60).padStart(2, '0')}m`
 }
 
 function NewShootModal({ onClose }: { onClose: () => void }) {

@@ -36,6 +36,7 @@ import type {
   SeedResult,
   Shoot,
   ShootSummary,
+  ShootTelemetry,
   VideoTimeline,
   CatalogueSessionStatus,
   LoadedCatalogueInfo,
@@ -110,6 +111,8 @@ export const pauseProcessing = (shootId: number, paused: boolean) =>
 export const cancelProcessing = (shootId: number) => call<number>('cancel_processing', { shootId })
 export const reanalyseShoot = (shootId: number) => call<number>('reanalyse_shoot', { shootId })
 export const getProgress = (shootId: number) => call<ProcessingProgress>('get_progress', { shootId })
+export const getShootTelemetry = (shootId: number) =>
+  call<ShootTelemetry>('get_shoot_telemetry', { shootId })
 export const listFailedJobs = (shootId: number) => call<Job[]>('list_failed_jobs', { shootId })
 
 // --- media -----------------------------------------------------------------

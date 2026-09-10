@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use skwad_database::models::{Job, JobKind, JobState, ProcessingStatus};
-use skwad_database::repo::{jobs, logs, media as media_repo};
+use skwad_database::repo::{jobs, logs, media as media_repo, telemetry};
 use tauri::AppHandle;
 
 use crate::events;
@@ -27,6 +27,10 @@ const ENGINE_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 /// How often the monitor pushes progress to the UI. Fast enough to feel live,
 /// slow enough not to flood the IPC channel on a large import.
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(500);
+
+/// A two-second sample catches short GPU bursts without materially affecting
+/// processing or making long-run telemetry large.
+const RESOURCE_INTERVAL: Duration = Duration::from_secs(2);
 
 pub struct WorkerPool {
     handles: Vec<std::thread::JoinHandle<()>>,
@@ -153,6 +157,12 @@ fn worker_loop(index: usize, app: AppHandle, state: Arc<AppState>) {
             }
             ffmpeg = crate::pipeline::discover_ffmpeg(&state.settings());
             tools_version = state.settings_version();
+        }
+
+        if let Ok(conn) = state.db.conn() {
+            if let Err(error) = telemetry::mark_stage_started(&conn, job.shoot_id, &job.kind) {
+                tracing::warn!(shoot = job.shoot_id, error = %error, "could not start processing telemetry");
+            }
         }
 
         let outcome = run_job(&app, &state, &job, &mut engine, &mut engine_version, ffmpeg.as_ref());
@@ -395,9 +405,13 @@ fn analysis_outstanding(state: &Arc<AppState>, shoot_id: i64) -> bool {
 fn finish_job(app: &AppHandle, state: &Arc<AppState>, job: &Job, outcome: JobOutcome) {
     let Ok(conn) = state.db.conn() else { return };
 
+    let mut settled = false;
+    let mut succeeded = false;
+
     match outcome {
         JobOutcome::Done => {
-            let _ = jobs::complete(&conn, job.id);
+            settled = jobs::complete(&conn, job.id).is_ok();
+            succeeded = settled;
         }
         JobOutcome::Deferred => {
             // Give the remaining analysis a moment rather than spinning on the
@@ -423,6 +437,7 @@ fn finish_job(app: &AppHandle, state: &Arc<AppState>, job: &Job, outcome: JobOut
 
             let state_after = jobs::fail(&conn, job.id, &error).unwrap_or(JobState::Failed);
             if state_after == JobState::Failed {
+                settled = true;
                 if let Some(media_id) = job.media_id {
                     let _ = media_repo::set_status(&conn, media_id, ProcessingStatus::Failed, Some(&error));
                 }
@@ -452,6 +467,15 @@ fn finish_job(app: &AppHandle, state: &Arc<AppState>, job: &Job, outcome: JobOut
             }
         }
     }
+
+    if settled {
+        if let Err(error) = telemetry::mark_stage_settled(&conn, job.shoot_id, &job.kind, succeeded) {
+            tracing::warn!(shoot = job.shoot_id, error = %error, "could not finish stage telemetry");
+        }
+        if let Err(error) = telemetry::finalize_if_settled(&conn, job.shoot_id) {
+            tracing::warn!(shoot = job.shoot_id, error = %error, "could not finish processing telemetry");
+        }
+    }
 }
 
 /// Returns a job to the queue without charging it an attempt.
@@ -465,6 +489,8 @@ fn requeue_without_attempt(conn: &skwad_database::rusqlite::Connection, job_id: 
 /// Pushes progress for every shoot that currently has work in the queue.
 fn monitor_loop(app: AppHandle, state: Arc<AppState>) {
     let mut last_emit = Instant::now() - PROGRESS_INTERVAL;
+    let mut last_resource = Instant::now() - RESOURCE_INTERVAL;
+    let mut resource_monitor = crate::resource_monitor::ResourceMonitor::new();
     // Remembers which shoots were active last tick so a final "finished"
     // update is always delivered, even though the queue is empty by then.
     let mut previously_active: Vec<i64> = Vec::new();
@@ -492,6 +518,58 @@ fn monitor_loop(app: AppHandle, state: Arc<AppState>) {
             if !to_report.contains(shoot_id) {
                 to_report.push(*shoot_id);
             }
+        }
+
+        // Start the CPU baseline when processing wakes up. Otherwise the first
+        // point after a long idle period would average that idle time into the
+        // shoot and under-report its actual load.
+        if previously_active.is_empty() && !active.is_empty() {
+            resource_monitor = crate::resource_monitor::ResourceMonitor::new();
+            last_resource = Instant::now();
+        }
+
+        let just_finished: Vec<i64> = previously_active
+            .iter()
+            .copied()
+            .filter(|shoot_id| !active.contains(shoot_id))
+            .collect();
+        if (!active.is_empty() && last_resource.elapsed() >= RESOURCE_INTERVAL) || !just_finished.is_empty() {
+            let usage = resource_monitor.sample();
+            let concurrent = active.len().max(1) as i64;
+            for shoot_id in &active {
+                let workers: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM jobs WHERE shoot_id = ?1 AND state = 'running'",
+                        skwad_database::rusqlite::params![shoot_id],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or(0);
+                if let Err(error) = telemetry::record_sample(
+                    &conn,
+                    *shoot_id,
+                    usage.cpu_percent,
+                    usage.gpu_percent,
+                    workers,
+                    concurrent,
+                    false,
+                ) {
+                    tracing::warn!(shoot = shoot_id, error = %error, "could not save resource sample");
+                }
+            }
+            for shoot_id in &just_finished {
+                if let Err(error) = telemetry::record_sample(
+                    &conn,
+                    *shoot_id,
+                    usage.cpu_percent,
+                    usage.gpu_percent,
+                    0,
+                    concurrent,
+                    true,
+                ) {
+                    tracing::warn!(shoot = shoot_id, error = %error, "could not save final resource sample");
+                }
+            }
+            last_resource = Instant::now();
         }
 
         for shoot_id in to_report {

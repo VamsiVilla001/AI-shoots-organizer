@@ -8,6 +8,7 @@ pub mod models;
 pub mod paths;
 pub mod pipeline;
 pub mod protocol;
+pub mod resource_monitor;
 pub mod settings;
 pub mod stages;
 pub mod state;
@@ -105,6 +106,7 @@ pub fn run() {
             commands::cancel_processing,
             commands::reanalyse_shoot,
             commands::get_progress,
+            commands::get_shoot_telemetry,
             storage::get_shoot_storage,
             commands::list_failed_jobs,
             // media

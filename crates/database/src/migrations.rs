@@ -54,6 +54,16 @@ const MIGRATIONS: &[Migration] = &[
         name: "shared_catalogue",
         sql: include_str!("migration_008_shared_catalogue.sql"),
     },
+    Migration {
+        version: 9,
+        name: "processing_telemetry",
+        sql: include_str!("migration_009_processing_telemetry.sql"),
+    },
+    Migration {
+        version: 10,
+        name: "cpu_metric_scope",
+        sql: include_str!("migration_010_cpu_metric_scope.sql"),
+    },
 ];
 
 /// The schema version this build expects.

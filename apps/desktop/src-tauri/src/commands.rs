@@ -13,7 +13,7 @@ use tauri::{AppHandle, State};
 use skwad_clustering::FaceMatcher;
 use skwad_database::models::*;
 use skwad_database::repo::{
-    albums, clusters, exports, faces, groups, jobs, logs, media as media_repo, people, shoots, video,
+    albums, clusters, exports, faces, groups, jobs, logs, media as media_repo, people, shoots, telemetry, video,
 };
 use skwad_export_engine::ExportOptions;
 
@@ -341,6 +341,7 @@ pub fn cancel_processing(app: AppHandle, state: State<'_, Arc<AppState>>, shoot_
     let conn = state.db.conn()?;
     let cancelled = jobs::cancel_for_shoot(&conn, shoot_id)?;
     shoots::set_status(&conn, shoot_id, ShootStatus::Paused)?;
+    telemetry::cancel_active(&conn, shoot_id)?;
     events::shoot_changed(&app, shoot_id, "cancelled");
     Ok(cancelled)
 }
@@ -349,6 +350,10 @@ pub fn cancel_processing(app: AppHandle, state: State<'_, Arc<AppState>>, shoot_
 /// Used after changing a model or a threshold.
 #[tauri::command]
 pub fn reanalyse_shoot(app: AppHandle, state: State<'_, Arc<AppState>>, shoot_id: i64) -> Result<usize> {
+    {
+        let conn = state.db.conn()?;
+        telemetry::cancel_active(&conn, shoot_id)?;
+    }
     stages::reset_analysis(&state.db, shoot_id)?;
     state.resume_shoot(shoot_id);
     let queued = stages::queue_pending_work(&state.db, shoot_id)?;
@@ -365,6 +370,12 @@ pub fn get_progress(state: State<'_, Arc<AppState>>, shoot_id: i64) -> Result<Pr
         progress.blocked_reason = Some(blockage.reason);
     }
     Ok(progress)
+}
+
+#[tauri::command]
+pub fn get_shoot_telemetry(state: State<'_, Arc<AppState>>, shoot_id: i64) -> Result<ShootTelemetry> {
+    let conn = state.db.conn()?;
+    Ok(telemetry::latest(&conn, shoot_id)?)
 }
 
 #[tauri::command]

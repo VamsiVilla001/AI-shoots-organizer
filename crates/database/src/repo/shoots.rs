@@ -53,8 +53,19 @@ pub fn list_summaries(conn: &Connection) -> Result<Vec<ShootSummary>> {
                      AND f.assignment IN ('suggested', 'confirmed'))                               AS person_count,
                 (SELECT COUNT(*) FROM clusters c WHERE c.shoot_id = s.id AND c.status = 'unnamed') AS unknown_cluster_count,
                 (SELECT COUNT(*) FROM jobs j WHERE j.shoot_id = s.id AND j.state IN ('queued','running')) AS pending_jobs,
-                (SELECT COUNT(*) FROM jobs j WHERE j.shoot_id = s.id AND j.state = 'failed')       AS failed_jobs
+                (SELECT COUNT(*) FROM jobs j WHERE j.shoot_id = s.id AND j.state = 'failed')       AS failed_jobs,
+                pr.started_at AS processing_started_at,
+                pr.scan_completed_at AS scan_completed_at,
+                pr.completed_at AS processing_completed_at,
+                CASE WHEN pr.started_at IS NULL THEN NULL ELSE
+                  CAST(MAX(0, (julianday(COALESCE(pr.completed_at, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))) -
+                               julianday(pr.started_at)) * 86400000) AS INTEGER)
+                END AS processing_duration_ms
            FROM shoots s
+           LEFT JOIN processing_runs pr ON pr.id = (
+                SELECT r.id FROM processing_runs r
+                 WHERE r.shoot_id = s.id ORDER BY r.started_at DESC, r.id DESC LIMIT 1
+           )
           ORDER BY s.created_at DESC, s.id DESC",
     )?;
 
@@ -69,6 +80,10 @@ pub fn list_summaries(conn: &Connection) -> Result<Vec<ShootSummary>> {
                 unknown_cluster_count: get(row, "unknown_cluster_count")?,
                 pending_jobs: get(row, "pending_jobs")?,
                 failed_jobs: get(row, "failed_jobs")?,
+                processing_started_at: get(row, "processing_started_at")?,
+                scan_completed_at: get(row, "scan_completed_at")?,
+                processing_completed_at: get(row, "processing_completed_at")?,
+                processing_duration_ms: get(row, "processing_duration_ms")?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;

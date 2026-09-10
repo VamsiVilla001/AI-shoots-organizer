@@ -46,7 +46,10 @@ export function AuthScreen() {
 
   return <div className="auth-shell">
     <section className="auth-panel">
-      <div className="auth-brand"><span>SKWAD</span> Media Organiser</div>
+      <div className="auth-brand">
+        <img src="/logo/wordmark-dark-colour.svg" alt="SKWAD" />
+        <span>Media Organiser</span>
+      </div>
       <h1>{mode === 'signin' ? 'Welcome back' : 'Set your private password'}</h1>
       <p className="hint">
         {mode === 'signin'

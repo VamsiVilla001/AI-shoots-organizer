@@ -9,7 +9,12 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import type { ProgressEvent, StageProgress } from '@skwad/shared-types'
+import type {
+  ProcessingResourceSample,
+  ProgressEvent,
+  ShootTelemetry,
+  StageProgress,
+} from '@skwad/shared-types'
 import * as api from '../api'
 import { formatBytes, formatCount } from '../media'
 import { useUi } from '../store'
@@ -23,6 +28,16 @@ const STEPS: Record<string, { label: string; doing: string }> = {
   recognise: { label: 'Recognise players', doing: 'Matching faces against the player library' },
   cluster: { label: 'Group unknown faces', doing: 'Clustering whatever was not recognised' },
   albums: { label: 'Build albums', doing: 'Rebuilding player, team and group-size albums' },
+}
+
+const STAGE_COLOURS: Record<string, string> = {
+  scan: '#d95f18',
+  thumbnail: '#6e6759',
+  analysePhoto: '#b8a04a',
+  analyseVideo: '#f58138',
+  recognise: '#2e7d5b',
+  cluster: '#8a6e93',
+  albums: '#4e8a80',
 }
 
 type StepState = 'done' | 'running' | 'blocked' | 'waiting' | 'failed'
@@ -56,6 +71,19 @@ function secondsSince(iso: string | null): number | null {
   const started = new Date(iso).getTime()
   if (Number.isNaN(started)) return null
   return Math.max(0, (Date.now() - started) / 1000)
+}
+
+function formatClock(iso: string | null): string {
+  if (!iso) return 'Running'
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return '—'
+  return date.toLocaleString(undefined, {
+    day: '2-digit',
+    month: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  })
 }
 
 /**
@@ -103,6 +131,11 @@ export function ProgressPanel(props: { shootId: number }) {
     queryFn: () => api.getShootStorage(props.shootId),
     refetchInterval: 30_000,
   })
+  const telemetry = useQuery({
+    queryKey: ['shoot-telemetry', props.shootId],
+    queryFn: () => api.getShootTelemetry(props.shootId),
+    refetchInterval: 5_000,
+  })
 
   const pause = useMutation({
     mutationFn: ({ shootId, paused }: { shootId: number; paused: boolean }) => api.pauseProcessing(shootId, paused),
@@ -126,46 +159,50 @@ export function ProgressPanel(props: { shootId: number }) {
   const finished = progress ? progress.mediaAnalysed + progress.mediaFailed : 0
   const rate = useThroughput(props.shootId, finished)
 
-  if (!progress) return null
+  if (!progress) {
+    return telemetry.data ? <TelemetryPanel telemetry={telemetry.data} /> : null
+  }
   const active = progress.jobsQueued + progress.jobsRunning > 0
   const remaining = Math.max(0, progress.mediaTotal - finished)
   const eta = active && rate && remaining > 0 ? remaining / rate : null
+  const hasTelemetry = Boolean(telemetry.data)
 
   return (
-    <div className="card progress-panel section">
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <strong>
-          {active
-            ? progress.paused
-              ? progress.jobsRunning > 0 ? 'Pausing — finishing active files' : 'Paused'
-              : `Processing — ${progress.stage}`
-            : 'Processing complete'}
-        </strong>
-        <div style={{ display: 'flex', gap: 8 }}>
-          <button className="small ghost" onClick={() => setShowSteps((shown) => !shown)}>
-            {showSteps ? 'Hide detail' : 'Show detail'}
-          </button>
-          {active && (
-            <>
-              <button className="small" disabled={pause.isPending} title="Pause this shoot after its active files finish. Other shoots continue." onClick={() => pause.mutate({ shootId: props.shootId, paused: !progress.paused })}>
-                {progress.paused ? 'Resume' : 'Pause'}
-              </button>
-              <button className="small danger" onClick={() => cancel.mutate()}>
-                Cancel
-              </button>
-            </>
-          )}
-          {!active && (progress.jobsFailed > 0 || progress.mediaFailed > 0) && (
-            <button className="small" onClick={() => resume.mutate()}>
-              Retry failed
+    <div className="processing-sections">
+      <div className={`card progress-panel section${hasTelemetry ? ' has-resource-chart' : ''}`}>
+        <div className="progress-panel-head" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <strong>
+            {active
+              ? progress.paused
+                ? progress.jobsRunning > 0 ? 'Pausing — finishing active files' : 'Paused'
+                : `Processing — ${progress.stage}`
+              : 'Processing complete'}
+          </strong>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button className="small ghost" onClick={() => setShowSteps((shown) => !shown)}>
+              {showSteps ? 'Hide detail' : 'Show detail'}
             </button>
-          )}
+            {active && (
+              <>
+                <button className="small" disabled={pause.isPending} title="Pause this shoot after its active files finish. Other shoots continue." onClick={() => pause.mutate({ shootId: props.shootId, paused: !progress.paused })}>
+                  {progress.paused ? 'Resume' : 'Pause'}
+                </button>
+                <button className="small danger" onClick={() => cancel.mutate()}>
+                  Cancel
+                </button>
+              </>
+            )}
+            {!active && (progress.jobsFailed > 0 || progress.mediaFailed > 0) && (
+              <button className="small" onClick={() => resume.mutate()}>
+                Retry failed
+              </button>
+            )}
+          </div>
         </div>
-      </div>
 
-      <div className="progress-bar">
-        <div style={{ width: `${Math.min(100, progress.percent).toFixed(1)}%` }} />
-      </div>
+        <div className="progress-bar">
+          <div style={{ width: `${Math.min(100, progress.percent).toFixed(1)}%` }} />
+        </div>
 
       {/* The bar tracks analysis, so say so — and say what is left. */}
       <div className="progress-headline">
@@ -247,9 +284,201 @@ export function ProgressPanel(props: { shootId: number }) {
         )}
       </div>
 
-      {showSteps && <PipelineSteps progress={progress} />}
+        {showSteps && <PipelineSteps progress={progress} />}
+        {hasTelemetry && telemetry.data && (
+          <aside className="progress-telemetry">
+            <TelemetryPanel telemetry={telemetry.data} embedded />
+          </aside>
+        )}
+      </div>
     </div>
   )
+}
+
+function TelemetryPanel(props: { telemetry: ShootTelemetry; embedded?: boolean }) {
+  const { telemetry } = props
+  const run = telemetry.run
+  if (!run) {
+    return (
+      <section className={props.embedded ? 'telemetry telemetry-embedded' : 'card section telemetry'}>
+        <div className="telemetry-main">
+          <div>
+            <strong>Processing time &amp; resource usage</strong>
+            <div className="hint">Timing and CPU/GPU history will be recorded on the next processing run.</div>
+          </div>
+        </div>
+      </section>
+    )
+  }
+
+  const duration = Math.max(1, run.durationMs)
+  const samples = downsample(telemetry.samples, 600)
+  const shared = samples.some((sample) => sample.concurrentShoots > 1)
+  const cpu = stats(telemetry.samples.map((sample) => sample.cpuPercent))
+  const gpu = stats(telemetry.samples.map((sample) => sample.gpuPercent))
+  const maxWorkers = samples.reduce((maximum, sample) => Math.max(maximum, sample.activeWorkers), 0)
+  const elapsedFor = (iso: string | null) => {
+    if (!iso) return duration
+    return Math.max(0, new Date(iso).getTime() - new Date(run.startedAt).getTime())
+  }
+
+  return (
+    <section className={props.embedded ? 'telemetry telemetry-embedded' : 'card section telemetry'}>
+      <div className="telemetry-main">
+        <div className="telemetry-header">
+          <div>
+            <strong>Processing time &amp; resource usage</strong>
+            <div className="hint">Saved with this shoot until its scanned data is deleted.</div>
+          </div>
+          {props.embedded && (
+            <span className={`badge ${run.status === 'completed' ? 'completed' : run.status === 'failed' ? 'failed' : 'processing'}`}>
+              {run.status}
+            </span>
+          )}
+        </div>
+
+        <div className="telemetry-times">
+          <span>Started<strong>{formatClock(run.startedAt)}</strong></span>
+          <span>Scan finished<strong>{run.scanCompletedAt ? formatClock(run.scanCompletedAt) : 'Waiting'}</strong></span>
+          <span>Full process finished<strong>{run.completedAt ? formatClock(run.completedAt) : 'Running'}</strong></span>
+          <span>Total elapsed<strong>{formatDuration(run.durationMs / 1000)}</strong></span>
+        </div>
+
+        {samples.length > 0 ? (
+          <>
+            <div className="telemetry-legend">
+              <span><i className="cpu" /> {run.cpuMetricScope === 'system' ? 'System CPU' : 'SKWAD CPU (legacy)'} {cpu ? `avg ${cpu.average.toFixed(0)}% · max ${cpu.maximum.toFixed(0)}%` : 'unavailable'}</span>
+              <span><i className="gpu" /> NVIDIA GPU {gpu ? `avg ${gpu.average.toFixed(0)}% · max ${gpu.maximum.toFixed(0)}%` : 'unavailable'}</span>
+              <span className="hint">Peak active workers: {maxWorkers}</span>
+            </div>
+            {props.embedded && <ResourceChart telemetry={telemetry} />}
+            <div className="telemetry-stages">
+              {telemetry.stages.map((stage) => {
+                const stageMs = elapsedFor(stage.completedAt) - elapsedFor(stage.startedAt)
+                return (
+                  <span key={stage.stage}>
+                    <i style={{ background: STAGE_COLOURS[stage.stage] ?? '#94a3b8' }} />
+                    {STEPS[stage.stage]?.label ?? stage.stage} {formatDuration(stageMs / 1000)}
+                  </span>
+                )
+              })}
+            </div>
+            <p className="telemetry-note">
+              {run.cpuMetricScope === 'system'
+                ? 'CPU is total Windows system usage, including SKWAD and FFmpeg.'
+                : 'This earlier run recorded only the SKWAD parent process, so FFmpeg CPU use is excluded.'}
+              {' '}GPU is total utilisation of the busiest NVIDIA GPU.
+              {shared && ' Readings are shared where multiple shoots ran at the same time.'}
+              {' '}Samples are recorded every {telemetry.sampleIntervalSeconds} seconds.
+            </p>
+          </>
+        ) : (
+          <p className="hint telemetry-empty">Resource samples appear after the first {telemetry.sampleIntervalSeconds} seconds of processing.</p>
+        )}
+      </div>
+
+      {!props.embedded && (
+        <div className="telemetry-chart-side">
+          <span className={`badge ${run.status === 'completed' ? 'completed' : run.status === 'failed' ? 'failed' : 'processing'}`}>
+            {run.status}
+          </span>
+          {samples.length > 0 && <ResourceChart telemetry={telemetry} />}
+        </div>
+      )}
+    </section>
+  )
+}
+
+function ResourceChart(props: { telemetry: ShootTelemetry }) {
+  const { telemetry } = props
+  const run = telemetry.run
+  if (!run || telemetry.samples.length === 0) return null
+
+  const duration = Math.max(1, run.durationMs)
+  const samples = downsample(telemetry.samples, 600)
+  const width = 360
+  const height = 240
+  const left = 38
+  const right = 12
+  const top = 12
+  const bottom = 34
+  const plotWidth = width - left - right
+  const plotHeight = height - top - bottom
+  const x = (elapsedMs: number) => left + (Math.min(duration, Math.max(0, elapsedMs)) / duration) * plotWidth
+  const y = (percent: number) => top + (1 - Math.min(100, Math.max(0, percent)) / 100) * plotHeight
+  const elapsedFor = (iso: string | null) => {
+    if (!iso) return duration
+    return Math.max(0, new Date(iso).getTime() - new Date(run.startedAt).getTime())
+  }
+
+  return (
+    <div className="telemetry-chart-scroll">
+      <svg className="telemetry-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="CPU and GPU usage over processing time">
+        {[0, 50, 100].map((percent) => (
+          <g key={percent}>
+            <line className="telemetry-grid" x1={left} x2={width - right} y1={y(percent)} y2={y(percent)} />
+            <text className="telemetry-axis" x={left - 7} y={y(percent) + 4} textAnchor="end">{percent}%</text>
+          </g>
+        ))}
+        {telemetry.stages.map((stage) => {
+          const start = elapsedFor(stage.startedAt)
+          const end = elapsedFor(stage.completedAt)
+          return (
+            <rect
+              key={stage.stage}
+              x={x(start)}
+              y={top}
+              width={Math.max(1, x(end) - x(start))}
+              height={plotHeight}
+              fill={STAGE_COLOURS[stage.stage] ?? '#94a3b8'}
+              opacity="0.055"
+            >
+              <title>{STEPS[stage.stage]?.label ?? stage.stage}: {formatDuration((end - start) / 1000)}</title>
+            </rect>
+          )
+        })}
+        <path className="telemetry-line cpu" d={linePath(samples, 'cpuPercent', x, y)} />
+        <path className="telemetry-line gpu" d={linePath(samples, 'gpuPercent', x, y)} />
+        <text className="telemetry-axis" x={left} y={height - 8}>0s</text>
+        <text className="telemetry-axis" x={left + plotWidth / 2} y={height - 8} textAnchor="middle">{formatDuration(duration / 2000)}</text>
+        <text className="telemetry-axis" x={width - right} y={height - 8} textAnchor="end">{formatDuration(duration / 1000)}</text>
+      </svg>
+    </div>
+  )
+}
+
+function linePath(
+  samples: ProcessingResourceSample[],
+  key: 'cpuPercent' | 'gpuPercent',
+  x: (elapsedMs: number) => number,
+  y: (percent: number) => number,
+): string {
+  let drawing = false
+  return samples.map((sample) => {
+    const value = sample[key]
+    if (value === null) {
+      drawing = false
+      return ''
+    }
+    const command = drawing ? 'L' : 'M'
+    drawing = true
+    return `${command}${x(sample.elapsedMs).toFixed(1)},${y(value).toFixed(1)}`
+  }).join(' ')
+}
+
+function downsample(samples: ProcessingResourceSample[], maximum: number): ProcessingResourceSample[] {
+  if (samples.length <= maximum) return samples
+  const step = (samples.length - 1) / (maximum - 1)
+  return Array.from({ length: maximum }, (_, index) => samples[Math.round(index * step)])
+}
+
+function stats(values: (number | null)[]): { average: number; maximum: number } | null {
+  const available = values.filter((value): value is number => value !== null)
+  if (available.length === 0) return null
+  return {
+    average: available.reduce((sum, value) => sum + value, 0) / available.length,
+    maximum: Math.max(...available),
+  }
 }
 
 /** The per-step breakdown: completed, in flight, and still queued. */

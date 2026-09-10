@@ -144,6 +144,10 @@ pub struct ShootSummary {
     pub unknown_cluster_count: i64,
     pub pending_jobs: i64,
     pub failed_jobs: i64,
+    pub processing_started_at: Option<String>,
+    pub scan_completed_at: Option<String>,
+    pub processing_completed_at: Option<String>,
+    pub processing_duration_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -489,6 +493,47 @@ pub struct ProcessingProgress {
     /// The [`JobKind`] that could not run, so the panel can mark the step it
     /// belongs to rather than the whole shoot.
     pub blocked_kind: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcessingRun {
+    pub id: i64,
+    pub shoot_id: i64,
+    pub status: String,
+    pub started_at: String,
+    pub scan_completed_at: Option<String>,
+    pub completed_at: Option<String>,
+    pub duration_ms: i64,
+    pub cpu_metric_scope: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcessingStageTiming {
+    pub stage: String,
+    pub started_at: String,
+    pub completed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcessingResourceSample {
+    pub recorded_at: String,
+    pub elapsed_ms: i64,
+    pub cpu_percent: Option<f64>,
+    pub gpu_percent: Option<f64>,
+    pub active_workers: i64,
+    pub concurrent_shoots: i64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShootTelemetry {
+    pub run: Option<ProcessingRun>,
+    pub stages: Vec<ProcessingStageTiming>,
+    pub samples: Vec<ProcessingResourceSample>,
+    pub sample_interval_seconds: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

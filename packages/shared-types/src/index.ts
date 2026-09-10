@@ -154,6 +154,10 @@ export interface ShootSummary extends Shoot {
   unknownClusterCount: number
   pendingJobs: number
   failedJobs: number
+  processingStartedAt: string | null
+  scanCompletedAt: string | null
+  processingCompletedAt: string | null
+  processingDurationMs: number | null
 }
 
 export interface Media {
@@ -416,6 +420,41 @@ export interface ProcessingProgress {
   blockedReason: string | null
   /** The `JobKind` that could not run, so the panel can mark that step. */
   blockedKind: string | null
+}
+
+export interface ProcessingRun {
+  id: number
+  shootId: number
+  status: 'running' | 'completed' | 'failed' | 'cancelled'
+  startedAt: string
+  scanCompletedAt: string | null
+  completedAt: string | null
+  durationMs: number
+  cpuMetricScope: 'process' | 'system'
+}
+
+export interface ProcessingStageTiming {
+  stage: string
+  startedAt: string
+  completedAt: string | null
+}
+
+export interface ProcessingResourceSample {
+  recordedAt: string
+  elapsedMs: number
+  /** CPU used by the SKWAD process, normalised to 0–100% of the machine. */
+  cpuPercent: number | null
+  /** Total utilisation of the busiest NVIDIA GPU. */
+  gpuPercent: number | null
+  activeWorkers: number
+  concurrentShoots: number
+}
+
+export interface ShootTelemetry {
+  run: ProcessingRun | null
+  stages: ProcessingStageTiming[]
+  samples: ProcessingResourceSample[]
+  sampleIntervalSeconds: number
 }
 
 export interface ExportRecord {

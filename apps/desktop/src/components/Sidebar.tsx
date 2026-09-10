@@ -38,7 +38,8 @@ export function Sidebar() {
   return (
     <aside className="sidebar">
       <div className="brand">
-        <em>SKWAD</em> Media Organiser
+        <img src="/logo/wordmark-dark-colour.svg" alt="SKWAD" />
+        <span>Media Organiser</span>
       </div>
       <nav>
         {ITEMS.map((item) => (
