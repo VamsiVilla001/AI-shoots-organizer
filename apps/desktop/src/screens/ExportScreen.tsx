@@ -29,17 +29,18 @@ const DEFAULT_OPTIONS: ExportOptions = {
   writeManifest: true,
 }
 
-export function ExportScreen() {
+export function ExportScreen({ initialGroupIds }: { initialGroupIds?: number[] } = {}) {
   const shootId = useUi((s) => s.activeShootId)
   if (shootId === null) return <div className="empty-state">Open a shoot first.</div>
-  return <ExportBody shootId={shootId} />
+  return <ExportBody key={`${shootId}-${initialGroupIds?.join(',') ?? 'all'}`} shootId={shootId} initialGroupIds={initialGroupIds} />
 }
 
-function ExportBody({ shootId }: { shootId: number }) {
+function ExportBody({ shootId, initialGroupIds }: { shootId: number; initialGroupIds?: number[] }) {
   const exportPersonIds = useUi((s) => s.exportPersonIds)
   const [destination, setDestination] = useState('')
   const [options, setOptions] = useState<ExportOptions>(() => ({
     ...DEFAULT_OPTIONS,
+    groupIds: initialGroupIds ?? null,
     personIds: exportPersonIds === null ? null : [...exportPersonIds],
     // A selection made on Albums should copy exactly those named groups.
     includeUnidentified: exportPersonIds === null,

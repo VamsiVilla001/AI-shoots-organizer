@@ -39,6 +39,7 @@ export async function startEventBridge(queryClient: QueryClient): Promise<() => 
     listen<ShootChangedEvent>('skwad://shoot-changed', ({ payload }) => {
       queryClient.invalidateQueries({ queryKey: ['shoots'] })
       queryClient.invalidateQueries({ queryKey: ['media', payload.shootId] })
+      queryClient.invalidateQueries({ queryKey: ['media', null, 'workspace'] })
       queryClient.invalidateQueries({ queryKey: ['albums', payload.shootId] })
       queryClient.invalidateQueries({ queryKey: ['clusters', payload.shootId] })
       queryClient.invalidateQueries({ queryKey: ['groups', payload.shootId] })

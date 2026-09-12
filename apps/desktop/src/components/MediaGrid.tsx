@@ -76,6 +76,12 @@ export function MediaGrid(props: {
             }}
             onDoubleClick={() => props.selectMode && openViewer(item.id)}
             onKeyDown={(event) => {
+              if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault()
+                if (props.selectMode && props.onToggleSelect) props.onToggleSelect(item.id, true)
+                else openViewer(item.id)
+                return
+              }
               if (!props.onEditorial || props.editorialBusy) return
               const mediaIds = isSelected && props.selected?.size ? [...props.selected] : [item.id]
               if (/^[0-5]$/.test(event.key)) {
@@ -106,7 +112,7 @@ export function MediaGrid(props: {
               <img src={thumbUrl(item.id)} alt={item.filename} loading="lazy" />
             ) : (
               <div className="placeholder">
-                {item.processingStatus === 'failed' ? 'failed' : 'indexingâ€¦'}
+                {item.processingStatus === 'failed' ? 'Failed' : item.processingStatus === 'analysed' || item.processingStatus === 'skipped' ? 'Preview unavailable' : 'Indexing…'}
               </div>
             )}
             {props.cornerLabels?.get(item.id) && (
