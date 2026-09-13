@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { open } from '@tauri-apps/plugin-dialog'
-import type { Media, ShootSummary } from '@skwad/shared-types'
+import type { Album, Media, ShootSummary } from '@skwad/shared-types'
 import * as api from '../api'
 import { thumbUrl } from '../media'
 import { useUi } from '../store'
@@ -25,6 +25,8 @@ export function Processing({ projects, save, onPublished }: { projects: Project[
   const [importing, setImporting] = useState(false)
   const [selected, setSelected] = useState<Media[] | null>(null)
   const [autoTagSource, setAutoTagSource] = useState<number | null>(null)
+  const [reviewingAutoTags, setReviewingAutoTags] = useState(false)
+  const [managingPeople, setManagingPeople] = useState(false)
   const [tool, setTool] = useState<'albums' | 'review' | 'players' | 'groups' | null>(null)
   const shoots = useQuery({ queryKey: ['shoots'], queryFn: api.listShoots })
   const activeJobs = (shoots.data ?? []).filter(shoot => shoot.status !== 'completed')
@@ -32,6 +34,21 @@ export function Processing({ projects, save, onPublished }: { projects: Project[
   const screen = useUi(s => s.screen)
   const activeTool = screen === 'albums' || screen === 'review' || screen === 'players' || screen === 'groups' ? screen : tool
   const goTool = (next: typeof tool) => { if (source !== null) useUi.getState().openShoot(source, next ?? 'albums'); setTool(next) }
+  const collectAlbum = async (album: Album) => {
+    try {
+      const media: Media[] = []
+      const pageSize = 1000
+      for (let offset = 0; ; offset += pageSize) {
+        const page = await api.listMedia({ shootId: album.shootId, albumId: album.id, offset, limit: pageSize })
+        media.push(...page)
+        if (page.length < pageSize) break
+      }
+      if (media.length === 0) throw new Error('This automatic tag has no media to add.')
+      setSelected(media)
+    } catch (error) {
+      useUi.getState().pushNotice({ level: 'error', message: String(error) })
+    }
+  }
   return <>
     <header className="pw-heading pw-processing-heading"><div><span className="pw-eyebrow">Your reusable library</span><h1>Media Processing</h1><p>Import once. Find people. Create as many collections as you need.</p></div><button className="primary" onClick={() => setImporting(true)}>Add media</button></header>
     {activeJobs.length > 0 && <section className="pw-live-processing" aria-labelledby="live-processing-title"><div className="pw-live-title"><div><span className="pw-eyebrow">Live</span><h2 id="live-processing-title">Processing now</h2></div><span>{activeJobs.length} active</span></div><div className="pw-jobs">{activeJobs.map(shoot => <JobCard key={shoot.id} shoot={shoot} live onOpen={() => { setSource(shoot.id); setTab('library'); setTool(null) }} />)}</div></section>}
@@ -58,9 +75,9 @@ export function Processing({ projects, save, onPublished }: { projects: Project[
       {!shoots.isPending && processedJobs.length === 0 && <div className="pw-empty"><h2>No processed jobs yet</h2><p>Completed imports will appear here automatically.</p><button className="primary" onClick={() => setImporting(true)}>Add media</button></div>}
       <div className="pw-jobs">{processedJobs.map(shoot => <JobCard key={shoot.id} shoot={shoot} onOpen={() => { setSource(shoot.id); setTab('library'); setTool(null) }} />)}</div>
     </>}
-    {tab === 'tags' && <TaggedMedia onCollect={setSelected} />}
+    {tab === 'tags' && (managingPeople ? <><nav className="pw-breadcrumb" aria-label="Breadcrumb"><button onClick={() => setManagingPeople(false)}>Tag media</button><span>/</span><span aria-current="page">Manage people</span></nav><div className="pw-existing"><PlayersScreen /></div></> : <TaggedMedia onCollect={setSelected} onManagePeople={() => setManagingPeople(true)} />)}
     {tab === 'auto-tags' && <>
-      {autoTagSource === null ? <><p className="pw-help">Choose a processed media collection to review people and groups found automatically by SKWAD.</p><div className="pw-card-grid">{processedJobs.map(shoot => <ImportCollectionCard key={shoot.id} shoot={shoot} onOpen={() => { useUi.getState().openShoot(shoot.id, 'albums'); setAutoTagSource(shoot.id) }} />)}</div>{!shoots.isPending && processedJobs.length === 0 && <div className="pw-empty"><h2>No media ready for auto tagging</h2><p>Finish processing an import first. It will appear here when analysis is complete.</p></div>}</> : <><nav className="pw-breadcrumb" aria-label="Breadcrumb"><button onClick={() => setAutoTagSource(null)}>Auto tags</button><span>/</span><span aria-current="page">{shoots.data?.find(shoot => shoot.id === autoTagSource)?.name ?? 'Media collection'}</span></nav><p className="pw-help">Review recognised people, name unknown groups, and regenerate AI albums when needed.</p><div className="pw-existing"><AlbumsScreen /></div></>}
+      {autoTagSource === null ? <><p className="pw-help">Choose a processed media collection to review people and groups found automatically by SKWAD.</p><div className="pw-card-grid">{processedJobs.map(shoot => <ImportCollectionCard key={shoot.id} shoot={shoot} onOpen={() => { useUi.getState().openShoot(shoot.id, 'albums'); setAutoTagSource(shoot.id); setReviewingAutoTags(false) }} />)}</div>{!shoots.isPending && processedJobs.length === 0 && <div className="pw-empty"><h2>No media ready for auto tagging</h2><p>Finish processing an import first. It will appear here when analysis is complete.</p></div>}</> : <><nav className="pw-breadcrumb" aria-label="Breadcrumb"><button onClick={() => { setAutoTagSource(null); setReviewingAutoTags(false) }}>Auto tags</button><span>/</span><span aria-current="page">{shoots.data?.find(shoot => shoot.id === autoTagSource)?.name ?? 'Media collection'}</span></nav><div className="pw-toolbar"><p className="pw-help">Review recognised people, name unknown groups, and add any automatic album directly to a project collection.</p><button onClick={() => { useUi.getState().openShoot(autoTagSource, 'review'); setReviewingAutoTags(current => !current) }}>{reviewingAutoTags ? 'Back to auto tags' : 'Review face matches'}</button></div><div className="pw-existing">{reviewingAutoTags ? <ReviewScreen /> : <AlbumsScreen onAddToCollection={album => void collectAlbum(album)} />}</div></>}
     </>}
     {importing && <ImportMedia onClose={() => setImporting(false)} onCreated={() => { setSource(null); setTab('library'); setImporting(false) }} />}
     {selected && <PublishCollection media={selected} projects={projects} save={save} onClose={() => setSelected(null)} onPublished={id => { setSelected(null); onPublished(id) }} />}
@@ -68,7 +85,16 @@ export function Processing({ projects, save, onPublished }: { projects: Project[
 }
 
 function JobCard({ shoot, live = false, onOpen }: { shoot: ShootSummary; live?: boolean; onOpen: () => void }) {
-  return <article className={`pw-job${live ? ' is-live' : ''}`}><div className="pw-job-heading"><div><h2>{shoot.name}</h2><p>{shoot.photoCount} photos · {shoot.videoCount} videos</p></div><span className={`badge ${shoot.status}`}>{shoot.status === 'completed' ? 'Ready' : shoot.status}</span><button onClick={onOpen}>Open media</button></div><JobDetails shootId={shoot.id} paused={shoot.status === 'paused'} defaultExpanded={live} label={live ? 'Processing details & controls' : 'Processing summary'} /></article>
+  return <article className={`pw-job${live ? ' is-live' : ''}`}><div className="pw-job-heading"><div><h2>{shoot.name}</h2><p>{shoot.photoCount} photos · {shoot.videoCount} videos</p></div><span className={`badge ${shoot.status}`}>{shoot.status === 'completed' ? 'Ready' : shoot.status}</span><button onClick={onOpen}>Open media</button></div>{live && <LiveJobProgress shootId={shoot.id} />}<JobDetails shootId={shoot.id} paused={shoot.status === 'paused'} label={live ? 'View processing details and controls' : 'Processing summary'} /></article>
+}
+
+function LiveJobProgress({ shootId }: { shootId: number }) {
+  const eventProgress = useUi(state => state.progress[shootId])
+  const initial = useQuery({ queryKey: ['workspace-progress-summary', shootId], queryFn: () => api.getProgress(shootId), refetchInterval: 5000 })
+  const progress = eventProgress ?? initial.data
+  if (!progress) return <p className="pw-help">Loading progress…</p>
+  const finished = progress.mediaAnalysed + progress.mediaFailed
+  return <div className="pw-job-progress"><div className="pw-job-progress-copy"><strong>{progress.percent.toFixed(1)}%</strong><span>{progress.stage} · {finished} of {progress.mediaTotal} analysed</span></div><div className="pw-mini-progress" aria-label={`${progress.percent.toFixed(1)}% processed`}><span style={{ width: `${Math.min(100, progress.percent)}%` }} /></div></div>
 }
 
 function JobDetails({ shootId, paused, defaultExpanded = false, label }: { shootId: number; paused: boolean; defaultExpanded?: boolean; label: string }) {

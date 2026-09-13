@@ -45,6 +45,8 @@ import type {
   PublishSkwadResult,
   ProfileUpdate,
   UserProfile,
+  Project,
+  ProjectMember,
 } from '@skwad/shared-types'
 
 /** Backend errors arrive as `{ message }`; normalise to a throwable Error. */
@@ -92,6 +94,14 @@ export const listCatalogueMedia = (packageId: string, revisionId: string, groupI
   call<CatalogueMedia[]>('list_catalogue_media', { packageId, revisionId, groupId: groupId ?? null })
 export const openCatalogueMedia = (packageId: string, revisionId: string, mediaId: number) =>
   call<void>('open_catalogue_media', { packageId, revisionId, mediaId })
+
+// --- projects --------------------------------------------------------------
+
+export const listProjects = () => call<Project[]>('list_projects')
+export const saveProject = (project: Project) => call<Project>('save_project', { project })
+export const deleteProject = (projectId: string) => call<void>('delete_project', { projectId })
+export const replaceProjectMembers = (projectId: string, members: ProjectMember[]) =>
+  call<Project>('replace_project_members', { projectId, members })
 
 // --- shoots ----------------------------------------------------------------
 

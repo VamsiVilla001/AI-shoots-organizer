@@ -6,7 +6,7 @@ import ReactDOM from 'react-dom/client'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { isTauri } from '@tauri-apps/api/core'
 import { mockIPC } from '@tauri-apps/api/mocks'
-import type { Group, Media, MediaQuery, PersonSummary, ShootSummary } from '@skwad/shared-types'
+import type { Group, Media, MediaQuery, PersonSummary, Project, ShootSummary } from '@skwad/shared-types'
 import App from '../App'
 import '../styles.css'
 
@@ -34,12 +34,42 @@ try {
 const persistLibrary = () => localStorage.setItem(libraryKey, JSON.stringify({ groups, links: [...links].map(([id, ids]) => [id, [...ids]]) }))
 const summary = (g: Group) => ({ ...g, mediaCount: links.get(g.id)?.size ?? 0, photoCount: links.get(g.id)?.size ?? 0 })
 const profile = { userId: 'workspace-preview', email: 'sample@example.test', displayName: 'Sample workspace', avatarUrl: null, jobTitle: 'UI review', organisation: 'Sample data only', location: null, bio: null, createdAt: stamp, updatedAt: stamp }
+const projectKey = 'skwad.sample-projects.v3'
+const collection = (id: string, projectId: string, name: string, parentId: string | null, sources: Project['collections'][number]['sources'] = []): Project['collections'][number] => ({ id, projectId, name, parentId, notes: null, sortOrder: 0, sources, createdAt: stamp, updatedAt: stamp })
+const sampleProjects: Project[] = [
+  { id: 'sample-esports', name: 'BGIS 2026', kind: 'Esports tournament', ownerAccountId: profile.userId, ownerEmail: profile.email, organisation: profile.organisation, visibility: 'private', status: 'active', coverMediaId: null, accessRole: 'owner', members: [], mediaCount: 3, createdAt: stamp, updatedAt: stamp, collections: [
+    collection('sample-finals', 'sample-esports', 'Finals highlights', null, [{ shootId: 1, groupId: 1 }]),
+    collection('sample-team-entry', 'sample-esports', 'Team Entry', 'sample-finals'),
+    collection('sample-team-reveal', 'sample-esports', 'Team Reveal', 'sample-team-entry'),
+  ] },
+  { id: 'sample-wedding', name: 'Ananya & Rahul', kind: 'Wedding', ownerAccountId: 'another-account', ownerEmail: 'owner@example.test', organisation: profile.organisation, visibility: 'invited', status: 'active', coverMediaId: null, accessRole: 'editor', members: [{ email: profile.email, displayName: profile.displayName, role: 'editor', invitationState: 'accepted' }], mediaCount: 3, createdAt: stamp, updatedAt: stamp, collections: [collection('sample-ceremony', 'sample-wedding', 'Ceremony', null, [{ shootId: 2, groupId: 2 }])] },
+  { id: 'sample-org', name: 'SKWAD League', kind: 'Esports tournament', ownerAccountId: 'league-owner', ownerEmail: 'league@example.test', organisation: profile.organisation, visibility: 'organisation', status: 'active', coverMediaId: null, accessRole: 'viewer', members: [], mediaCount: 0, createdAt: stamp, updatedAt: stamp, collections: [] },
+]
+let previewProjects: Project[] = sampleProjects
+try { const saved = JSON.parse(localStorage.getItem(projectKey) ?? 'null'); if (Array.isArray(saved)) previewProjects = saved } catch { /* Start from sample projects. */ }
+const persistProjects = () => localStorage.setItem(projectKey, JSON.stringify(previewProjects))
 
 mockIPC((command, args) => {
   const a = (args ?? {}) as Record<string, unknown>
   switch (command) {
     case 'catalogue_session_status': return { authenticatedOnce: true, passwordChangeRequired: false, accountId: 'workspace-preview', email: profile.email, deviceKeyId: null }
     case 'get_user_profile': return profile
+    case 'list_projects': return previewProjects
+    case 'save_project': {
+      const incoming = a.project as Project
+      const existing = previewProjects.find(project => project.id === incoming.id)
+      const saved = { ...incoming, ownerAccountId: existing?.ownerAccountId ?? profile.userId, ownerEmail: existing?.ownerEmail ?? profile.email, accessRole: existing?.accessRole ?? 'owner', updatedAt: new Date().toISOString() }
+      previewProjects = [...previewProjects.filter(project => project.id !== saved.id), saved]
+      persistProjects(); return saved
+    }
+    case 'delete_project': previewProjects = previewProjects.filter(project => project.id !== a.projectId); persistProjects(); return null
+    case 'replace_project_members': {
+      const target = previewProjects.find(project => project.id === a.projectId)
+      if (!target) throw new Error('Project not found')
+      const saved = { ...target, members: a.members as Project['members'], visibility: (a.members as Project['members']).length > 0 && target.visibility === 'private' ? 'invited' as const : target.visibility, updatedAt: new Date().toISOString() }
+      previewProjects = previewProjects.map(project => project.id === saved.id ? saved : project)
+      persistProjects(); return saved
+    }
     case 'app_info': return { version: 'Sample', mediaUrlBase: '/sample-media', databaseBytes: 0, thumbnailBytes: 0, modelBytes: 0, models: [], ffmpegAvailable: true }
     case 'list_shoots': return shoots
     case 'get_shoot': return shoots.find(s => s.id === a.shootId) ?? null
@@ -70,14 +100,5 @@ mockIPC((command, args) => {
   }
 }, { shouldMockEvents: true })
 
-const key = 'skwad.project-workspace.v1.workspace-preview'
-if (localStorage.getItem(key) === null) localStorage.setItem(key, JSON.stringify([
-  { id: 'sample-esports', name: 'BGIS 2026', kind: 'Esports tournament', collections: [
-    { id: 'sample-finals', name: 'Finals highlights', parentId: null, sources: [{ shootId: 1, groupId: 1 }] },
-    { id: 'sample-team-entry', name: 'Team Entry', parentId: 'sample-finals', sources: [] },
-    { id: 'sample-team-reveal', name: 'Team Reveal', parentId: 'sample-team-entry', sources: [] },
-  ] },
-  { id: 'sample-wedding', name: 'Ananya & Rahul', kind: 'Wedding', collections: [{ id: 'sample-ceremony', name: 'Ceremony', parentId: null, sources: [{ shootId: 2, groupId: 2 }] }] },
-]))
 const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: 15000 } } })
 ReactDOM.createRoot(document.getElementById('root')!).render(<React.StrictMode><QueryClientProvider client={client}><App /></QueryClientProvider></React.StrictMode>)

@@ -497,6 +497,56 @@ pub struct ProcessingProgress {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ProjectCollectionSource {
+    pub shoot_id: i64,
+    pub group_id: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectCollection {
+    pub id: String,
+    pub project_id: String,
+    pub parent_id: Option<String>,
+    pub name: String,
+    pub notes: Option<String>,
+    pub sort_order: i64,
+    pub sources: Vec<ProjectCollectionSource>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectMember {
+    pub email: String,
+    pub display_name: Option<String>,
+    pub role: String,
+    pub invitation_state: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Project {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+    pub owner_account_id: String,
+    pub owner_email: String,
+    pub organisation: Option<String>,
+    pub visibility: String,
+    pub status: String,
+    pub cover_media_id: Option<i64>,
+    pub access_role: String,
+    pub collections: Vec<ProjectCollection>,
+    pub members: Vec<ProjectMember>,
+    pub media_count: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProcessingRun {
     pub id: i64,
     pub shoot_id: i64,

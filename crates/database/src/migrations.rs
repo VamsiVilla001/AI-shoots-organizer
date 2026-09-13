@@ -64,6 +64,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "cpu_metric_scope",
         sql: include_str!("migration_010_cpu_metric_scope.sql"),
     },
+    Migration {
+        version: 11,
+        name: "projects",
+        sql: include_str!("migration_011_projects.sql"),
+    },
 ];
 
 /// The schema version this build expects.
@@ -196,6 +201,10 @@ mod tests {
         assert!(media_columns.iter().any(|name| name == "pick_state"));
         assert!(media_columns.iter().any(|name| name == "stable_id"));
         assert!(media_columns.iter().any(|name| name == "normalized_relative_path"));
+        conn.prepare("SELECT * FROM projects").unwrap();
+        conn.prepare("SELECT * FROM project_members").unwrap();
+        conn.prepare("SELECT * FROM project_collections").unwrap();
+        conn.prepare("SELECT * FROM project_collection_sources").unwrap();
     }
 
     #[test]

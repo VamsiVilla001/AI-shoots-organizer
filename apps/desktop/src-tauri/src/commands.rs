@@ -13,7 +13,8 @@ use tauri::{AppHandle, State};
 use skwad_clustering::FaceMatcher;
 use skwad_database::models::*;
 use skwad_database::repo::{
-    albums, clusters, exports, faces, groups, jobs, logs, media as media_repo, people, shoots, telemetry, video,
+    albums, clusters, exports, faces, groups, jobs, logs, media as media_repo, people, projects, shoots, telemetry,
+    video,
 };
 use skwad_export_engine::ExportOptions;
 
@@ -370,6 +371,55 @@ pub fn get_progress(state: State<'_, Arc<AppState>>, shoot_id: i64) -> Result<Pr
         progress.blocked_reason = Some(blockage.reason);
     }
     Ok(progress)
+}
+
+// ---------------------------------------------------------------------------
+// Projects
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub fn list_projects(state: State<'_, Arc<AppState>>) -> Result<Vec<Project>> {
+    let (account_id, email, organisation) = crate::catalogue::current_project_identity(&state)?;
+    let conn = state.db.conn()?;
+    Ok(projects::list_accessible(
+        &conn,
+        &account_id,
+        &email,
+        organisation.as_deref(),
+    )?)
+}
+
+#[tauri::command]
+pub fn save_project(state: State<'_, Arc<AppState>>, project: Project) -> Result<Project> {
+    let (account_id, email, organisation) = crate::catalogue::current_project_identity(&state)?;
+    state
+        .db
+        .transaction(|conn| projects::save(conn, &project, &account_id, &email, organisation.as_deref()))?;
+    let conn = state.db.conn()?;
+    projects::get(&conn, &project.id, &account_id, &email, organisation.as_deref())?
+        .ok_or_else(|| err("the project could not be loaded after saving"))
+}
+
+#[tauri::command]
+pub fn delete_project(state: State<'_, Arc<AppState>>, project_id: String) -> Result<()> {
+    let (account_id, _, _) = crate::catalogue::current_project_identity(&state)?;
+    let conn = state.db.conn()?;
+    Ok(projects::delete(&conn, &project_id, &account_id)?)
+}
+
+#[tauri::command]
+pub fn replace_project_members(
+    state: State<'_, Arc<AppState>>,
+    project_id: String,
+    members: Vec<ProjectMember>,
+) -> Result<Project> {
+    let (account_id, email, organisation) = crate::catalogue::current_project_identity(&state)?;
+    state
+        .db
+        .transaction(|conn| projects::replace_members(conn, &project_id, &members, &account_id, &email))?;
+    let conn = state.db.conn()?;
+    projects::get(&conn, &project_id, &account_id, &email, organisation.as_deref())?
+        .ok_or_else(|| err("the project could not be loaded after sharing"))
 }
 
 #[tauri::command]

@@ -44,6 +44,14 @@ export function SettingsScreen() {
     mutationFn: api.clearAllRecognitionData,
     onSuccess: () => queryClient.invalidateQueries(),
   })
+  const clearIndexes = useMutation({
+    mutationFn: api.clearScannedData,
+    onSuccess: (count) => {
+      queryClient.invalidateQueries()
+      pushNotice({ level: 'success', message: `Removed ${count} media ${count === 1 ? 'index' : 'indexes'}. Original files were not touched.` })
+    },
+    onError: (e) => pushNotice({ level: 'error', message: String(e) }),
+  })
 
   if (!draft) return <div className="empty-state">Loading…</div>
 
@@ -168,6 +176,15 @@ export function SettingsScreen() {
           <div className="hint">Cache size: {formatBytes(info.data?.cacheBytes ?? 0)}</div>
           <button className="small" onClick={() => clearThumbs.mutate()}>
             Clear media cache
+          </button>
+          <button
+            className="small danger"
+            disabled={clearIndexes.isPending}
+            onClick={() => {
+              if (window.confirm('Clear all indexed media?\n\nThis removes imports, analysis, generated previews, and their links from project collections. Project folders and original media files are not touched.')) clearIndexes.mutate()
+            }}
+          >
+            {clearIndexes.isPending ? 'Clearing indexed media…' : 'Clear all indexed media'}
           </button>
 
           <h2 style={{ marginTop: 8 }}>Privacy</h2>

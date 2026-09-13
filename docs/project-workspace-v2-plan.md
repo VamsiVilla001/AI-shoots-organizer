@@ -3,6 +3,23 @@
 **Date:** 12 September 2026  
 **Scope:** Simplify the product around projects and collections while preserving the working scan and video-processing pipeline.
 
+## Implementation status
+
+The `final-version-development` branch now includes the first complete project-first build slice:
+
+- projects, nested collections, membership, roles, visibility and archive state persist in SQLite;
+- existing browser-stored projects migrate once into durable storage without changing source media or Classic groups;
+- Collections provides Personal, Shared with me, Organisation and Archived views with visible actions and permission-aware editing;
+- project templates create the starting collection structure for esports, sports and wedding work;
+- Media Processing keeps the universal media library, shows compact live progress above Media library, Processed jobs, Tag media and Auto tags, and leaves the processing engine unchanged;
+- Media library, Tag media and Auto tags can publish media into an existing or new project collection;
+- Auto tags links directly to the face review queue, and Tag media links to reusable person management;
+- Settings contains the indexed-media cleanup action with explicit source-file safety text;
+- ratings, best-shot, duplicate, pick, reject and unflagged filters are available in the project media browser.
+- collection settings can rename, annotate, relocate, duplicate or remove a nested collection, including moving its complete subtree into another editable project.
+
+The Classic switch remains available while project-wide multi-import export, missing-source recovery and large-library acceptance testing are completed.
+
 ## Product decision
 
 Keep the three primary destinations:

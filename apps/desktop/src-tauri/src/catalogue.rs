@@ -158,6 +158,14 @@ struct LocalAccount {
     display_name: String,
 }
 
+pub(crate) fn current_project_identity(state: &AppState) -> Result<(String, String, Option<String>)> {
+    let identity = load_identity().map_err(|_| command_error("sign in to access projects"))?;
+    let organisation = load_local_profile(state, &identity)
+        .ok()
+        .and_then(|profile| profile.organisation);
+    Ok((identity.account_id, identity.email, organisation))
+}
+
 #[tauri::command]
 pub fn catalogue_session_status(state: State<'_, Arc<AppState>>) -> Result<SessionStatus> {
     let identity = load_identity().ok();

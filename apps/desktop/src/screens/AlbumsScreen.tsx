@@ -20,13 +20,13 @@ import { ProgressPanel } from '../components/ProgressPanel'
 import { Modal } from '../components/Modal'
 import { useUi } from '../store'
 
-export function AlbumsScreen() {
+export function AlbumsScreen({ onAddToCollection }: { onAddToCollection?: (album: Album) => void } = {}) {
   const shootId = useUi((s) => s.activeShootId)
   if (shootId === null) return <div className="empty-state">Open a shoot first.</div>
-  return <AlbumsBody shootId={shootId} />
+  return <AlbumsBody shootId={shootId} onAddToCollection={onAddToCollection} />
 }
 
-function AlbumsBody({ shootId }: { shootId: number }) {
+function AlbumsBody({ shootId, onAddToCollection }: { shootId: number; onAddToCollection?: (album: Album) => void }) {
   const [groupingChoice, setGroupingChoice] = useState<'face' | 'size'>('face')
   const [appliedGrouping, setAppliedGrouping] = useState<'face' | 'size'>('face')
   const [openAlbum, setOpenAlbum] = useState<Album | null>(null)
@@ -146,6 +146,7 @@ function AlbumsBody({ shootId }: { shootId: number }) {
     return (
       <AlbumDetail
         album={openAlbum}
+        onAddToCollection={onAddToCollection}
         typeFilter={typeFilter}
         setTypeFilter={setTypeFilter}
         onBack={() => setOpenAlbum(null)}
@@ -264,6 +265,7 @@ function AlbumsBody({ shootId }: { shootId: number }) {
                     onOpen={() => setOpenAlbum(album)}
                     selected={personId !== undefined && validSelectedPersonIds.includes(personId)}
                     onToggle={personId === undefined ? undefined : () => togglePerson(personId)}
+                    onAddToCollection={onAddToCollection}
                   />
                 )
               })}
@@ -275,7 +277,7 @@ function AlbumsBody({ shootId }: { shootId: number }) {
             <Section title="Multiple Players">
               <div className="card-grid">
                 {grouped.multi.map((album) => (
-                  <AlbumCard key={album.id} album={album} onOpen={() => setOpenAlbum(album)} />
+                  <AlbumCard key={album.id} album={album} onOpen={() => setOpenAlbum(album)} onAddToCollection={onAddToCollection} />
                 ))}
               </div>
             </Section>
@@ -285,7 +287,7 @@ function AlbumsBody({ shootId }: { shootId: number }) {
             <Section title="Teams">
               <div className="card-grid">
                 {grouped.teams.map((album) => (
-                  <AlbumCard key={album.id} album={album} onOpen={() => setOpenAlbum(album)} />
+                  <AlbumCard key={album.id} album={album} onOpen={() => setOpenAlbum(album)} onAddToCollection={onAddToCollection} />
                 ))}
               </div>
             </Section>
@@ -305,7 +307,7 @@ function AlbumsBody({ shootId }: { shootId: number }) {
                 />
               ))}
               {grouped.unidentified.map((album) => (
-                <AlbumCard key={album.id} album={album} onOpen={() => setOpenAlbum(album)} />
+                <AlbumCard key={album.id} album={album} onOpen={() => setOpenAlbum(album)} onAddToCollection={onAddToCollection} />
               ))}
             </div>
           </Section>
@@ -318,7 +320,7 @@ function AlbumsBody({ shootId }: { shootId: number }) {
           </div>
           <div className="card-grid">
             {grouped.groupSize.map((album) => (
-              <AlbumCard key={album.id} album={album} onOpen={() => setOpenAlbum(album)} />
+              <AlbumCard key={album.id} album={album} onOpen={() => setOpenAlbum(album)} onAddToCollection={onAddToCollection} />
             ))}
           </div>
         </Section>
@@ -345,11 +347,13 @@ function AlbumCard({
   onOpen,
   selected = false,
   onToggle,
+  onAddToCollection,
 }: {
   album: Album
   onOpen: () => void
   selected?: boolean
   onToggle?: () => void
+  onAddToCollection?: (album: Album) => void
 }) {
   const queryClient = useQueryClient()
   const pushNotice = useUi((s) => s.pushNotice)
@@ -394,9 +398,7 @@ function AlbumCard({
         </span>
       </div>
       <div style={{ marginTop: 10 }} onClick={(e) => e.stopPropagation()}>
-        <button className="small" disabled={toGroup.isPending} onClick={() => toGroup.mutate()}>
-          {toGroup.isPending ? 'Adding…' : 'Make this a group'}
-        </button>
+        {onAddToCollection ? <button className="small primary" onClick={() => onAddToCollection(album)}>Add to collection</button> : <button className="small" disabled={toGroup.isPending} onClick={() => toGroup.mutate()}>{toGroup.isPending ? 'Adding…' : 'Make this a group'}</button>}
       </div>
     </div>
   )
@@ -513,6 +515,7 @@ function NameClusterModal({ cluster, onClose }: { cluster: ClusterSummary; onClo
 
 function AlbumDetail(props: {
   album: Album
+  onAddToCollection?: (album: Album) => void
   typeFilter: MediaType | 'all'
   setTypeFilter: (f: MediaType | 'all') => void
   onBack: () => void
@@ -600,8 +603,9 @@ function AlbumDetail(props: {
       <div className="workspace-header">
         <h1>{album.name}</h1>
         <div className="actions">
+          {props.onAddToCollection && <button className="primary" onClick={() => props.onAddToCollection?.(album)}>Add to collection</button>}
           {personId !== null && (
-            <button className="primary" onClick={() => openExport([personId])}>
+            <button className={props.onAddToCollection ? '' : 'primary'} onClick={() => openExport([personId])}>
               Copy this person's group…
             </button>
           )}

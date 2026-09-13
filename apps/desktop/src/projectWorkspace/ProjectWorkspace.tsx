@@ -36,7 +36,7 @@ export function ProjectWorkspace({ accountId, onClassic }: { accountId: string; 
     </aside>
     <main className="pw-main">
       {projectStore.error && <p role="alert" className="pw-error">{projectStore.error}</p>}
-      <div hidden={tab !== 'collections'}><Collections key={publication} projects={projectStore.projects} save={projectStore.save} projectId={projectId} setProjectId={setProjectId} onProcess={process} /></div>
+      <div hidden={tab !== 'collections'}><Collections key={publication} projects={projectStore.projects} save={projectStore.save} replaceMembers={projectStore.replaceMembers} loading={projectStore.loading} saving={projectStore.saving} projectId={projectId} setProjectId={setProjectId} onProcess={process} /></div>
       <div hidden={tab !== 'processing'}><Processing projects={projectStore.projects} save={projectStore.save} onPublished={id => { setProjectId(id); setPublication(v => v + 1); setTab('collections') }} /></div>
       {tab === 'settings' && <><header className="pw-heading"><div><span className="pw-eyebrow">Workspace</span><h1>Settings</h1><p>Make SKWAD work for you.</p></div></header>
         <div className="pw-tabs" aria-label="Settings sections">{[['general', 'General'], ['catalogues', 'Catalogue exchange']].map(([id, label]) => <button key={id} aria-pressed={settingsTab === id} onClick={() => setSettingsTab(id)}>{label}</button>)}</div>

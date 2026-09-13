@@ -422,6 +422,52 @@ export interface ProcessingProgress {
   blockedKind: string | null
 }
 
+export type ProjectVisibility = 'private' | 'invited' | 'organisation'
+export type ProjectStatus = 'active' | 'archived'
+export type ProjectRole = 'owner' | 'editor' | 'viewer'
+
+export interface ProjectCollectionSource {
+  shootId: number
+  groupId: number
+}
+
+export interface ProjectCollection {
+  id: string
+  projectId: string
+  parentId: string | null
+  name: string
+  notes: string | null
+  sortOrder: number
+  sources: ProjectCollectionSource[]
+  createdAt: string
+  updatedAt: string
+}
+
+export interface ProjectMember {
+  email: string
+  displayName: string | null
+  role: Exclude<ProjectRole, 'owner'>
+  invitationState: 'invited' | 'accepted'
+}
+
+export interface Project {
+  id: string
+  name: string
+  kind: string
+  ownerAccountId: string
+  ownerEmail: string
+  organisation: string | null
+  visibility: ProjectVisibility
+  status: ProjectStatus
+  coverMediaId: number | null
+  accessRole: ProjectRole
+  collections: ProjectCollection[]
+  members: ProjectMember[]
+  mediaCount: number
+  createdAt: string
+  updatedAt: string
+}
+
 export interface ProcessingRun {
   id: number
   shootId: number
