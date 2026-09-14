@@ -73,6 +73,10 @@ mockIPC((command, args) => {
     case 'app_info': return { version: 'Sample', mediaUrlBase: '/sample-media', databaseBytes: 0, thumbnailBytes: 0, modelBytes: 0, models: [], ffmpegAvailable: true }
     case 'list_shoots': return shoots
     case 'get_shoot': return shoots.find(s => s.id === a.shootId) ?? null
+    case 'rename_shoot': { const target = shoots.find(s => s.id === a.shootId); if (target) target.name = String(a.name); return null }
+    case 'reanalyse_shoot': { const target = shoots.find(s => s.id === a.shootId); if (target) target.status = 'processing'; return target ? target.photoCount + target.videoCount : 0 }
+    case 'delete_shoot_index': { const index = shoots.findIndex(s => s.id === a.shootId); if (index >= 0) shoots.splice(index, 1); return null }
+    case 'open_path': return null
     case 'list_groups': return groups.filter(g => g.shootId === a.shootId).map(summary)
     case 'list_media': {
       const q = a.query as MediaQuery
