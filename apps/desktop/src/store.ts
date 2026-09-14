@@ -25,6 +25,8 @@ interface UiState {
   notices: Notice[]
   /** Media id open in the viewer overlay, if any. */
   viewerMediaId: number | null
+  /** Open videos on analysed sample frames instead of loading the original stream. */
+  viewerPreferVideoFaces: boolean
 
   navigate: (screen: Screen) => void
   openExport: (personIds: number[]) => void
@@ -33,7 +35,7 @@ interface UiState {
   setExportProgress: (event: ExportProgressEvent | null) => void
   pushNotice: (notice: NoticeEvent) => void
   dismissNotice: (id: number) => void
-  openViewer: (mediaId: number) => void
+  openViewer: (mediaId: number, preferVideoFaces?: boolean) => void
   closeViewer: () => void
   resetWorkspace: () => void
 }
@@ -48,6 +50,7 @@ export const useUi = create<UiState>((set) => ({
   exportPersonIds: null,
   notices: [],
   viewerMediaId: null,
+  viewerPreferVideoFaces: false,
 
   navigate: (screen) =>
     set({
@@ -80,8 +83,8 @@ export const useUi = create<UiState>((set) => ({
 
   dismissNotice: (id) => set((state) => ({ notices: state.notices.filter((n) => n.id !== id) })),
 
-  openViewer: (mediaId) => set({ viewerMediaId: mediaId }),
-  closeViewer: () => set({ viewerMediaId: null }),
+  openViewer: (mediaId, preferVideoFaces = false) => set({ viewerMediaId: mediaId, viewerPreferVideoFaces: preferVideoFaces }),
+  closeViewer: () => set({ viewerMediaId: null, viewerPreferVideoFaces: false }),
   resetWorkspace: () =>
     set({
       screen: 'shoots',
@@ -90,5 +93,6 @@ export const useUi = create<UiState>((set) => ({
       exportProgress: null,
       exportPersonIds: null,
       viewerMediaId: null,
+      viewerPreferVideoFaces: false,
     }),
 }))

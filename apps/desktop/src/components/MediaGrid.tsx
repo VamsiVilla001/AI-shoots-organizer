@@ -34,8 +34,11 @@ export function MediaGrid(props: {
   editorialBusy?: boolean
   emptyTitle?: string
   emptyHint?: string
+  /** Open videos on analysed sample frames, avoiding a heavy original video stream. */
+  preferVideoFaces?: boolean
 }) {
   const openViewer = useUi((s) => s.openViewer)
+  const openMedia = (item: Media) => openViewer(item.id, Boolean(props.preferVideoFaces && item.mediaType === 'video'))
   if (props.media.length === 0) {
     return (
       <div className="empty-state">
@@ -71,15 +74,15 @@ export function MediaGrid(props: {
               } else if (props.onToggleSelect && (props.selectMode || additive)) {
                 props.onToggleSelect(item.id, props.selectMode ? true : additive)
               } else {
-                openViewer(item.id)
+                openMedia(item)
               }
             }}
-            onDoubleClick={() => props.selectMode && openViewer(item.id)}
+            onDoubleClick={() => props.selectMode && openMedia(item)}
             onKeyDown={(event) => {
               if (event.key === 'Enter' || event.key === ' ') {
                 event.preventDefault()
                 if (props.selectMode && props.onToggleSelect) props.onToggleSelect(item.id, true)
-                else openViewer(item.id)
+                else openMedia(item)
                 return
               }
               if (!props.onEditorial || props.editorialBusy) return

@@ -28,6 +28,7 @@ export default function App() {
   }
   const screen = useUi((s) => s.screen)
   const viewerMediaId = useUi((s) => s.viewerMediaId)
+  const viewerPreferVideoFaces = useUi((s) => s.viewerPreferVideoFaces)
 
   const session = useQuery({ queryKey: ['catalogueSession'], queryFn: api.catalogueSessionStatus })
   const info = useQuery({
@@ -52,7 +53,7 @@ export default function App() {
   if (experience === 'projects') {
     const accountId = session.data.accountId ?? session.data.email ?? 'local'
     return <><ProjectWorkspace key={accountId} accountId={accountId} onClassic={() => switchExperience('classic')} />
-      {viewerMediaId !== null && <MediaViewer mediaId={viewerMediaId} />}<Notices /></>
+      {viewerMediaId !== null && <MediaViewer mediaId={viewerMediaId} preferVideoFaces={viewerPreferVideoFaces} />}<Notices /></>
   }
 
   return (
@@ -70,7 +71,7 @@ export default function App() {
         {screen === 'profile' && <ProfileScreen />}
         {screen === 'settings' && <SettingsScreen />}
       </main>
-      {viewerMediaId !== null && <MediaViewer mediaId={viewerMediaId} />}
+      {viewerMediaId !== null && <MediaViewer mediaId={viewerMediaId} preferVideoFaces={viewerPreferVideoFaces} />}
       <Notices />
     </div>
   )

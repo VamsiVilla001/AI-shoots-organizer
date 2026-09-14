@@ -17,7 +17,7 @@ import { FaceTagger } from './FaceTagger'
 import { formatConfidence, formatCount, formatTime, fullUrl, videoFrameUrl, videoUrl } from '../media'
 import { useUi } from '../store'
 
-export function MediaViewer(props: { mediaId: number }) {
+export function MediaViewer(props: { mediaId: number; preferVideoFaces?: boolean }) {
   const closeViewer = useUi((s) => s.closeViewer)
   const pushNotice = useUi((s) => s.pushNotice)
   const queryClient = useQueryClient()
@@ -27,6 +27,7 @@ export function MediaViewer(props: { mediaId: number }) {
   const [drawingFace, setDrawingFace] = useState(false)
   const [draftBox, setDraftBox] = useState<BoundingBox | null>(null)
   const [videoReviewTime, setVideoReviewTime] = useState<number | null>(null)
+  const [videoFaceMode, setVideoFaceMode] = useState(Boolean(props.preferVideoFaces))
   const drawStart = useRef<{ point: { x: number; y: number }; clientX: number; clientY: number } | null>(null)
   const frameRef = useRef<HTMLDivElement>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
@@ -51,6 +52,13 @@ export function MediaViewer(props: { mediaId: number }) {
   })
   const people = useQuery({ queryKey: ['people'], queryFn: () => api.listPeople(null) })
   const item = media.data
+
+  useEffect(() => {
+    if (!props.preferVideoFaces || !videoFaceMode || media.data?.mediaType !== 'video' || videoReviewTime != null) return
+    const firstFaceFrame = faces.data?.find(face => face.assignment !== 'ignored' && face.frameTime != null)?.frameTime
+    const firstSample = sampleFrames.data?.[0]
+    if (firstFaceFrame != null || firstSample != null) setVideoReviewTime(firstFaceFrame ?? firstSample ?? null)
+  }, [faces.data, media.data?.mediaType, props.preferVideoFaces, sampleFrames.data, videoFaceMode, videoReviewTime])
 
   const addFace = useMutation({
     mutationFn: (bbox: BoundingBox) =>
@@ -169,7 +177,7 @@ export function MediaViewer(props: { mediaId: number }) {
       face.frameTime != null &&
       Math.abs(face.frameTime - videoReviewTime) < 0.01,
   )
-  const reviewingVideoFrame = item.mediaType === 'video' && videoReviewTime != null
+  const reviewingVideoFrame = item.mediaType === 'video' && videoFaceMode
 
   const openVideoReview = () => {
     videoRef.current?.pause()
@@ -177,6 +185,7 @@ export function MediaViewer(props: { mediaId: number }) {
       (face) => face.frameTime != null && face.personId == null,
     )?.frameTime
     setVideoReviewTime(unnamedFrame ?? videoFrameTimes[0] ?? null)
+    setVideoFaceMode(true)
     setShowBoxes(true)
     setDrawingFace(false)
     setDraftBox(null)
@@ -296,9 +305,9 @@ export function MediaViewer(props: { mediaId: number }) {
             <>
               <button
                 className={`small${reviewingVideoFrame ? ' primary' : ''}`}
-                disabled={videoFrameTimes.length === 0}
                 onClick={() => {
                   if (reviewingVideoFrame) {
+                    setVideoFaceMode(false)
                     setVideoReviewTime(null)
                     setDrawingFace(false)
                     setDraftBox(null)
@@ -308,9 +317,9 @@ export function MediaViewer(props: { mediaId: number }) {
                   }
                 }}
               >
-                {reviewingVideoFrame ? 'Back to video' : 'Tag sampled faces'}
+                {reviewingVideoFrame ? 'Play original video' : 'Show tagged faces'}
               </button>
-              {reviewingVideoFrame && (
+              {reviewingVideoFrame && videoReviewTime != null && (
                 <>
                   <button
                     className={`small${drawingFace ? ' primary' : ''}`}
@@ -411,7 +420,7 @@ export function MediaViewer(props: { mediaId: number }) {
                 />
               )}
             </>
-          ) : reviewingVideoFrame ? (
+          ) : reviewingVideoFrame && videoReviewTime != null ? (
             <>
               <img
                 key={videoReviewTime}
@@ -458,6 +467,12 @@ export function MediaViewer(props: { mediaId: number }) {
                 />
               )}
             </>
+          ) : reviewingVideoFrame ? (
+            <div className="video-face-empty" role="status">
+              <strong>{faces.isError || sampleFrames.isError ? 'Couldn’t load tagged faces' : faces.isPending || sampleFrames.isPending ? 'Loading tagged faces…' : 'No tagged faces found'}</strong>
+              <span>{faces.isError || sampleFrames.isError ? 'The analysed sample data could not be opened.' : faces.isPending || sampleFrames.isPending ? 'Opening analysed sample frames without loading the 4K video.' : 'SKWAD did not find a face in the analysed sample frames for this video.'}</span>
+              {(faces.isError || sampleFrames.isError) && <button onClick={() => { void faces.refetch(); void sampleFrames.refetch() }}>Try again</button>}
+            </div>
           ) : (
             <video
               ref={videoRef}
@@ -478,7 +493,7 @@ export function MediaViewer(props: { mediaId: number }) {
         />
       )}
 
-      {reviewingVideoFrame && videoFrameTimes.length > 0 && (
+      {reviewingVideoFrame && videoReviewTime != null && videoFrameTimes.length > 0 && (
         <div className="video-sample-nav" aria-label="Analysed video samples">
           <span className="hint">Sample frames</span>
           {videoFrameTimes.map((timestamp, index) => {
@@ -505,14 +520,14 @@ export function MediaViewer(props: { mediaId: number }) {
         </div>
       )}
 
-      {reviewingVideoFrame && !drawingFace && (
+      {reviewingVideoFrame && videoReviewTime != null && !drawingFace && (
         <div className="viewer-prompt">
           Analysed sample at {formatTime(videoReviewTime)} · {formatCount(videoFrameFaces.length)} face
           {videoFrameFaces.length === 1 ? '' : 's'} — click a face to name and group the complete video.
         </div>
       )}
 
-      {reviewingVideoFrame && drawingFace && (
+      {reviewingVideoFrame && videoReviewTime != null && drawingFace && (
         <div className="viewer-prompt manual-face-prompt">
           {addFace.isPending
             ? 'Reading the marked face and comparing it with named faces…'
@@ -527,7 +542,16 @@ export function MediaViewer(props: { mediaId: number }) {
               <button
                 key={appearance.id}
                 className="chip"
-                onClick={() => seekTo(appearance.timestamp)}
+                onClick={() => {
+                  if (reviewingVideoFrame) {
+                    setVideoReviewTime(appearance.timestamp)
+                    setDrawingFace(false)
+                    setDraftBox(null)
+                    setTaggingId(null)
+                  } else {
+                    seekTo(appearance.timestamp)
+                  }
+                }}
                 title={`Confidence ${formatConfidence(appearance.confidence)}`}
               >
                 {timeline.personName ?? 'Unknown'} · {formatTime(appearance.timestamp)}

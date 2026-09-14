@@ -1413,6 +1413,25 @@ h2 {
   border-radius: 6px;
 }
 
+.video-face-empty {
+  width: min(560px, 80vw);
+  min-height: 240px;
+  display: grid;
+  place-content: center;
+  gap: 8px;
+  padding: 32px;
+  text-align: center;
+  color: var(--text-dim);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.video-face-empty strong {
+  color: var(--text);
+  font-size: 17px;
+}
+
 .face-box {
   position: absolute;
   border: 2px solid var(--teal);
