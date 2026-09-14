@@ -15,6 +15,7 @@ pub mod quality;
 pub mod raw;
 pub mod scanner;
 pub mod thumbnails;
+pub mod video_frames;
 
 pub use ffmpeg::{Ffmpeg, ProxyBackend};
 pub use formats::{Decoder, MediaKind};
@@ -23,6 +24,7 @@ pub use metadata::{Metadata, Orientation};
 pub use proxies::{VideoProxyCache, VIDEO_PROXY_WIDTH};
 pub use scanner::{scan, ScanOptions, ScanReport, ScannedFile};
 pub use thumbnails::{ThumbnailCache, THUMBNAIL_MAX_DIM};
+pub use video_frames::VideoFrameCache;
 
 #[derive(Debug, thiserror::Error)]
 pub enum MediaError {

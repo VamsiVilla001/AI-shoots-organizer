@@ -17,7 +17,7 @@ use skwad_database::Database;
 use skwad_face_detection::{Detection, FaceDetector, Rect, ScrfdDetector};
 use skwad_face_recognition::{ArcFaceEmbedder, Embedding, FaceEmbedder};
 use skwad_media_core::formats::{self, MediaKind};
-use skwad_media_core::{Ffmpeg, Gstreamer, ProxyBackend, ThumbnailCache, VideoProxyCache};
+use skwad_media_core::{Ffmpeg, Gstreamer, ProxyBackend, ThumbnailCache, VideoFrameCache, VideoProxyCache};
 
 use crate::models::{ModelRegistry, ModelRole};
 use crate::paths::AppPaths;
@@ -52,6 +52,7 @@ pub struct Engine {
     detector: ScrfdDetector,
     embedder: ArcFaceEmbedder,
     ffmpeg: Option<Ffmpeg>,
+    video_frames: VideoFrameCache,
     settings: AppSettings,
 }
 
@@ -115,6 +116,7 @@ impl Engine {
             detector,
             embedder,
             ffmpeg: discover_ffmpeg(settings),
+            video_frames: VideoFrameCache::new(paths.face_cache.join("video_frames")),
             settings: settings.clone(),
         })
     }
@@ -286,44 +288,58 @@ impl Engine {
             video_repo::delete_for_media(&conn, item.id)?;
             video_repo::delete_sample_frames(&conn, item.id)?;
         }
+        if let Err(error) = self.video_frames.remove(&item.content_key) {
+            tracing::warn!(video = %item.filename, %error, "could not clear stale review frames");
+        }
 
         let mut outcome = AnalysisOutcome::default();
         let mut decoded_frames = 0usize;
         let mut previous_frame: Option<PreviousVideoFrame> = None;
         let mut tracked_faces_recovered = 0usize;
         let prefetch = self.settings.video_frame_prefetch;
-        let mut consume_frame =
-            |(at, sampled): (f64, skwad_video_analysis::Result<skwad_video_analysis::SampledFrame>)| -> Result<()> {
-                match sampled {
-                    Ok(frame) => {
-                        decoded_frames += 1;
+        let mut consume_frame = |(at, sampled): (
+            f64,
+            skwad_video_analysis::Result<skwad_video_analysis::SampledFrame>,
+        )|
+         -> Result<()> {
+            match sampled {
+                Ok(frame) => {
+                    decoded_frames += 1;
+                    {
+                        let conn = db.conn()?;
+                        video_repo::insert_sample_frame(&conn, item.id, frame.timestamp)?;
+                    }
+                    let mut analysed_faces = self.detect_and_embed(&frame.image)?;
+                    if let Some(previous) = previous_frame.as_ref() {
+                        tracked_faces_recovered +=
+                            self.recover_tracked_faces(previous, &frame.image, &mut analysed_faces);
+                    }
+                    let frame_outcome =
+                        Self::store_analysed_faces(db, item, &frame.image, Some(frame.timestamp), &analysed_faces)?;
+                    if frame_outcome.faces_detected > 0 {
+                        if let Err(error) = self
+                            .video_frames
+                            .store(&frame.image, &item.content_key, frame.timestamp)
                         {
-                            let conn = db.conn()?;
-                            video_repo::insert_sample_frame(&conn, item.id, frame.timestamp)?;
+                            tracing::warn!(video = %item.filename, at = frame.timestamp, %error, "could not cache tagged review frame");
                         }
-                        let mut analysed_faces = self.detect_and_embed(&frame.image)?;
-                        if let Some(previous) = previous_frame.as_ref() {
-                            tracked_faces_recovered +=
-                                self.recover_tracked_faces(previous, &frame.image, &mut analysed_faces);
-                        }
-                        let frame_outcome =
-                            Self::store_analysed_faces(db, item, &frame.image, Some(frame.timestamp), &analysed_faces)?;
-                        outcome.faces_detected += frame_outcome.faces_detected;
-                        outcome.faces_embedded += frame_outcome.faces_embedded;
-                        outcome.frames_analysed += frame_outcome.frames_analysed;
-                        previous_frame = Some(PreviousVideoFrame {
-                            image: frame.image,
-                            faces: analysed_faces,
-                        });
-                        // Tracking retains one previous frame. Prefetch can hold
-                        // one additional downscaled frame, never an entire video.
                     }
-                    Err(error) => {
-                        tracing::debug!(video = %item.filename, at, %error, "frame decode failed");
-                    }
+                    outcome.faces_detected += frame_outcome.faces_detected;
+                    outcome.faces_embedded += frame_outcome.faces_embedded;
+                    outcome.frames_analysed += frame_outcome.frames_analysed;
+                    previous_frame = Some(PreviousVideoFrame {
+                        image: frame.image,
+                        faces: analysed_faces,
+                    });
+                    // Tracking retains one previous frame. Prefetch can hold
+                    // one additional downscaled frame, never an entire video.
                 }
-                Ok(())
-            };
+                Err(error) => {
+                    tracing::debug!(video = %item.filename, at, %error, "frame decode failed");
+                }
+            }
+            Ok(())
+        };
 
         let (decode_time, frame_wait_time, frame_analysis_time, decoder_segments) = if prefetch
             && item.duration.is_some_and(|duration| duration > 60.0)

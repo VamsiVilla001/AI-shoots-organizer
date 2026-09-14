@@ -137,10 +137,9 @@ fn serve_full(state: &Arc<AppState>, media: &skwad_database::models::Media) -> R
     }
 }
 
-/// Recreates one of the frames used during video analysis. Analysis stores the
-/// timestamp and normalised face coordinates rather than another copy of the
-/// footage, so this remains storage-efficient and always shows the source
-/// pixels the recorded boxes refer to.
+/// Serves one of the frames used during video analysis. New analysis jobs cache
+/// face-bearing samples while their pixels are already in memory. Older items
+/// are decoded once (from the lightweight proxy when possible) and cached.
 fn serve_video_frame(
     state: &Arc<AppState>,
     request: &Request<Vec<u8>>,
@@ -152,6 +151,11 @@ fn serve_video_frame(
     let Some(timestamp) = request.uri().query().and_then(parse_frame_timestamp) else {
         return error(StatusCode::BAD_REQUEST, "expected a finite t=<seconds> query");
     };
+    match state.video_frames.read(&media.content_key, timestamp) {
+        Ok(Some(bytes)) => return ok(bytes, "image/jpeg", true),
+        Ok(None) => {}
+        Err(error) => tracing::warn!(media = media.id, at = timestamp, %error, "could not read cached review frame"),
+    }
     let path = Path::new(&media.path);
     if !path.is_file() {
         return error(StatusCode::NOT_FOUND, "the original file has moved or been deleted");
@@ -162,15 +166,23 @@ fn serve_video_frame(
             "FFmpeg is required for video sample frames",
         );
     };
-    let orientation = media.orientation.clamp(1, 8) as u16;
-    match skwad_media_core::decode::load_video_frame(path, timestamp, orientation, Some(VIDEO_FRAME_MAX_DIM), &ffmpeg) {
-        Ok(image) => {
-            let mut buffer = Vec::new();
-            match image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buffer, 90).encode_image(&image) {
-                Ok(()) => ok(buffer, "image/jpeg", true),
-                Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
-            }
-        }
+    let proxy = state.proxies.path_for(&media.content_key);
+    let (decode_path, orientation) = if proxy.is_file() {
+        (proxy.as_path(), 1)
+    } else {
+        (path, media.orientation.clamp(1, 8) as u16)
+    };
+    match skwad_media_core::decode::load_video_frame(
+        decode_path,
+        timestamp,
+        orientation,
+        Some(VIDEO_FRAME_MAX_DIM),
+        &ffmpeg,
+    ) {
+        Ok(image) => match state.video_frames.store(&image, &media.content_key, timestamp) {
+            Ok(bytes) => ok(bytes, "image/jpeg", true),
+            Err(cache_error) => error(StatusCode::INTERNAL_SERVER_ERROR, &cache_error.to_string()),
+        },
         Err(e) => error(StatusCode::UNSUPPORTED_MEDIA_TYPE, &e.to_string()),
     }
 }

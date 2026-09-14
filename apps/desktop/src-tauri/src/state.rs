@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use parking_lot::{Mutex, RwLock};
 use skwad_database::Database;
-use skwad_media_core::{ThumbnailCache, VideoProxyCache};
+use skwad_media_core::{ThumbnailCache, VideoFrameCache, VideoProxyCache};
 
 use crate::catalogue::LoadedCatalogue;
 use crate::paths::AppPaths;
@@ -18,6 +18,7 @@ pub struct AppState {
     pub paths: AppPaths,
     pub thumbnails: ThumbnailCache,
     pub proxies: VideoProxyCache,
+    pub video_frames: VideoFrameCache,
     /// Base URL the webview uses to fetch media through our custom protocol.
     pub media_url_base: String,
 
@@ -55,10 +56,12 @@ impl AppState {
     pub fn new(db: Database, paths: AppPaths, settings: AppSettings, media_url_base: String) -> Self {
         let thumbnails = ThumbnailCache::new(&paths.thumbnails);
         let proxies = VideoProxyCache::new(&paths.proxies);
+        let video_frames = VideoFrameCache::new(paths.face_cache.join("video_frames"));
         Self {
             db,
             thumbnails,
             proxies,
+            video_frames,
             paths,
             media_url_base,
             settings: RwLock::new(settings),

@@ -1413,6 +1413,53 @@ h2 {
   border-radius: 6px;
 }
 
+.viewer-stage .review-frame {
+  opacity: 0;
+}
+
+.viewer-stage .review-frame.ready {
+  opacity: 1;
+  transition: opacity 120ms ease-out;
+}
+
+.review-frame-status {
+  position: fixed;
+  inset: 50% auto auto 50%;
+  transform: translate(-50%, -50%);
+  width: min(360px, calc(100vw - 48px));
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 20px;
+  color: var(--live-ink);
+  text-align: center;
+  background: var(--live-surface);
+  border: 1px solid var(--live-border);
+  border-radius: 3px;
+  box-shadow: var(--shadow-pop);
+}
+
+.review-frame-status > span:not(.review-frame-spinner) {
+  color: #95908a;
+  font-size: 12px;
+}
+
+.review-frame-spinner {
+  width: 22px;
+  height: 22px;
+  border: 2px solid var(--live-border);
+  border-top-color: var(--ember-bright);
+  border-radius: 50%;
+  animation: review-frame-spin 700ms linear infinite;
+}
+
+@keyframes review-frame-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .video-face-empty {
   width: min(560px, 80vw);
   min-height: 240px;

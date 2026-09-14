@@ -249,14 +249,18 @@ pub fn clear_selected_scanned_data(
     content_keys.sort_unstable();
     content_keys.dedup();
     let mut proxies_removed = 0usize;
+    let mut review_frames_removed = 0u64;
     for content_key in content_keys {
         let still_referenced: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM media WHERE content_key = ?1)",
             skwad_database::rusqlite::params![content_key],
             |row| row.get(0),
         )?;
-        if !still_referenced && state.proxies.remove(&content_key)? {
-            proxies_removed += 1;
+        if !still_referenced {
+            if state.proxies.remove(&content_key)? {
+                proxies_removed += 1;
+            }
+            review_frames_removed += state.video_frames.remove(&content_key)?;
         }
     }
     drop(conn);
@@ -269,6 +273,7 @@ pub fn clear_selected_scanned_data(
         shoots = removed,
         thumbnails = thumbnails_removed,
         proxies = proxies_removed,
+        review_frames = review_frames_removed,
         "cleared selected scanned data"
     );
     Ok(removed)

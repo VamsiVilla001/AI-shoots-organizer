@@ -28,6 +28,8 @@ export function MediaViewer(props: { mediaId: number; preferVideoFaces?: boolean
   const [draftBox, setDraftBox] = useState<BoundingBox | null>(null)
   const [videoReviewTime, setVideoReviewTime] = useState<number | null>(null)
   const [videoFaceMode, setVideoFaceMode] = useState(Boolean(props.preferVideoFaces))
+  const [reviewFrameState, setReviewFrameState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle')
+  const [reviewFrameRequest, setReviewFrameRequest] = useState(0)
   const drawStart = useRef<{ point: { x: number; y: number }; clientX: number; clientY: number } | null>(null)
   const frameRef = useRef<HTMLDivElement>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
@@ -59,6 +61,10 @@ export function MediaViewer(props: { mediaId: number; preferVideoFaces?: boolean
     const firstSample = sampleFrames.data?.[0]
     if (firstFaceFrame != null || firstSample != null) setVideoReviewTime(firstFaceFrame ?? firstSample ?? null)
   }, [faces.data, media.data?.mediaType, props.preferVideoFaces, sampleFrames.data, videoFaceMode, videoReviewTime])
+
+  useEffect(() => {
+    setReviewFrameState(videoFaceMode && videoReviewTime != null ? 'loading' : 'idle')
+  }, [props.mediaId, videoFaceMode, videoReviewTime, reviewFrameRequest])
 
   const addFace = useMutation({
     mutationFn: (bbox: BoundingBox) =>
@@ -423,11 +429,43 @@ export function MediaViewer(props: { mediaId: number; preferVideoFaces?: boolean
           ) : reviewingVideoFrame && videoReviewTime != null ? (
             <>
               <img
-                key={videoReviewTime}
-                src={videoFrameUrl(item.id, videoReviewTime)}
+                key={`${videoReviewTime}-${reviewFrameRequest}`}
+                className={reviewFrameState === 'ready' ? 'review-frame ready' : 'review-frame'}
+                src={`${videoFrameUrl(item.id, videoReviewTime)}&request=${reviewFrameRequest}`}
                 alt={`${item.filename} at ${formatTime(videoReviewTime)}`}
+                onLoad={() => {
+                  setReviewFrameState('ready')
+                  const currentIndex = videoFrameTimes.findIndex(
+                    (timestamp) => Math.abs(timestamp - videoReviewTime) < 0.01,
+                  )
+                  const nextTimestamp = videoFrameTimes[currentIndex + 1]
+                  if (nextTimestamp != null) {
+                    const nextFrame = new Image()
+                    nextFrame.src = videoFrameUrl(item.id, nextTimestamp)
+                  }
+                }}
+                onError={() => setReviewFrameState('error')}
               />
-              {showBoxes &&
+              {reviewFrameState === 'loading' && (
+                <div className="review-frame-status" role="status" aria-live="polite">
+                  <span className="review-frame-spinner" aria-hidden="true" />
+                  <strong>Opening tagged frame…</strong>
+                  <span>Preparing a lightweight preview. The original 4K video stays closed.</span>
+                </div>
+              )}
+              {reviewFrameState === 'error' && (
+                <div className="review-frame-status" role="alert">
+                  <strong>Couldn’t open this frame</strong>
+                  <span>Try loading the analysed sample again.</span>
+                  <button
+                    className="small"
+                    onClick={() => setReviewFrameRequest((request) => request + 1)}
+                  >
+                    Try again
+                  </button>
+                </div>
+              )}
+              {reviewFrameState === 'ready' && showBoxes &&
                 videoFrameFaces.map((face) => (
                   <div
                     key={face.id}
