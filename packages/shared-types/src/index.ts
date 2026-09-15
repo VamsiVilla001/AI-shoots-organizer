@@ -219,6 +219,20 @@ export interface PersonSummary extends Person {
   shootCount: number
 }
 
+/** What enrolling a person from reference photos/video produced. */
+export interface EnrollPersonResult {
+  person: Person
+  samplesAdded: number
+  /** Photos with zero or more than one detected face, skipped rather than guessed. */
+  rejectedCount: number
+}
+
+/** On-demand retroactive matching of one pre-registered person against already-processed media. */
+export interface MatchPersonReport {
+  shootsScanned: number
+  newSuggestions: number
+}
+
 /** Normalised against the full frame, so it stays valid on a thumbnail. */
 export interface BoundingBox {
   x: number
@@ -533,6 +547,8 @@ export interface LogEntry {
 
 export interface MediaQuery {
   shootId?: number | null
+  /** Leaves out one shoot's media — used to separate a pre-registered person's reference samples from real matches. */
+  excludeShootId?: number | null
   personId?: number | null
   clusterId?: number | null
   albumId?: number | null

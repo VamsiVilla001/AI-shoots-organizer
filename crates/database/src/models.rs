@@ -619,6 +619,10 @@ pub struct LogEntry {
 #[serde(rename_all = "camelCase", default)]
 pub struct MediaQuery {
     pub shoot_id: Option<i64>,
+    /// Leaves out one shoot's media — used to separate a pre-registered
+    /// person's reference samples (parked in the hidden Reference Library
+    /// shoot) from the matches actually found across real shoots.
+    pub exclude_shoot_id: Option<i64>,
     pub person_id: Option<i64>,
     pub cluster_id: Option<i64>,
     pub album_id: Option<i64>,

@@ -449,6 +449,10 @@ pub fn query(conn: &Connection, q: &MediaQuery) -> Result<Vec<Media>> {
         wheres.push(format!("m.shoot_id = ?{}", args.len() + 1));
         args.push(Box::new(shoot_id));
     }
+    if let Some(exclude_shoot_id) = q.exclude_shoot_id {
+        wheres.push(format!("m.shoot_id != ?{}", args.len() + 1));
+        args.push(Box::new(exclude_shoot_id));
+    }
     if let Some(album_id) = q.album_id {
         wheres.push(format!("am.album_id = ?{}", args.len() + 1));
         args.push(Box::new(album_id));
@@ -677,6 +681,40 @@ mod tests {
         .unwrap();
         assert_eq!(videos.len(), 1);
         assert_eq!(videos[0].filename, "c.mp4");
+    }
+
+    #[test]
+    fn query_excludes_one_shoot_while_matching_a_person_across_the_rest() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+        let reference_shoot = shoots::create(&conn, "Reference Library", "").unwrap();
+        let real_shoot = seed(&conn);
+
+        let ref_media = upsert(
+            &conn,
+            &NewMedia {
+                shoot_id: reference_shoot.id,
+                path: "C:\\ref\\a.jpg".into(),
+                filename: "a.jpg".into(),
+                media_type: MediaType::Photo,
+                extension: "jpg".into(),
+                file_size: 1,
+                content_key: "ref-a".into(),
+                captured_at: None,
+            },
+        )
+        .unwrap();
+
+        let all = query(
+            &conn,
+            &MediaQuery {
+                exclude_shoot_id: Some(reference_shoot.id),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(!all.iter().any(|m| m.id == ref_media), "the reference shoot's media is excluded");
+        assert!(all.iter().any(|m| m.shoot_id == real_shoot), "media from other shoots is untouched");
     }
 
     #[test]

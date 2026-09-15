@@ -69,6 +69,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "projects",
         sql: include_str!("migration_011_projects.sql"),
     },
+    Migration {
+        version: 12,
+        name: "reference_library",
+        sql: include_str!("migration_012_reference_library.sql"),
+    },
 ];
 
 /// The schema version this build expects.

@@ -13,6 +13,7 @@ import type {
   AppSettings,
   BoundingBox,
   ClusterSummary,
+  EnrollPersonResult,
   ExportOptions,
   ExportPreview,
   ExportRecord,
@@ -24,6 +25,7 @@ import type {
   Job,
   LogEntry,
   ManualFaceResult,
+  MatchPersonReport,
   Media,
   MediaGroupLink,
   MediaPickState,
@@ -147,6 +149,10 @@ export const openPath = (path: string) => call<void>('open_path', { path })
 
 export const listPeople = (shootId?: number | null) =>
   call<PersonSummary[]>('list_people', { shootId: shootId ?? null })
+/** Only people enrolled by name + reference photo/video in Pre-Process — not everyone in the library. */
+export const listEnrolledPeople = () => call<PersonSummary[]>('list_enrolled_people')
+/** The hidden shoot enrollment reference photos/video live in, or null if nobody has enrolled yet. */
+export const referenceLibraryShootId = () => call<number | null>('reference_library_shoot_id')
 export const createPerson = (name: string, team?: string | null) =>
   call<Person>('create_person', { name, team: team ?? null })
 export const renamePerson = (personId: number, name: string) =>
@@ -158,6 +164,22 @@ export const mergePeople = (targetId: number, sourceId: number) =>
 export const deletePerson = (personId: number) => call<void>('delete_person', { personId })
 export const clearPersonRecognition = (personId: number) =>
   call<void>('clear_person_recognition', { personId })
+/** Pre-registers a person from 3+ reference photos or one reference video, taken outside any shoot. */
+export const enrollPerson = (args: {
+  name: string
+  team?: string | null
+  photoPaths?: string[]
+  videoPath?: string | null
+}) =>
+  call<EnrollPersonResult>('enroll_person', {
+    name: args.name,
+    team: args.team ?? null,
+    photoPaths: args.photoPaths ?? [],
+    videoPath: args.videoPath ?? null,
+  })
+/** Retroactively matches a pre-registered person against already-processed media (one shoot, or every shoot). */
+export const findPersonMedia = (personId: number, shootId?: number | null) =>
+  call<MatchPersonReport>('find_person_media', { personId, shootId: shootId ?? null })
 
 // --- clusters --------------------------------------------------------------
 

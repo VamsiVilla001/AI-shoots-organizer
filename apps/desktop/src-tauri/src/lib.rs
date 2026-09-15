@@ -122,7 +122,11 @@ pub fn run() {
             commands::open_path,
             // players
             commands::list_people,
+            commands::list_enrolled_people,
+            commands::reference_library_shoot_id,
             commands::create_person,
+            commands::enroll_person,
+            commands::find_person_media,
             commands::rename_person,
             commands::update_person,
             commands::merge_people,

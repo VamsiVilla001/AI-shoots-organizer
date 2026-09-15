@@ -7,7 +7,7 @@ import { useUi } from '../store'
 
 const PAGE_SIZE = 120
 
-export function MediaBrowser({ shootId, groupId, personId, onCollect }: { shootId?: number; groupId?: number; personId?: number; onCollect?: (media: Media[]) => void }) {
+export function MediaBrowser({ shootId, excludeShootId, groupId, personId, onCollect }: { shootId?: number; excludeShootId?: number; groupId?: number; personId?: number; onCollect?: (media: Media[]) => void }) {
   const [search, setSearch] = useState('')
   const [query, setQuery] = useState('')
   const [type, setType] = useState('all')
@@ -24,8 +24,8 @@ export function MediaBrowser({ shootId, groupId, personId, onCollect }: { shootI
   const notice = useUi(s => s.pushNotice)
   useEffect(() => { const timer = setTimeout(() => { setQuery(search.trim()); setOffset(0) }, 250); return () => clearTimeout(timer) }, [search])
   const people = useQuery({ queryKey: ['people', shootId ?? null], queryFn: () => api.listPeople(shootId) })
-  const media = useQuery({ queryKey: ['media', shootId ?? null, 'workspace', groupId, query, type, person, offset, quality, rating, pickState, sort], queryFn: () => api.listMedia({
-    shootId, groupId, search: query || null, mediaType: type === 'all' ? null : type as 'photo' | 'video',
+  const media = useQuery({ queryKey: ['media', shootId ?? null, excludeShootId ?? null, personId ?? null, 'workspace', groupId, query, type, person, offset, quality, rating, pickState, sort], queryFn: () => api.listMedia({
+    shootId, excludeShootId, groupId, search: query || null, mediaType: type === 'all' ? null : type as 'photo' | 'video',
     personId: personId ?? (person === 'all' || person === 'unknown' ? null : Number(person)), onlyUnidentified: personId === undefined && person === 'unknown',
     onlyBestShots: quality === 'best', onlyDuplicates: quality === 'duplicates', minRating: rating || null, pickState: pickState === 'all' ? null : pickState, sort,
     offset, limit: PAGE_SIZE,
@@ -39,7 +39,11 @@ export function MediaBrowser({ shootId, groupId, personId, onCollect }: { shootI
   return <section aria-label={groupId ? 'Collection media' : 'Media library'}>
     <div className="pw-toolbar pw-media-filters">
       <label className="pw-search"><span className="sr-only">Search files</span><input type="search" placeholder="Search files…" value={search} onChange={e => { setSearch(e.target.value); setSelected([]) }} /></label>
-      <label><span className="sr-only">Media type</span><select value={type} onChange={e => filter(() => setType(e.target.value))}><option value="all">Photos & videos</option><option value="photo">Photos</option><option value="video">Videos</option></select></label>
+      <div className="pw-segment" role="tablist" aria-label="Media type">
+        <button type="button" role="tab" aria-pressed={type === 'all'} onClick={() => filter(() => setType('all'))}>All</button>
+        <button type="button" role="tab" aria-pressed={type === 'photo'} onClick={() => filter(() => setType('photo'))}>Photos</button>
+        <button type="button" role="tab" aria-pressed={type === 'video'} onClick={() => filter(() => setType('video'))}>Videos</button>
+      </div>
       {personId === undefined && <label><span className="sr-only">Find a person</span><select value={person} onChange={e => filter(() => setPerson(e.target.value))}><option value="all">Find a person</option><option value="unknown">Unidentified people</option>{people.data?.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></label>}
       <button aria-expanded={advanced} onClick={() => setAdvanced(!advanced)}>More filters</button>
       {onCollect && <button aria-pressed={selecting} onClick={() => { setSelecting(!selecting); setSelected([]) }}>{selecting ? 'Done selecting' : 'Select media'}</button>}

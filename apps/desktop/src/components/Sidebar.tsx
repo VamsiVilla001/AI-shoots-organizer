@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import * as api from '../api'
 import { useUi, type Screen } from '../store'
+import { ThemeToggle } from './ThemeToggle'
 
 const ITEMS: Array<{ id: Screen; label: string; needsShoot: boolean }> = [
   { id: 'shoots', label: 'Shoots', needsShoot: false },
@@ -61,6 +62,7 @@ export function Sidebar() {
         ))}
       </nav>
       <div className="spacer" />
+      <ThemeToggle className="ghost sidebar-theme-toggle" />
       {activeShoot && (
         <div className="shoot-chip" title={activeShoot.sourcePath}>
           Working on: <strong>{activeShoot.name}</strong>

@@ -519,6 +519,30 @@ pub fn list_people(state: State<'_, Arc<AppState>>, shoot_id: Option<i64>) -> Re
     Ok(people::list_summaries(&conn, shoot_id)?)
 }
 
+/// The hidden shoot enrollment reference photos/video are parked in, or
+/// `None` if nobody has enrolled yet. The Pre-Process tab uses this to keep
+/// reference samples visually separate from media actually found by search
+/// (`exclude_shoot_id` in `MediaQuery`) — never creates the shoot as a side
+/// effect of merely checking.
+#[tauri::command]
+pub fn reference_library_shoot_id(state: State<'_, Arc<AppState>>) -> Result<Option<i64>> {
+    let conn = state.db.conn()?;
+    Ok(shoots::reference_library_id(&conn)?)
+}
+
+/// The Pre-Process tab's list: only people enrolled by name + reference
+/// photo/video, not everyone in the library (see `people::list_enrolled_summaries`).
+/// Returns an empty list rather than creating the reference shoot when nobody
+/// has enrolled yet.
+#[tauri::command]
+pub fn list_enrolled_people(state: State<'_, Arc<AppState>>) -> Result<Vec<PersonSummary>> {
+    let conn = state.db.conn()?;
+    match shoots::reference_library_id(&conn)? {
+        Some(reference_shoot_id) => Ok(people::list_enrolled_summaries(&conn, reference_shoot_id)?),
+        None => Ok(Vec::new()),
+    }
+}
+
 #[tauri::command]
 pub fn create_person(
     app: AppHandle,
@@ -538,6 +562,344 @@ pub fn create_person(
     );
     events::emit(&app, events::LIBRARY_CHANGED, ());
     Ok(person)
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnrollPersonResult {
+    pub person: Person,
+    pub samples_added: usize,
+    pub rejected_count: usize,
+}
+
+/// One reference face ready to be written: either a still photo with exactly
+/// one detected face, or one sampled frame from a reference video.
+struct ReferenceSample {
+    media_id: i64,
+    bbox: BoundingBox,
+    embedding: Vec<f32>,
+    quality: f64,
+    frame_time: Option<f64>,
+}
+
+/// Pre-registers a person from reference photos or a reference video, taken
+/// outside of any shoot. Reference material is parked in the hidden
+/// "Reference Library" shoot (`shoots::get_or_create_reference_library`)
+/// because every `faces`/`media` row requires a real `shoot_id`.
+///
+/// Every accepted sample is written straight to `assignment = 'confirmed'`:
+/// unlike a detected face, a reference photo the user deliberately chose for
+/// this person *is* the ground truth, not a hypothesis to review. This alone
+/// does not touch any other shoot — matching already-processed media is a
+/// separate, explicit step (`find_person_media`), and future shoots pick this
+/// person up automatically the next time `recognise_shoot` runs, because it
+/// reads the same confirmed-faces library this writes into.
+#[tauri::command]
+pub async fn enroll_person(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    name: String,
+    team: Option<String>,
+    photo_paths: Vec<String>,
+    video_path: Option<String>,
+) -> Result<EnrollPersonResult> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err(err("give this person a name"));
+    }
+    if photo_paths.is_empty() && video_path.is_none() {
+        return Err(err("add at least 3 reference photos or one reference video"));
+    }
+    if !photo_paths.is_empty() && photo_paths.len() < 3 {
+        return Err(err("add at least 3 reference photos"));
+    }
+    if !photo_paths.is_empty() && video_path.is_some() {
+        return Err(err("use either reference photos or a reference video, not both"));
+    }
+
+    let state = Arc::clone(&state);
+    let result = tauri::async_runtime::spawn_blocking(move || -> Result<EnrollPersonResult> {
+        let settings = state.settings();
+        let mut engine = crate::pipeline::Engine::new(&state.paths, &settings)?;
+
+        let person = {
+            let conn = state.db.conn()?;
+            people::get_or_create(&conn, &name, team.as_deref())?
+        };
+        let reference_shoot = {
+            let conn = state.db.conn()?;
+            shoots::get_or_create_reference_library(&conn)?
+        };
+
+        let mut samples: Vec<ReferenceSample> = Vec::new();
+        let mut rejected = 0usize;
+
+        for photo_path in &photo_paths {
+            let path = PathBuf::from(photo_path);
+            let orientation = skwad_media_core::metadata::read_orientation(
+                &path,
+                skwad_media_core::formats::MediaKind::Photo,
+                engine.ffmpeg(),
+            )
+            .unwrap_or(1);
+            let decoded = match skwad_media_core::decode::decode_image(
+                &path,
+                orientation,
+                Some(settings.analysis_max_dim),
+                engine.ffmpeg(),
+            ) {
+                Ok(decoded) => decoded,
+                Err(error) => {
+                    tracing::warn!(file = %photo_path, %error, "could not read a reference photo");
+                    rejected += 1;
+                    continue;
+                }
+            };
+
+            let mut detected = engine.detect_and_embed(&decoded.image)?;
+            detected.retain(|face| face.embedding.is_some());
+            if detected.len() != 1 {
+                rejected += 1;
+                continue;
+            }
+            let face = detected.pop().expect("checked length above");
+            let (width, height) = decoded.image.dimensions();
+            let (x, y, w, h) = face.detection.bbox.normalised(width, height);
+            let quality = face.detection.quality(width, height);
+
+            let media_id = {
+                let conn = state.db.conn()?;
+                media_repo::upsert(
+                    &conn,
+                    &NewMedia {
+                        shoot_id: reference_shoot.id,
+                        path: photo_path.clone(),
+                        filename: path
+                            .file_name()
+                            .map(|f| f.to_string_lossy().to_string())
+                            .unwrap_or_else(|| photo_path.clone()),
+                        media_type: MediaType::Photo,
+                        extension: path
+                            .extension()
+                            .map(|e| e.to_string_lossy().to_lowercase())
+                            .unwrap_or_default(),
+                        file_size: std::fs::metadata(&path).map(|m| m.len() as i64).unwrap_or(0),
+                        content_key: photo_path.clone(),
+                        captured_at: None,
+                    },
+                )?
+            };
+            let item = {
+                let conn = state.db.conn()?;
+                media_repo::get_by_id(&conn, media_id)?
+                    .ok_or_else(|| err("the reference photo could not be indexed"))?
+            };
+            crate::pipeline::index_media(&state.db, &state.thumbnails, engine.ffmpeg(), &item)?;
+
+            samples.push(ReferenceSample {
+                media_id,
+                bbox: BoundingBox { x, y, w, h },
+                embedding: face.embedding.expect("filtered above").into_vec(),
+                quality,
+                frame_time: None,
+            });
+        }
+
+        if let Some(video_path) = &video_path {
+            let ffmpeg = engine
+                .ffmpeg()
+                .cloned()
+                .ok_or_else(|| err("FFmpeg is required to enroll a person from a video"))?;
+            let path = PathBuf::from(video_path);
+
+            let media_id = {
+                let conn = state.db.conn()?;
+                media_repo::upsert(
+                    &conn,
+                    &NewMedia {
+                        shoot_id: reference_shoot.id,
+                        path: video_path.clone(),
+                        filename: path
+                            .file_name()
+                            .map(|f| f.to_string_lossy().to_string())
+                            .unwrap_or_else(|| video_path.clone()),
+                        media_type: MediaType::Video,
+                        extension: path
+                            .extension()
+                            .map(|e| e.to_string_lossy().to_lowercase())
+                            .unwrap_or_default(),
+                        file_size: std::fs::metadata(&path).map(|m| m.len() as i64).unwrap_or(0),
+                        content_key: video_path.clone(),
+                        captured_at: None,
+                    },
+                )?
+            };
+            let mut item = {
+                let conn = state.db.conn()?;
+                media_repo::get_by_id(&conn, media_id)?
+                    .ok_or_else(|| err("the reference video could not be indexed"))?
+            };
+            // Populates width/height/duration/orientation so the sampler below
+            // can plan against real dimensions, exactly like a scanned video.
+            crate::pipeline::index_media(&state.db, &state.thumbnails, engine.ffmpeg(), &item)?;
+            item = {
+                let conn = state.db.conn()?;
+                media_repo::get_by_id(&conn, media_id)?
+                    .ok_or_else(|| err("the reference video could not be indexed"))?
+            };
+
+            let orientation = item.orientation.clamp(1, 8) as u16;
+            let dimensions = item
+                .width
+                .zip(item.height)
+                .and_then(|(w, h)| Some((u32::try_from(w).ok()?, u32::try_from(h).ok()?)));
+            let video_config = settings.video_config();
+            let plan = skwad_video_analysis::plan_video(&ffmpeg, &path, item.duration, dimensions, &video_config);
+            let sampled = skwad_video_analysis::sample_frames(&ffmpeg, &path, &plan, orientation, &video_config);
+
+            let mut frame_samples: Vec<ReferenceSample> = Vec::new();
+            for frame in sampled {
+                let mut detected = engine.detect_and_embed(&frame.image)?;
+                detected.retain(|face| face.embedding.is_some());
+                if detected.len() != 1 {
+                    continue;
+                }
+                let face = detected.pop().expect("checked length above");
+                let (width, height) = frame.image.dimensions();
+                let (x, y, w, h) = face.detection.bbox.normalised(width, height);
+                frame_samples.push(ReferenceSample {
+                    media_id,
+                    bbox: BoundingBox { x, y, w, h },
+                    embedding: face.embedding.expect("filtered above").into_vec(),
+                    quality: face.detection.quality(width, height),
+                    frame_time: Some(frame.timestamp),
+                });
+            }
+
+            // Keep only the best few frames — the same cap normal recognition
+            // applies per person (`stages::MAX_ENROLLMENT_VIDEO_SAMPLES`).
+            frame_samples.sort_by(|a, b| b.quality.total_cmp(&a.quality));
+            frame_samples.truncate(crate::stages::MAX_ENROLLMENT_VIDEO_SAMPLES);
+            if frame_samples.is_empty() {
+                rejected += 1;
+            }
+            samples.extend(frame_samples);
+        }
+
+        if samples.is_empty() {
+            return Err(err(
+                "no usable reference face was found — try clearer, front-facing photos or a video",
+            ));
+        }
+
+        let samples_added = samples.len();
+        let mut media_ids: Vec<i64> = samples.iter().map(|s| s.media_id).collect();
+        media_ids.sort_unstable();
+        media_ids.dedup();
+
+        state.db.transaction(|conn| {
+            for sample in &samples {
+                let face_id = faces::insert_manual(
+                    conn,
+                    &NewFace {
+                        media_id: sample.media_id,
+                        shoot_id: reference_shoot.id,
+                        bbox: sample.bbox,
+                        landmarks: None,
+                        detection_confidence: 1.0,
+                        embedding: Some(sample.embedding.clone()),
+                        quality: Some(sample.quality),
+                        frame_time: sample.frame_time,
+                        crop_path: None,
+                    },
+                )?;
+                faces::assign(conn, face_id, person.id, Some(1.0))?;
+            }
+            for media_id in &media_ids {
+                media_repo::refresh_face_count(conn, *media_id)?;
+            }
+            logs::record_quiet(
+                conn,
+                logs::EVENT_PLAYER_CREATED,
+                None,
+                None,
+                Some(person.id),
+                Some(&format!("enrolled with {samples_added} reference sample(s)")),
+            );
+            Ok(())
+        })?;
+
+        Ok(EnrollPersonResult {
+            person,
+            samples_added,
+            rejected_count: rejected,
+        })
+    })
+    .await
+    .map_err(|e| err(format!("enrollment stopped unexpectedly: {e}")))??;
+
+    events::emit(&app, events::LIBRARY_CHANGED, ());
+    Ok(result)
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MatchPersonReport {
+    pub shoots_scanned: usize,
+    pub new_suggestions: usize,
+}
+
+/// On-demand retroactive matching: checks one pre-registered person's
+/// reference samples against media that was already processed before they
+/// were enrolled. Results land as suggestions for review, exactly like any
+/// other recognition result — nothing is added to a collection or project
+/// automatically (see `stages::match_person_in_shoot`).
+#[tauri::command]
+pub async fn find_person_media(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    person_id: i64,
+    shoot_id: Option<i64>,
+) -> Result<MatchPersonReport> {
+    let state = Arc::clone(&state);
+    let (result, changed_shoots) = tauri::async_runtime::spawn_blocking(move || -> Result<(MatchPersonReport, Vec<i64>)> {
+        let settings = state.settings();
+        let shoot_ids: Vec<i64> = match shoot_id {
+            Some(id) => vec![id],
+            None => {
+                let conn = state.db.conn()?;
+                shoots::list(&conn)?.into_iter().map(|s| s.id).collect()
+            }
+        };
+
+        let mut new_suggestions = 0usize;
+        let mut changed_shoots = Vec::new();
+        for id in &shoot_ids {
+            let matched = stages::match_person_in_shoot(&state.db, *id, person_id, &settings)?;
+            new_suggestions += matched;
+            if matched > 0 {
+                changed_shoots.push(*id);
+            }
+        }
+
+        Ok((
+            MatchPersonReport {
+                shoots_scanned: shoot_ids.len(),
+                new_suggestions,
+            },
+            changed_shoots,
+        ))
+    })
+    .await
+    .map_err(|e| err(format!("finding matches stopped unexpectedly: {e}")))??;
+
+    if !changed_shoots.is_empty() {
+        events::emit(&app, events::LIBRARY_CHANGED, ());
+        for shoot_id in changed_shoots {
+            events::shoot_changed(&app, shoot_id, "personMatched");
+        }
+    }
+    Ok(result)
 }
 
 #[tauri::command]

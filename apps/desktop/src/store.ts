@@ -13,8 +13,25 @@ export interface Notice extends NoticeEvent {
   id: number
 }
 
+export type Theme = 'light' | 'dark'
+
+const THEME_STORAGE_KEY = 'skwad.theme'
+
+/** Respects an explicit choice; otherwise follows the OS preference at startup. */
+function initialTheme(): Theme {
+  try {
+    const stored = localStorage.getItem(THEME_STORAGE_KEY)
+    if (stored === 'light' || stored === 'dark') return stored
+  } catch {
+    // Browser storage unavailable — fall through to the system preference.
+  }
+  return window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+}
+
 interface UiState {
   screen: Screen
+  /** Applied to <html data-theme> by App; both the Classic and Project-workspace shells share it. */
+  theme: Theme
   /** The shoot the workspace screens operate on. */
   activeShootId: number | null
   /** Latest progress per shoot, pushed by the backend monitor. */
@@ -28,6 +45,7 @@ interface UiState {
   /** Open videos on analysed sample frames instead of loading the original stream. */
   viewerPreferVideoFaces: boolean
 
+  toggleTheme: () => void
   navigate: (screen: Screen) => void
   openExport: (personIds: number[]) => void
   openShoot: (shootId: number, screen?: Screen) => void
@@ -44,6 +62,7 @@ let noticeCounter = 0
 
 export const useUi = create<UiState>((set) => ({
   screen: 'shoots',
+  theme: initialTheme(),
   activeShootId: null,
   progress: {},
   exportProgress: null,
@@ -51,6 +70,17 @@ export const useUi = create<UiState>((set) => ({
   notices: [],
   viewerMediaId: null,
   viewerPreferVideoFaces: false,
+
+  toggleTheme: () =>
+    set((state) => {
+      const next: Theme = state.theme === 'dark' ? 'light' : 'dark'
+      try {
+        localStorage.setItem(THEME_STORAGE_KEY, next)
+      } catch {
+        // The toggle still works for this session without browser storage.
+      }
+      return { theme: next }
+    }),
 
   navigate: (screen) =>
     set({

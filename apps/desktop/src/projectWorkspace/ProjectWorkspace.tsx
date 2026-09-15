@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import * as api from '../api'
 import { useUi } from '../store'
+import { ThemeToggle } from '../components/ThemeToggle'
 import { SettingsScreen } from '../screens/SettingsScreen'
 import { ProfileScreen } from '../screens/ProfileScreen'
 import { CataloguesScreen } from '../screens/CataloguesScreen'
@@ -31,6 +32,7 @@ export function ProjectWorkspace({ accountId, onClassic }: { accountId: string; 
       </nav>
       <div className="pw-sidebar-bottom">
         <div className="pw-mode"><span>Project workspace</span><button onClick={onClassic}>Switch to Classic</button></div>
+        <div className="pw-mode"><span>Appearance</span><ThemeToggle /></div>
         <button className="pw-profile" aria-current={tab === 'profile' ? 'page' : undefined} onClick={() => setTab('profile')}><strong>{profile.data?.displayName || 'Your workspace'}</strong><span>{profile.data?.organisation || 'Local library'}</span></button>
       </div>
     </aside>

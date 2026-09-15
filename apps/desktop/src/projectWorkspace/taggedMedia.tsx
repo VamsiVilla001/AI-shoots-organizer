@@ -1,15 +1,18 @@
-import { useState } from 'react'
+import { useState, type MouseEvent } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import type { Media } from '@skwad/shared-types'
+import type { Media, PersonSummary } from '@skwad/shared-types'
 import * as api from '../api'
 import { MediaBrowser } from './mediaBrowser'
+import { PersonContextMenu } from './personContextMenu'
 
 export function TaggedMedia({ onCollect, onManagePeople }: { onCollect: (media: Media[]) => void; onManagePeople: () => void }) {
   const [search, setSearch] = useState('')
   const [personId, setPersonId] = useState<number | null>(null)
   const [addingId, setAddingId] = useState<number | null>(null)
   const [error, setError] = useState('')
+  const [menu, setMenu] = useState<{ person: PersonSummary; x: number; y: number } | null>(null)
   const people = useQuery({ queryKey: ['people', null], queryFn: () => api.listPeople(null) })
+  const openMenu = (item: PersonSummary, event: MouseEvent) => { event.preventDefault(); setMenu({ person: item, x: event.clientX, y: event.clientY }) }
   const person = people.data?.find(item => item.id === personId)
   const visible = (people.data ?? []).filter(item => {
     const query = search.trim().toLocaleLowerCase()
@@ -27,7 +30,7 @@ export function TaggedMedia({ onCollect, onManagePeople }: { onCollect: (media: 
     <div className="pw-toolbar"><label className="pw-search"><span className="sr-only">Search tags</span><input type="search" placeholder="Search people or teams…" value={search} onChange={event => setSearch(event.target.value)} /></label><span>{people.data?.length ?? 0} tags</span><button onClick={onManagePeople}>Manage people</button></div>
     <p className="pw-help">People you name while reviewing media appear here automatically. Open a tag to find every recognised appearance and add selected media to collections.</p>
     {error && <p role="alert" className="pw-error">{error}</p>}
-    {people.isPending ? <p role="status" className="pw-loading">Loading tagged media…</p> : people.isError ? <div className="pw-empty"><h2>Couldn’t load tags</h2><button onClick={() => void people.refetch()}>Try again</button></div> : visible.length > 0 ? <div className="pw-tag-list">{visible.map(item => <div className="pw-tag-row" key={item.id}><button className="pw-tag-open" onClick={() => setPersonId(item.id)}><span><strong>{item.name}</strong><small>{item.team || 'No team'}</small></span><span>{item.mediaCount} files</span><span>{item.shootCount} collection{item.shootCount === 1 ? '' : 's'}</span></button><button disabled={addingId !== null || item.mediaCount === 0} onClick={async () => {
+    {people.isPending ? <p role="status" className="pw-loading">Loading tagged media…</p> : people.isError ? <div className="pw-empty"><h2>Couldn’t load tags</h2><button onClick={() => void people.refetch()}>Try again</button></div> : visible.length > 0 ? <div className="pw-tag-list">{visible.map(item => <div className="pw-tag-row" key={item.id} onContextMenu={event => openMenu(item, event)}><button className="pw-tag-open" onClick={() => setPersonId(item.id)}><span><strong>{item.name}</strong><small>{item.team || 'No team'}</small></span><span>{item.mediaCount} files</span><span>{item.shootCount} collection{item.shootCount === 1 ? '' : 's'}</span></button><button disabled={addingId !== null || item.mediaCount === 0} onClick={async () => {
       setAddingId(item.id); setError('')
       try {
         const tagged = await loadTaggedMedia(item.id)
@@ -35,10 +38,11 @@ export function TaggedMedia({ onCollect, onManagePeople }: { onCollect: (media: 
         onCollect(tagged)
       } catch (caught) { setError(String(caught)) } finally { setAddingId(null) }
     }}>{addingId === item.id ? 'Loading…' : 'Add to collection'}</button></div>)}</div> : <div className="pw-empty"><h2>{people.data?.length ? 'No matching tags' : 'No tagged media yet'}</h2><p>{people.data?.length ? 'Try another person or team name.' : 'Name a person from Identify & organise. Their recognised photos and videos will appear here.'}</p>{people.data?.length ? <button onClick={() => setSearch('')}>Clear search</button> : null}</div>}
+    {menu && <PersonContextMenu person={menu.person} all={people.data ?? []} x={menu.x} y={menu.y} onClose={() => setMenu(null)} onOpen={() => setPersonId(menu.person.id)} />}
   </>
 }
 
-async function loadTaggedMedia(personId: number) {
+export async function loadTaggedMedia(personId: number) {
   const result: Media[] = []
   const pageSize = 500
   for (let offset = 0; offset < 10_000; offset += pageSize) {

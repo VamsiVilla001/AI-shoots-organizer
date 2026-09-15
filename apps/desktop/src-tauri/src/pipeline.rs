@@ -57,9 +57,9 @@ pub struct Engine {
 }
 
 #[derive(Debug, Clone)]
-struct AnalysedFace {
-    detection: Detection,
-    embedding: Option<Embedding>,
+pub(crate) struct AnalysedFace {
+    pub(crate) detection: Detection,
+    pub(crate) embedding: Option<Embedding>,
 }
 
 struct PreviousVideoFrame {
@@ -408,7 +408,11 @@ impl Engine {
         Self::store_analysed_faces(db, item, image, frame_time, &analysed)
     }
 
-    fn detect_and_embed(&mut self, image: &RgbImage) -> Result<Vec<AnalysedFace>> {
+    /// Detects and embeds every face in an arbitrary image with no `Media` row
+    /// or database writes involved — used both by the per-file pipeline above
+    /// and by person enrollment, which extracts reference faces from photos
+    /// and video frames that are not part of any shoot yet.
+    pub(crate) fn detect_and_embed(&mut self, image: &RgbImage) -> Result<Vec<AnalysedFace>> {
         let detections: Vec<Detection> = self
             .detector
             .detect(image)

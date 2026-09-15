@@ -23,6 +23,8 @@ const SCAN_DB_BATCH_SIZE: usize = 200;
 /// best confirmed sample for a player, then admit only useful-quality extras.
 const MIN_REFERENCE_QUALITY: f64 = 0.55;
 const MAX_REFERENCE_SAMPLES_PER_PERSON: usize = 8;
+/// Also the cap on reference samples kept from an enrollment video (`commands::enroll_person`).
+pub(crate) const MAX_ENROLLMENT_VIDEO_SAMPLES: usize = MAX_REFERENCE_SAMPLES_PER_PERSON;
 
 /// Job priorities. Lower numbers run first, so the queue naturally moves
 /// through indexing, then per-file AI, then the shoot-wide stages.
@@ -310,6 +312,55 @@ fn select_reference_vectors(
         }
     }
     selected
+}
+
+/// Matches one person's confirmed reference samples against media that
+/// predates their enrollment — the on-demand "Find media" action for a
+/// pre-registered person, as opposed to `recognise_shoot`'s whole-library
+/// pass that runs automatically on every newly scanned shoot.
+///
+/// Unlike `recognise_shoot` this never clears existing suggestions for other
+/// people: it only ever calls `set_suggestion`, which itself refuses to
+/// overwrite a human's `confirmed` decision, so this is safe to call
+/// repeatedly (e.g. once per shoot, whenever the user asks).
+pub fn match_person_in_shoot(db: &Database, shoot_id: i64, person_id: i64, settings: &AppSettings) -> Result<usize> {
+    let (reference, unassigned) = {
+        let conn = db.conn()?;
+        (
+            faces::reference_vectors_for_person(&conn, person_id)?,
+            faces::unassigned_vectors(&conn, shoot_id)?,
+        )
+    };
+    if reference.is_empty() || unassigned.is_empty() {
+        return Ok(0);
+    }
+
+    let matcher = FaceMatcher::build(reference.into_iter().map(|v| (person_id, v.embedding)));
+
+    let mut by_frame: std::collections::BTreeMap<(i64, Option<u64>), Vec<skwad_database::repo::faces::FaceVector>> =
+        std::collections::BTreeMap::new();
+    for vector in unassigned {
+        by_frame
+            .entry((vector.media_id, vector.frame_time.map(f64::to_bits)))
+            .or_default()
+            .push(vector);
+    }
+
+    let config = settings.matcher_config();
+    let mut new_suggestions = 0usize;
+    db.transaction(|conn| {
+        for (_, group) in by_frame {
+            let embeddings: Vec<Vec<f32>> = group.iter().map(|v| v.embedding.clone()).collect();
+            for (vector, matched) in group.iter().zip(matcher.match_frame(&embeddings, &config)) {
+                let Some(matched) = matched else { continue };
+                faces::set_suggestion(conn, vector.face_id, matched.person_id, matched.similarity as f64)?;
+                new_suggestions += 1;
+            }
+        }
+        Ok(())
+    })?;
+
+    Ok(new_suggestions)
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -730,6 +781,56 @@ mod tests {
         let report = recognise_shoot(&db, shoot_id, &AppSettings::default()).unwrap();
         assert_eq!(report.library_players, 0);
         assert_eq!(report.faces_matched, 0);
+    }
+
+    #[test]
+    fn match_person_in_shoot_suggests_without_touching_other_people() {
+        let db = Database::open_in_memory().unwrap();
+        let shoot_id = seed_shoot(&db);
+        let (_, existing_known) = add_face(&db, shoot_id, "known.jpg", unit(vec![0.0, 1.0, 0.0]));
+        let jonathan = {
+            let conn = db.conn().unwrap();
+            let p = people::get_or_create(&conn, "Jonathan", None).unwrap();
+            faces::assign(&conn, existing_known, p.id, Some(1.0)).unwrap();
+            p
+        };
+
+        // A person enrolled after this shoot was already processed — their
+        // reference sample lives outside the shoot, like the hidden
+        // Reference Library shoot enrollment uses.
+        let reference_shoot_id = {
+            let conn = db.conn().unwrap();
+            shoots::create(&conn, "Reference Library", "").unwrap().id
+        };
+        let mavi = {
+            let conn = db.conn().unwrap();
+            people::get_or_create(&conn, "Mavi", None).unwrap()
+        };
+        let (_, reference_face) = add_face(&db, reference_shoot_id, "ref.jpg", unit(vec![1.0, 0.0, 0.0]));
+        {
+            let conn = db.conn().unwrap();
+            faces::assign(&conn, reference_face, mavi.id, Some(1.0)).unwrap();
+        }
+
+        let (_, candidate) = add_face(&db, shoot_id, "candidate.jpg", unit(vec![0.99, 0.05, 0.0]));
+
+        let new_suggestions = match_person_in_shoot(&db, shoot_id, mavi.id, &AppSettings::default()).unwrap();
+        assert_eq!(new_suggestions, 1);
+
+        let conn = db.conn().unwrap();
+        let matched = faces::get_by_id(&conn, candidate).unwrap().unwrap();
+        assert_eq!(matched.person_id, Some(mavi.id));
+        assert_eq!(matched.assignment, "suggested");
+
+        // Jonathan's confirmed face in the same shoot is untouched.
+        let unaffected = faces::get_by_id(&conn, existing_known).unwrap().unwrap();
+        assert_eq!(unaffected.person_id, Some(jonathan.id));
+        assert_eq!(unaffected.assignment, "confirmed");
+        drop(conn);
+
+        // Safe to re-run: the face is no longer "unassigned" (it already
+        // carries a suggestion), so nothing new is proposed.
+        assert_eq!(match_person_in_shoot(&db, shoot_id, mavi.id, &AppSettings::default()).unwrap(), 0);
     }
 
     #[test]

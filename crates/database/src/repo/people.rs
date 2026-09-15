@@ -88,6 +88,42 @@ pub fn list_summaries(conn: &Connection, shoot_id: Option<i64>) -> Result<Vec<Pe
     Ok(rows)
 }
 
+/// The Pre-Process tab's people list: only those with at least one confirmed
+/// reference sample in the hidden Reference Library shoot, i.e. people
+/// enrolled by name + photo/video rather than named from a cluster or tagged
+/// while reviewing a shoot. Counts stay global (not scoped to that shoot) so
+/// "files" reflects every match found across the whole library, exactly like
+/// `list_summaries`.
+pub fn list_enrolled_summaries(conn: &Connection, reference_shoot_id: i64) -> Result<Vec<PersonSummary>> {
+    let mut stmt = conn.prepare(
+        "SELECT p.*,
+                (SELECT COUNT(*) FROM faces f
+                   WHERE f.person_id = p.id AND f.assignment = 'confirmed' AND f.embedding IS NOT NULL) AS face_sample_count,
+                (SELECT COUNT(DISTINCT f.media_id) FROM faces f
+                   WHERE f.person_id = p.id AND f.assignment IN ('suggested','confirmed')) AS media_count,
+                (SELECT COUNT(DISTINCT f.shoot_id) FROM faces f
+                   WHERE f.person_id = p.id AND f.assignment IN ('suggested','confirmed')) AS shoot_count
+           FROM people p
+          WHERE EXISTS (
+                SELECT 1 FROM faces f
+                 WHERE f.person_id = p.id AND f.shoot_id = ?1 AND f.assignment = 'confirmed'
+          )
+          ORDER BY p.name COLLATE NOCASE",
+    )?;
+
+    let rows = stmt
+        .query_map(params![reference_shoot_id], |row| {
+            Ok(PersonSummary {
+                person: map(row)?,
+                face_sample_count: get(row, "face_sample_count")?,
+                media_count: get(row, "media_count")?,
+                shoot_count: get(row, "shoot_count")?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
 pub fn rename(conn: &Connection, id: i64, name: &str) -> Result<()> {
     let name = name.trim();
     if name.is_empty() {
@@ -191,6 +227,87 @@ mod tests {
         let b = get_or_create(&conn, "jonathan", None).unwrap();
         assert_eq!(a.id, b.id);
         assert_eq!(list(&conn).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn list_enrolled_summaries_excludes_people_never_confirmed_in_the_reference_shoot() {
+        use crate::models::{BoundingBox, MediaType, NewFace, NewMedia};
+        use crate::repo::{faces, media, shoots};
+
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+
+        let reference_shoot = shoots::get_or_create_reference_library(&conn).unwrap();
+        let tagged_shoot = shoots::create(&conn, "Tagged Shoot", "C:\\shoot").unwrap();
+
+        let enrolled = get_or_create(&conn, "Enrolled Person", None).unwrap();
+        let media_id = media::upsert(
+            &conn,
+            &NewMedia {
+                shoot_id: reference_shoot.id,
+                path: "C:\\ref\\a.jpg".into(),
+                filename: "a.jpg".into(),
+                media_type: MediaType::Photo,
+                extension: "jpg".into(),
+                file_size: 1,
+                content_key: "ref-a".into(),
+                captured_at: None,
+            },
+        )
+        .unwrap();
+        let face_id = faces::insert_manual(
+            &conn,
+            &NewFace {
+                media_id,
+                shoot_id: reference_shoot.id,
+                bbox: BoundingBox { x: 0.1, y: 0.1, w: 0.2, h: 0.2 },
+                landmarks: None,
+                detection_confidence: 1.0,
+                embedding: Some(vec![1.0, 0.0]),
+                quality: Some(0.9),
+                frame_time: None,
+                crop_path: None,
+            },
+        )
+        .unwrap();
+        faces::assign(&conn, face_id, enrolled.id, Some(1.0)).unwrap();
+
+        // Someone tagged the normal way — confirmed in a real shoot, never enrolled.
+        let tagged = get_or_create(&conn, "Tagged Person", None).unwrap();
+        let tagged_media_id = media::upsert(
+            &conn,
+            &NewMedia {
+                shoot_id: tagged_shoot.id,
+                path: "C:\\shoot\\b.jpg".into(),
+                filename: "b.jpg".into(),
+                media_type: MediaType::Photo,
+                extension: "jpg".into(),
+                file_size: 1,
+                content_key: "tagged-b".into(),
+                captured_at: None,
+            },
+        )
+        .unwrap();
+        let tagged_face_id = faces::insert(
+            &conn,
+            &NewFace {
+                media_id: tagged_media_id,
+                shoot_id: tagged_shoot.id,
+                bbox: BoundingBox { x: 0.1, y: 0.1, w: 0.2, h: 0.2 },
+                landmarks: None,
+                detection_confidence: 0.95,
+                embedding: Some(vec![0.0, 1.0]),
+                quality: Some(0.8),
+                frame_time: None,
+                crop_path: None,
+            },
+        )
+        .unwrap();
+        faces::assign(&conn, tagged_face_id, tagged.id, Some(1.0)).unwrap();
+
+        let enrolled_list = list_enrolled_summaries(&conn, reference_shoot.id).unwrap();
+        assert_eq!(enrolled_list.len(), 1);
+        assert_eq!(enrolled_list[0].person.id, enrolled.id);
     }
 
     #[test]

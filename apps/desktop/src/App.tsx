@@ -27,8 +27,13 @@ export default function App() {
     try { localStorage.setItem('skwad.experience', next) } catch { /* Navigation still works without browser storage. */ }
   }
   const screen = useUi((s) => s.screen)
+  const theme = useUi((s) => s.theme)
   const viewerMediaId = useUi((s) => s.viewerMediaId)
   const viewerPreferVideoFaces = useUi((s) => s.viewerPreferVideoFaces)
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme
+  }, [theme])
 
   const session = useQuery({ queryKey: ['catalogueSession'], queryFn: api.catalogueSessionStatus })
   const info = useQuery({

@@ -35,9 +35,45 @@ pub fn get_by_id(conn: &Connection, id: i64) -> Result<Option<Shoot>> {
 }
 
 pub fn list(conn: &Connection) -> Result<Vec<Shoot>> {
-    let mut stmt = conn.prepare("SELECT * FROM shoots ORDER BY created_at DESC, id DESC")?;
+    let mut stmt =
+        conn.prepare("SELECT * FROM shoots WHERE is_reference = 0 ORDER BY created_at DESC, id DESC")?;
     let rows = stmt.query_map([], map)?.collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
+}
+
+/// The single hidden shoot that parks person-enrollment reference photos and
+/// videos. It never appears in the Media library / Processed jobs listings
+/// (§ `list`/`list_summaries` both filter `is_reference = 0`), because faces
+/// and media rows require a non-null `shoot_id` and reference material is not
+/// part of any real import.
+pub fn get_or_create_reference_library(conn: &Connection) -> Result<Shoot> {
+    let existing: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM shoots WHERE is_reference = 1 LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(id) = existing {
+        return get_by_id(conn, id)?.ok_or_else(|| crate::DbError::other("reference library shoot vanished"));
+    }
+
+    let ts = now();
+    conn.execute(
+        "INSERT INTO shoots (name, source_path, status, is_reference, created_at, updated_at)
+         VALUES ('Reference Library', '', ?1, 1, ?2, ?2)",
+        params![ShootStatus::Completed, ts],
+    )?;
+    let id = conn.last_insert_rowid();
+    get_by_id(conn, id)?.ok_or_else(|| crate::DbError::other("reference library shoot vanished after insert"))
+}
+
+/// A read-only lookup for callers that must not create the reference shoot as
+/// a side effect of merely checking whether anyone has enrolled yet.
+pub fn reference_library_id(conn: &Connection) -> Result<Option<i64>> {
+    Ok(conn
+        .query_row("SELECT id FROM shoots WHERE is_reference = 1 LIMIT 1", [], |row| row.get(0))
+        .optional()?)
 }
 
 /// The Shoots screen listing: one row per shoot with its counts already rolled
@@ -66,6 +102,7 @@ pub fn list_summaries(conn: &Connection) -> Result<Vec<ShootSummary>> {
                 SELECT r.id FROM processing_runs r
                  WHERE r.shoot_id = s.id ORDER BY r.started_at DESC, r.id DESC LIMIT 1
            )
+          WHERE s.is_reference = 0
           ORDER BY s.created_at DESC, s.id DESC",
     )?;
 
@@ -166,6 +203,20 @@ mod tests {
 
         set_status(&conn, shoot.id, ShootStatus::Completed).unwrap();
         assert_eq!(get_by_id(&conn, shoot.id).unwrap().unwrap().status, "completed");
+    }
+
+    #[test]
+    fn reference_library_is_hidden_and_reused() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+        create(&conn, "Real Shoot", "D:\\real").unwrap();
+
+        let first = get_or_create_reference_library(&conn).unwrap();
+        let second = get_or_create_reference_library(&conn).unwrap();
+        assert_eq!(first.id, second.id, "the reference shoot is a singleton");
+
+        assert_eq!(list(&conn).unwrap().len(), 1, "the reference shoot never appears in normal listings");
+        assert_eq!(list_summaries(&conn).unwrap().len(), 1);
     }
 
     #[test]

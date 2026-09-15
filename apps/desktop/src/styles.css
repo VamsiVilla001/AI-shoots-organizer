@@ -11,6 +11,7 @@
 @font-face { font-family: 'JetBrains Mono'; font-style: normal; font-weight: 600; src: url('/fonts/JetBrainsMono-600.woff2') format('woff2'); font-display: swap; }
 
 :root {
+  color-scheme: light;
   --background: #f4f2ee;
   --foreground: #1d1b17;
   --card: #fffefc;
@@ -51,6 +52,67 @@
   --shadow-card: 0 1px 2px rgb(29 27 23 / 0.05);
   --shadow-pop: 0 4px 16px rgb(29 27 23 / 0.10), 0 1px 3px rgb(29 27 23 / 0.06);
   --ease-swift: cubic-bezier(0.2, 0, 0, 1);
+}
+
+/* Dark palette: applied automatically when the OS prefers dark and the user
+ * has not explicitly chosen a theme, and always when they have chosen dark
+ * (the [data-theme="dark"] block below wins in both directions). The
+ * always-dark media-preview tokens (--live-*) are unchanged — they are a
+ * deliberate bounded canvas for accurate evaluation, not a theme. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    color-scheme: dark;
+    --background: #17140f;
+    --foreground: #f3efe8;
+    --card: #201c16;
+    --secondary: #2b2620;
+    --muted-foreground: #a39c8f;
+    --input: #3a352c;
+    --border: #34302a;
+    --ember: #e0691f;
+    --ember-deep: #c3591a;
+    --ember-bright: #f8945a;
+    --ember-tint: #3a2415;
+    --ok: #4caf82;
+    --ok-tint: #1c2f24;
+    --warn: #d9a53c;
+    --warn-tint: #332912;
+    --error: #e08175;
+    --danger-tint: #3a201d;
+    --chart-2: #9c9484;
+    --chart-3: #6fb0a4;
+    --chart-4: #b090ba;
+    --chart-5: #d4bd6e;
+    --shadow-card: 0 1px 2px rgb(0 0 0 / 0.35);
+    --shadow-pop: 0 4px 16px rgb(0 0 0 / 0.5), 0 1px 3px rgb(0 0 0 / 0.4);
+  }
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --background: #17140f;
+  --foreground: #f3efe8;
+  --card: #201c16;
+  --secondary: #2b2620;
+  --muted-foreground: #a39c8f;
+  --input: #3a352c;
+  --border: #34302a;
+  --ember: #e0691f;
+  --ember-deep: #c3591a;
+  --ember-bright: #f8945a;
+  --ember-tint: #3a2415;
+  --ok: #4caf82;
+  --ok-tint: #1c2f24;
+  --warn: #d9a53c;
+  --warn-tint: #332912;
+  --error: #e08175;
+  --danger-tint: #3a201d;
+  --chart-2: #9c9484;
+  --chart-3: #6fb0a4;
+  --chart-4: #b090ba;
+  --chart-5: #d4bd6e;
+  --shadow-card: 0 1px 2px rgb(0 0 0 / 0.35);
+  --shadow-pop: 0 4px 16px rgb(0 0 0 / 0.5), 0 1px 3px rgb(0 0 0 / 0.4);
 }
 
 * {
@@ -282,6 +344,12 @@ h2 {
 
 .sidebar .spacer {
   flex: 1;
+}
+
+.sidebar-theme-toggle {
+  width: 100%;
+  text-align: left;
+  justify-content: flex-start;
 }
 
 .sidebar .shoot-chip {

@@ -145,6 +145,19 @@ pub fn library_vectors(conn: &Connection) -> Result<Vec<FaceVector>> {
     Ok(rows.into_iter().flatten().collect())
 }
 
+/// One person's confirmed reference samples — the input to matching a freshly
+/// enrolled person against media that predates their enrollment.
+pub fn reference_vectors_for_person(conn: &Connection, person_id: i64) -> Result<Vec<FaceVector>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, media_id, frame_time, person_id, embedding, quality FROM faces
+          WHERE person_id = ?1 AND assignment = 'confirmed' AND embedding IS NOT NULL",
+    )?;
+    let rows = stmt
+        .query_map(params![person_id], map_vector)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows.into_iter().flatten().collect())
+}
+
 /// Embeddings in one shoot that still belong to nobody — the input to clustering.
 pub fn unassigned_vectors(conn: &Connection, shoot_id: i64) -> Result<Vec<FaceVector>> {
     let mut stmt = conn.prepare(
