@@ -9,11 +9,12 @@
  */
 
 import { useEffect, useRef, useState } from 'react'
-import type { PointerEvent as ReactPointerEvent } from 'react'
+import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { BoundingBox } from '@skwad/shared-types'
 import * as api from '../api'
 import { FaceTagger } from './FaceTagger'
+import { MediaContextMenu } from './MediaContextMenu'
 import { formatConfidence, formatCount, formatTime, fullUrl, videoFrameUrl, videoUrl } from '../media'
 import { useUi } from '../store'
 
@@ -30,6 +31,7 @@ export function MediaViewer(props: { mediaId: number; preferVideoFaces?: boolean
   const [videoFaceMode, setVideoFaceMode] = useState(Boolean(props.preferVideoFaces))
   const [reviewFrameState, setReviewFrameState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle')
   const [reviewFrameRequest, setReviewFrameRequest] = useState(0)
+  const [menuAt, setMenuAt] = useState<{ x: number; y: number } | null>(null)
   const drawStart = useRef<{ point: { x: number; y: number }; clientX: number; clientY: number } | null>(null)
   const frameRef = useRef<HTMLDivElement>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
@@ -382,6 +384,11 @@ export function MediaViewer(props: { mediaId: number; preferVideoFaces?: boolean
             drawStart.current = null
             if (!addFace.isPending) setDraftBox(null)
           }}
+          onContextMenu={(e: ReactMouseEvent<HTMLDivElement>) => {
+            if (drawingFace) return
+            e.preventDefault()
+            setMenuAt({ x: e.clientX, y: e.clientY })
+          }}
         >
           {item.mediaType === 'photo' ? (
             <>
@@ -521,6 +528,17 @@ export function MediaViewer(props: { mediaId: number; preferVideoFaces?: boolean
           )}
         </div>
       </div>
+
+      {menuAt && (
+        <MediaContextMenu
+          media={item}
+          x={menuAt.x}
+          y={menuAt.y}
+          onClose={() => setMenuAt(null)}
+          onShowFolder={() => api.revealInFolder(item.path)}
+          onEditorial={(args) => setEditorial.mutate({ mediaIds: [item.id], ...args })}
+        />
+      )}
 
       {taggingFace && (
         <FaceTagger

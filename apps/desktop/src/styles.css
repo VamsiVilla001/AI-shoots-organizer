@@ -2173,6 +2173,19 @@ label.field > span:first-child,
   border-color: var(--foreground);
 }
 
+/* Shared right-click menu, used by the project workspace and by the media
+ * grid/viewer (both of which can also render outside the workspace shell in
+ * Classic mode, so this lives in the global stylesheet rather than
+ * workspace.css). */
+.pw-context-layer { position: fixed; inset: 0; z-index: 100; }
+.pw-context-menu { position: fixed; width: 220px; display: grid; padding: 8px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); box-shadow: var(--shadow-pop); }
+.pw-context-menu > strong { padding: 9px 10px 8px; color: var(--muted-foreground); font: 600 10px 'JetBrains Mono', monospace; letter-spacing: .08em; text-transform: uppercase; }
+.pw-context-menu > button { justify-content: flex-start; width: 100%; min-height: 36px; padding: 7px 10px; border: 0; background: transparent; text-align: left; }
+.pw-context-menu > button:hover, .pw-context-menu > button:focus-visible { background: var(--secondary); }
+.pw-context-menu > button.danger { color: var(--error); }
+.pw-context-menu .media-context-rating { display: flex; gap: 2px; padding: 4px 10px 6px; }
+.pw-context-menu .media-context-rating button { flex: 1; min-height: 30px; padding: 0; text-align: center; border-radius: var(--radius); }
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

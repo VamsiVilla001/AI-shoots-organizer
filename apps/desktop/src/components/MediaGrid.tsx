@@ -1,6 +1,9 @@
+import { useState, type MouseEvent } from 'react'
 import type { Media, MediaPickState } from '@skwad/shared-types'
+import * as api from '../api'
 import { formatTime, thumbUrl } from '../media'
 import { useUi } from '../store'
+import { MediaContextMenu } from './MediaContextMenu'
 
 /**
  * The thumbnail grid used for browsing and for sorting.
@@ -39,6 +42,8 @@ export function MediaGrid(props: {
 }) {
   const openViewer = useUi((s) => s.openViewer)
   const openMedia = (item: Media) => openViewer(item.id, Boolean(props.preferVideoFaces && item.mediaType === 'video'))
+  const [menu, setMenu] = useState<{ mediaId: number; x: number; y: number } | null>(null)
+  const menuItem = props.media.find((item) => item.id === menu?.mediaId)
   if (props.media.length === 0) {
     return (
       <div className="empty-state">
@@ -49,6 +54,7 @@ export function MediaGrid(props: {
   }
 
   return (
+    <>
     <div className="media-grid">
       {props.media.map((item) => {
         const isSelected = props.selected?.has(item.id) ?? false
@@ -78,6 +84,10 @@ export function MediaGrid(props: {
               }
             }}
             onDoubleClick={() => props.selectMode && openMedia(item)}
+            onContextMenu={(e: MouseEvent<HTMLDivElement>) => {
+              e.preventDefault()
+              setMenu({ mediaId: item.id, x: e.clientX, y: e.clientY })
+            }}
             onKeyDown={(event) => {
               if (event.key === 'Enter' || event.key === ' ') {
                 event.preventDefault()
@@ -162,5 +172,17 @@ export function MediaGrid(props: {
         )
       })}
     </div>
+    {menu && menuItem && (
+      <MediaContextMenu
+        media={menuItem}
+        x={menu.x}
+        y={menu.y}
+        onClose={() => setMenu(null)}
+        onOpen={() => openMedia(menuItem)}
+        onShowFolder={() => void api.revealInFolder(menuItem.path)}
+        onEditorial={props.onEditorial ? (args) => props.onEditorial!({ mediaIds: [menuItem.id], ...args }) : undefined}
+      />
+    )}
+    </>
   )
 }

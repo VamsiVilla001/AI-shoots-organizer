@@ -59,6 +59,31 @@ export function Collections({ projects, save, replaceMembers, loading, saving, p
   const act = (next: Project[]) => {
     try { save(next) } catch (error) { notice({ level: 'error', message: String(error) }) }
   }
+
+  // Collections only store {shootId, groupId} pointers into Classic data, and
+  // nothing scrubs those pointers when a shoot or group is deleted elsewhere
+  // (Media Processing's "Remove indexed data", a re-process that drops a
+  // group, or Classic's own group delete). Once shoots and every group list
+  // have loaded, prune any source that no longer resolves to a live group so
+  // collections don't accumulate permanently empty, dead entries.
+  useEffect(() => {
+    if (shoots.isPending || shoots.isError || groups.some(query => query.isPending || query.isError)) return
+    const liveShootIds = new Set((shoots.data ?? []).map(shoot => shoot.id))
+    const liveGroupKeys = new Set(allGroups.map(group => `${group.shootId}:${group.id}`))
+    let dirty = false
+    const next = projects.map(item => ({
+      ...item,
+      collections: item.collections.map(collectionItem => {
+        const sources = collectionItem.sources.filter(source => liveShootIds.has(source.shootId) && liveGroupKeys.has(`${source.shootId}:${source.groupId}`))
+        if (sources.length === collectionItem.sources.length) return collectionItem
+        dirty = true
+        return { ...collectionItem, sources }
+      }),
+    }))
+    if (dirty) act(next)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projects, shoots.data, groups])
+
   const resolve = (item: ProjectCollection) => item.sources.flatMap(source => allGroups.filter(group => group.id === source.groupId && group.shootId === source.shootId))
   const openProject = (id: string | null) => { setProjectId(id); setCollectionId(null); setSearch(''); setExportSource(null) }
   const openCollection = (id: string | null) => { setCollectionId(id); setSearch(''); setExportSource(null) }
@@ -267,7 +292,7 @@ function childrenOf(project: Project, parentId: string | null) { return project.
 function descendantsOf(project: Project, parentId: string): ProjectCollection[] { const direct = childrenOf(project, parentId); return direct.flatMap(item => [item, ...descendantsOf(project, item.id)]) }
 function collectionTrail(project: Project, collection: ProjectCollection) { const trail: ProjectCollection[] = []; const seen = new Set<string>(); let current: ProjectCollection | undefined = collection; while (current && !seen.has(current.id)) { seen.add(current.id); trail.unshift(current); current = current.parentId ? project.collections.find(item => item.id === current?.parentId) : undefined } return trail }
 function matches(value: string, query: string) { return value.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()) }
-function inView(project: Project, view: ProjectView) { if (view === 'archived') return project.status === 'archived' && project.accessRole === 'owner'; if (project.status === 'archived') return false; if (view === 'personal') return project.accessRole === 'owner'; if (view === 'shared') return project.accessRole !== 'owner' && project.visibility !== 'organisation'; return project.visibility === 'organisation' }
+function inView(project: Project, view: ProjectView) { if (view === 'archived') return project.status === 'archived' && project.accessRole === 'owner'; if (project.status === 'archived') return false; if (project.visibility === 'organisation') return view === 'organisation'; if (view === 'personal') return project.accessRole === 'owner'; if (view === 'shared') return project.accessRole !== 'owner'; return false }
 function accessLabel(project: Project) { if (project.visibility === 'organisation') return 'Organisation'; if (project.accessRole !== 'owner') return `Shared · ${project.accessRole}`; if (project.visibility === 'invited') return 'Invited people'; return 'Private' }
 function formatUpdated(value: string) { const time = new Date(value); return Number.isNaN(time.getTime()) ? 'Recently updated' : `Updated ${time.toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}` }
 function newCollection(projectId: string, name: string, parentId: string | null, sortOrder: number, sources: ProjectCollection['sources'] = []): ProjectCollection { const stamp = new Date().toISOString(); return { id: crypto.randomUUID(), projectId, name, parentId, notes: null, sortOrder, sources, createdAt: stamp, updatedAt: stamp } }

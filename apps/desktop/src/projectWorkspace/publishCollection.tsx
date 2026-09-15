@@ -5,6 +5,7 @@ import * as api from '../api'
 import { createProjectDraft, createTemplateCollections, PROJECT_TYPES, type CollectionSource, type Project, type ProjectVisibility } from './model'
 import { ProjectTemplatePreview } from './ProjectTemplatePreview'
 import { WorkspaceDialog } from './WorkspaceDialog'
+import { GROUP_CHANGE_KEYS, invalidateKeys } from '../queryKeys'
 
 export function PublishCollection({ media, projects, save, onClose, onPublished }: { media: Media[]; projects: Project[]; save: (projects: Project[]) => void; onClose: () => void; onPublished: (id: string) => void }) {
   const [name, setName] = useState('')
@@ -18,8 +19,14 @@ export function PublishCollection({ media, projects, save, onClose, onPublished 
   const [error, setError] = useState('')
   // Reuse created groups on retry if a later source or local save fails.
   const sources = useRef<CollectionSource[]>([])
+  // Synchronous guard: `busy` state only takes effect after a re-render, so a
+  // fast double Enter/click on the form could otherwise fire publish() twice
+  // and create two Classic groups for one collection.
+  const publishing = useRef(false)
   const client = useQueryClient()
   const publish = async () => {
+    if (publishing.current) return
+    publishing.current = true
     setBusy(true); setError('')
     try {
       // create_group is get-or-create in the existing engine. Never silently
@@ -54,10 +61,10 @@ export function PublishCollection({ media, projects, save, onClose, onPublished 
         save(projects.map(p => p.id === id ? { ...p, collections: [...p.collections, collection] } : p))
         onPublished(id)
       }
-      await Promise.all(['groups', 'groupStats', 'groupLinks', 'media'].map(key => client.invalidateQueries({ queryKey: [key] })))
+      await invalidateKeys(client, GROUP_CHANGE_KEYS)
     } catch (e) {
       setError(`${String(e)}${sources.current.length ? ' Any created groups are preserved in Classic. Retry to finish adding this collection.' : ''}`)
-    } finally { setBusy(false) }
+    } finally { publishing.current = false; setBusy(false) }
   }
   const started = sources.current.length > 0
   return <WorkspaceDialog title="Create collection" onClose={() => { if (!busy) onClose() }}><form onSubmit={e => { e.preventDefault(); void publish() }}>

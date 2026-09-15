@@ -141,12 +141,6 @@
 .pw-media-section { border-top: 1px solid var(--border); margin-top: 32px; padding-top: 28px; }
 .pw-collection-options { border-top: 1px solid var(--border); padding-top: 18px; color: var(--muted-foreground); font-size: 12px; }
 .pw-collection-options summary { cursor: pointer; }
-.pw-context-layer { position: fixed; inset: 0; z-index: 100; }
-.pw-context-menu { position: fixed; width: 220px; display: grid; padding: 8px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); box-shadow: var(--shadow-pop); }
-.pw-context-menu > strong { padding: 9px 10px 8px; color: var(--muted-foreground); font: 600 10px 'JetBrains Mono', monospace; letter-spacing: .08em; text-transform: uppercase; }
-.pw-context-menu > button { justify-content: flex-start; width: 100%; min-height: 36px; padding: 7px 10px; border: 0; background: transparent; text-align: left; }
-.pw-context-menu > button:hover, .pw-context-menu > button:focus-visible { background: var(--secondary); }
-.pw-context-menu > button.danger { color: var(--error); }
 .pw-shell .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 @media (min-width: 1800px) { .pw-card-grid { grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); } }
 @media (max-width: 1050px) { .pw-sidebar { width: 188px; padding: 24px 12px; } .pw-main { padding: 32px 24px; } .pw-heading { align-items: flex-start; } .pw-heading .actions { flex-wrap: wrap; justify-content: flex-end; } }

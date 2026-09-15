@@ -15,6 +15,7 @@ import type {
   ShootChangedEvent,
 } from '@skwad/shared-types'
 import { useUi } from './store'
+import { LIBRARY_CHANGE_KEYS, SHOOT_COMPLETE_KEYS, invalidateKeys } from './queryKeys'
 
 export async function startEventBridge(queryClient: QueryClient): Promise<() => void> {
   const disposers = await Promise.all([
@@ -22,14 +23,7 @@ export async function startEventBridge(queryClient: QueryClient): Promise<() => 
       useUi.getState().setProgress(payload)
       // When a shoot finishes, its lists are stale in one go.
       if (payload.stage === 'complete') {
-        queryClient.invalidateQueries({ queryKey: ['shoots'] })
-        queryClient.invalidateQueries({ queryKey: ['media'] })
-        queryClient.invalidateQueries({ queryKey: ['albums'] })
-        queryClient.invalidateQueries({ queryKey: ['clusters'] })
-        queryClient.invalidateQueries({ queryKey: ['people'] })
-        queryClient.invalidateQueries({ queryKey: ['faces'] })
-        // A finished scan changes how much is left to sort.
-        queryClient.invalidateQueries({ queryKey: ['groupStats'] })
+        void invalidateKeys(queryClient, SHOOT_COMPLETE_KEYS)
       } else {
         // During processing only the cheap headline numbers refresh.
         queryClient.invalidateQueries({ queryKey: ['shoots'] })
@@ -49,10 +43,7 @@ export async function startEventBridge(queryClient: QueryClient): Promise<() => 
     }),
 
     listen('skwad://library-changed', () => {
-      queryClient.invalidateQueries({ queryKey: ['people'] })
-      queryClient.invalidateQueries({ queryKey: ['faces'] })
-      queryClient.invalidateQueries({ queryKey: ['clusters'] })
-      queryClient.invalidateQueries({ queryKey: ['albums'] })
+      void invalidateKeys(queryClient, LIBRARY_CHANGE_KEYS)
     }),
 
     listen<JobFailedEvent>('skwad://job-failed', ({ payload }) => {

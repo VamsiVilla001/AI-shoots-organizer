@@ -16,6 +16,7 @@ import { PublishCollection } from './publishCollection'
 import { WorkspaceDialog } from './WorkspaceDialog'
 import type { Project } from './model'
 import { TaggedMedia } from './taggedMedia'
+import { ANALYSIS_REFRESH_KEYS, invalidateKeys } from '../queryKeys'
 
 export function Processing({ projects, save, onPublished }: { projects: Project[]; save: (p: Project[]) => void; onPublished: (id: string) => void }) {
   const [tab, setTab] = useState('library')
@@ -48,7 +49,7 @@ export function Processing({ projects, save, onPublished }: { projects: Project[
   }
   const refreshSources = async () => { await queryClient.invalidateQueries({ queryKey: ['shoots'] }) }
   const refreshAnalysis = async () => {
-    await Promise.all(['shoots', 'media', 'faces', 'albums', 'clusters', 'people', 'video-timelines', 'workspace-progress', 'workspace-progress-summary'].map(queryKey => queryClient.invalidateQueries({ queryKey: [queryKey] })))
+    await invalidateKeys(queryClient, ANALYSIS_REFRESH_KEYS)
   }
   const reprocessSource = async (shoot: ShootSummary) => {
     if (!window.confirm(`Re-process “${shoot.name}”?\n\nSKWAD will replace detected faces, face matches, unknown groups, and AI albums. Named people, manual collections, project folders, and original media files remain.`)) return
