@@ -1,0 +1,113 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      [hidden] {
+        display: none !important;
+      }
+      body {
+        margin: 0;
+        font-family: -apple-system, "Segoe UI", sans-serif;
+        font-size: 12px;
+        color: #ddd;
+        background: #262626;
+      }
+      #setup {
+        padding: 10px;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      #setup label {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+      #setup input {
+        background: #1c1c1c;
+        border: 1px solid #444;
+        color: #ddd;
+        padding: 4px;
+      }
+      #toolbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 8px 10px;
+        border-bottom: 1px solid #3a3a3a;
+      }
+      #status {
+        padding: 8px 10px;
+        color: #999;
+      }
+      #list {
+        overflow-y: auto;
+      }
+      .collection {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 8px 10px;
+        border-bottom: 1px solid #333;
+      }
+      .collection .meta {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        overflow: hidden;
+      }
+      .collection .name {
+        font-weight: 600;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .collection .project {
+        color: #999;
+      }
+      button {
+        background: #3a3a3a;
+        border: 1px solid #4d4d4d;
+        color: #ddd;
+        padding: 4px 10px;
+        cursor: pointer;
+      }
+      button:hover {
+        background: #474747;
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+      a#reconfigure {
+        color: #7ab8ff;
+        cursor: pointer;
+        text-decoration: underline;
+        font-size: 11px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="setup" hidden>
+      <label>
+        Bridge token — open <code>premiere-bridge.json</code> in SKWAD Media
+        Organiser's app data folder and paste its <code>token</code> value
+        <input id="token" type="text" placeholder="paste token here" />
+      </label>
+      <button id="connect">Connect</button>
+    </div>
+
+    <div id="toolbar" hidden>
+      <span>SKWAD Collections</span>
+      <span>
+        <a id="reconfigure">reconfigure</a>
+        <button id="refresh">Refresh</button>
+      </span>
+    </div>
+    <div id="status"></div>
+    <div id="list"></div>
+
+    <script src="main.js"></script>
+  </body>
+</html>

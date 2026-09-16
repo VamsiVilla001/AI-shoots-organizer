@@ -1,0 +1,6 @@
+{
+  "name": "@skwad/premiere-panel",
+  "version": "1.0.0",
+  "private": true,
+  "description": "UXP panel for Premiere Pro that imports SKWAD Media Organiser Collections as bins referencing the original files."
+}

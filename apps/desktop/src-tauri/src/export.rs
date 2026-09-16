@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use skwad_database::models::{AlbumType, ExportStatus};
+use skwad_database::models::{AlbumType, ExportStatus, ProjectCollectionSource};
 use skwad_database::repo::{albums, exports, groups as groups_repo, logs, media as media_repo, shoots};
 use skwad_export_engine::{ExportGroup, ExportMode, ExportOptions, ExportPlan, SourceFile};
 use tauri::AppHandle;
@@ -55,6 +55,22 @@ fn collect_files(conn: &skwad_database::rusqlite::Connection, media_ids: &[i64])
             is_video: item.media_type == "video",
             size: item.file_size.max(0) as u64,
         });
+    }
+    Ok(files)
+}
+
+/// Resolves a Collection's `{shoot, group}` sources to files on disk — the
+/// same rule as folder export: what's sorted into the group is what gets
+/// handed out. Used by the Premiere bridge (§ premiere_api), which references
+/// these paths directly rather than writing anything to disk.
+pub fn resolve_collection_files(
+    db: &skwad_database::Database,
+    sources: &[ProjectCollectionSource],
+) -> Result<Vec<SourceFile>> {
+    let conn = db.conn()?;
+    let mut files = Vec::new();
+    for source in sources {
+        files.extend(collect_files(&conn, &groups_repo::media_ids(&conn, source.group_id, None)?)?);
     }
     Ok(files)
 }
@@ -612,6 +628,45 @@ mod tests {
         );
         // The player folders are still there — the two axes coexist.
         assert!(groups.iter().any(|g| g.name == "Jonathan"));
+    }
+
+    #[test]
+    fn collection_sources_resolve_across_multiple_groups() {
+        let scratch = Scratch::new("collection");
+        let (db, shoot_id) = seed(scratch.path());
+
+        let (highlights_id, bts_id) = {
+            let conn = db.conn().unwrap();
+            let highlights = groups_repo::get_or_create(&conn, shoot_id, "Highlights", None).unwrap();
+            let bts = groups_repo::get_or_create(&conn, shoot_id, "BTS", None).unwrap();
+            let all: Vec<i64> = media_repo::query(
+                &conn,
+                &skwad_database::models::MediaQuery {
+                    shoot_id: Some(shoot_id),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+            groups_repo::add_media(&conn, highlights.id, &all[..2]).unwrap();
+            groups_repo::add_media(&conn, bts.id, &all[2..]).unwrap();
+            (highlights.id, bts.id)
+        };
+
+        let sources = vec![
+            ProjectCollectionSource {
+                shoot_id,
+                group_id: highlights_id,
+            },
+            ProjectCollectionSource {
+                shoot_id,
+                group_id: bts_id,
+            },
+        ];
+        let files = resolve_collection_files(&db, &sources).unwrap();
+        assert_eq!(files.len(), 3, "both sources' files should be combined");
     }
 
     #[test]

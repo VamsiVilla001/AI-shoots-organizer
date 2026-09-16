@@ -265,6 +265,15 @@ export const startExport = (shootId: number, destination: string, options: Expor
 export const cancelExport = (shootId: number) => call<void>('cancel_export', { shootId })
 export const listExports = (shootId: number) => call<ExportRecord[]>('list_exports', { shootId })
 
+// --- premiere ----------------------------------------------------------------
+// Queues a job for the Premiere Pro UXP panel's next poll (apps/premiere-panel) —
+// the app has no way to reach into Premiere directly, only to ask its panel to.
+
+export const sendMediaToPremiere = (mediaIds: number[], label?: string) =>
+  call<void>('send_media_to_premiere', { mediaIds, label })
+export const sendCollectionToPremiere = (collectionId: string) =>
+  call<void>('send_collection_to_premiere', { collectionId })
+
 // --- logs and privacy ------------------------------------------------------
 
 export const recentLogs = (shootId: number | null, limit = 200) =>

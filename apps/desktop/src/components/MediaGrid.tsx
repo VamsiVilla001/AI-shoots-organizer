@@ -181,6 +181,15 @@ export function MediaGrid(props: {
         onOpen={() => openMedia(menuItem)}
         onShowFolder={() => void api.revealInFolder(menuItem.path)}
         onEditorial={props.onEditorial ? (args) => props.onEditorial!({ mediaIds: [menuItem.id], ...args }) : undefined}
+        onSendToPremiere={() => {
+          const isMenuItemSelected = props.selected?.has(menuItem.id) ?? false
+          const mediaIds = isMenuItemSelected && props.selected?.size ? [...props.selected] : [menuItem.id]
+          const label = mediaIds.length === 1 ? menuItem.filename : undefined
+          void api
+            .sendMediaToPremiere(mediaIds, label)
+            .then(() => useUi.getState().pushNotice({ level: 'success', message: `Sent ${mediaIds.length} file${mediaIds.length === 1 ? '' : 's'} to Premiere — open the panel there to see it land.` }))
+            .catch((error) => useUi.getState().pushNotice({ level: 'error', message: String(error) }))
+        }}
       />
     )}
     </>

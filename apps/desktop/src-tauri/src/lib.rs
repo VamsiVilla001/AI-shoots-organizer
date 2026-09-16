@@ -7,6 +7,7 @@ pub mod export;
 pub mod models;
 pub mod paths;
 pub mod pipeline;
+pub mod premiere_api;
 pub mod protocol;
 pub mod resource_monitor;
 pub mod settings;
@@ -51,6 +52,10 @@ pub fn run() {
 
             let state = Arc::new(AppState::new(db, paths, settings, protocol::url_base()));
             app.manage(Arc::clone(&state));
+
+            // Lets an external process (the Premiere Pro panel) read Collections
+            // over loopback HTTP — see premiere_api.rs for why that's necessary.
+            premiere_api::start(Arc::clone(&state));
 
             // Workers start immediately so an import interrupted by a previous
             // quit resumes without the user having to ask (§18).
@@ -170,6 +175,9 @@ pub fn run() {
             commands::start_export,
             commands::cancel_export,
             commands::list_exports,
+            // premiere
+            commands::send_media_to_premiere,
+            commands::send_collection_to_premiere,
             // logs and privacy
             commands::recent_logs,
             commands::clear_all_embeddings,

@@ -7,7 +7,7 @@ import type { Media, MediaPickState } from '@skwad/shared-types'
  * inside or outside the project workspace shell, so this stays free of any
  * workspace-only state.
  */
-export function MediaContextMenu({ media, x, y, onClose, onOpen, onShowFolder, onEditorial }: {
+export function MediaContextMenu({ media, x, y, onClose, onOpen, onShowFolder, onEditorial, onSendToPremiere }: {
   media: Media
   x: number
   y: number
@@ -17,6 +17,8 @@ export function MediaContextMenu({ media, x, y, onClose, onOpen, onShowFolder, o
   onShowFolder: () => void
   /** Omitted where the caller has no rating/pick controls (e.g. read-only browsing). */
   onEditorial?: (args: { rating?: number; pickState?: MediaPickState }) => void
+  /** Omitted where the caller has no Premiere bridge context (e.g. read-only browsing). */
+  onSendToPremiere?: () => void
 }) {
   useEffect(() => {
     const close = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose() }
@@ -32,6 +34,7 @@ export function MediaContextMenu({ media, x, y, onClose, onOpen, onShowFolder, o
         <strong>{media.filename}</strong>
         {onOpen && <button autoFocus role="menuitem" onClick={() => run(onOpen)}>Open</button>}
         <button role="menuitem" onClick={() => run(onShowFolder)}>Show in folder</button>
+        {onSendToPremiere && <button role="menuitem" onClick={() => run(onSendToPremiere)}>Send to Premiere</button>}
         {onEditorial && <>
           <div className="media-context-rating" role="group" aria-label="Rating">
             {[1, 2, 3, 4, 5].map(value => (

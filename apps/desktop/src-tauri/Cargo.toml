@@ -33,6 +33,13 @@ tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 
+# Loopback-only bridge for the Premiere Pro panel (see premiere_api.rs) — the
+# webview's skwadmedia:// protocol and Tauri IPC are unreachable from an
+# external process, so this is the one place the app needs a real HTTP server.
+axum = "0.8"
+tokio = { version = "1", features = ["rt", "net"] }
+tower-http = { version = "0.6", features = ["cors"] }
+
 anyhow = "1.0"
 argon2 = { version = "0.5", features = ["zeroize"] }
 thiserror = "2.0"

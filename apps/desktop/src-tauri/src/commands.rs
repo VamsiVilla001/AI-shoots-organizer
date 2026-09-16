@@ -1797,6 +1797,69 @@ pub fn list_exports(state: State<'_, Arc<AppState>>, shoot_id: i64) -> Result<Ve
 }
 
 // ---------------------------------------------------------------------------
+// Premiere (§ premiere_api) — queues a job for the UXP panel's next poll.
+// Neither command reaches Premiere directly: only code running inside
+// Premiere can call its scripting API.
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub fn send_media_to_premiere(
+    state: State<'_, Arc<AppState>>,
+    media_ids: Vec<i64>,
+    label: Option<String>,
+) -> Result<()> {
+    let conn = state.db.conn()?;
+    let mut files = Vec::new();
+    for id in &media_ids {
+        if let Some(item) = media_repo::get_by_id(&conn, *id)? {
+            if std::path::Path::new(&item.path).is_file() {
+                files.push(crate::state::PremiereJobFile {
+                    is_video: item.media_type == "video",
+                    path: item.path,
+                    filename: item.filename,
+                });
+            }
+        }
+    }
+    if files.is_empty() {
+        return Err(err("none of the selected files could be found on disk"));
+    }
+    let label = label.unwrap_or_else(|| format!("{} file{}", files.len(), if files.len() == 1 { "" } else { "s" }));
+    // No bin: a one-off file (or an ad-hoc multi-select) lands in the project
+    // root. A Collection send (below) is the one case that gets its own bin.
+    state.enqueue_premiere_job(label, None, files);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn send_collection_to_premiere(state: State<'_, Arc<AppState>>, collection_id: String) -> Result<()> {
+    let (account_id, email, organisation) = crate::catalogue::current_project_identity(&state)?;
+    let conn = state.db.conn()?;
+    let accessible = projects::list_accessible(&conn, &account_id, &email, organisation.as_deref())?;
+    drop(conn);
+
+    let collection = accessible
+        .into_iter()
+        .flat_map(|project| project.collections)
+        .find(|collection| collection.id == collection_id)
+        .ok_or_else(|| err("collection not found"))?;
+
+    let files: Vec<crate::state::PremiereJobFile> = crate::export::resolve_collection_files(&state.db, &collection.sources)?
+        .into_iter()
+        .map(|file| crate::state::PremiereJobFile {
+            path: file.path.display().to_string(),
+            filename: file.filename,
+            is_video: file.is_video,
+        })
+        .collect();
+    if files.is_empty() {
+        return Err(err("this collection has no files to send"));
+    }
+    state.enqueue_premiere_job(collection.name.clone(), Some(collection.name), files);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Logs and privacy (§24, §25)
 // ---------------------------------------------------------------------------
 
