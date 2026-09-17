@@ -183,13 +183,60 @@ pub mod testing {
         }
     }
 
+    /// How long a test schema is kept before the next run sweeps it.
+    ///
+    /// Long enough to still be there when you go and look at why a test failed,
+    /// short enough that no *live* test process could still own one — a suite
+    /// that ran for an hour would have other problems.
+    const SCHEMA_RETENTION: &str = "1 hour";
+
+    /// Drops schemas left by runs that have long since finished.
+    ///
+    /// This is the half that was missing. Each schema is named for the process
+    /// that made it, and a PID never repeats within a run, so nothing ever
+    /// collided and nothing was ever reclaimed: 1795 schemas and 2.6 GB after a
+    /// few days of `cargo test`. Sweeping on the way *in* rather than dropping
+    /// on the way *out* is deliberate — a panicking test poisons its pool and
+    /// would skip a cleanup-on-drop anyway, and dropping immediately would
+    /// destroy exactly the rows you want to inspect after a failure.
+    fn sweep_stale_schemas(client: &mut postgres::Client) -> Result<()> {
+        client.batch_execute(
+            "CREATE TABLE IF NOT EXISTS public.test_schemas (
+                 name       TEXT PRIMARY KEY,
+                 created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+             )",
+        )?;
+
+        let stale: Vec<String> = client
+            .query(
+                &format!(
+                    "SELECT name FROM public.test_schemas WHERE created_at < now() - interval '{SCHEMA_RETENTION}'"
+                ),
+                &[],
+            )?
+            .iter()
+            .map(|row| row.get(0))
+            .collect();
+
+        for name in stale {
+            // One statement apiece, each its own transaction. Dropping them
+            // together holds a lock on every object until commit, and ~30
+            // tables per schema exhausts `max_locks_per_transaction` — the
+            // error is "out of shared memory", which reads like a server
+            // problem rather than a batching one.
+            client.batch_execute(&format!("DROP SCHEMA IF EXISTS {name} CASCADE"))?;
+            client.execute("DELETE FROM public.test_schemas WHERE name = $1", &[&name])?;
+        }
+        Ok(())
+    }
+
     impl Database {
         /// A private, empty, migrated schema on the test server.
         ///
-        /// Dropped schemas are cleaned up by the *next* run rather than on
-        /// drop: a test that panics would otherwise leave the pool poisoned
-        /// and the schema behind anyway, and a `DROP SCHEMA` on the way out
-        /// makes a failing test's rows impossible to inspect.
+        /// Schemas are registered in `public.test_schemas` and swept by a later
+        /// run once they are older than [`SCHEMA_RETENTION`], rather than
+        /// dropped when the `Database` goes out of scope — see
+        /// [`sweep_stale_schemas`] for why.
         pub fn open_test() -> Result<Self> {
             let url = std::env::var("SKWAD_TEST_DATABASE_URL")
                 .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432/skwad_test".to_string());
@@ -208,9 +255,24 @@ pub mod testing {
                      Run `npm run db:setup` (or see docs/development.md) to create one."
                 )
             });
+            // Once per process, not once per test. `cargo test` opens one of
+            // these per test in parallel; without the guard a hundred threads
+            // would each read the same stale list and race to drop the same
+            // schemas — idempotent, but every one of them waits for it.
+            static SWEEP: std::sync::Once = std::sync::Once::new();
+            let mut swept = Ok(());
+            SWEEP.call_once(|| swept = sweep_stale_schemas(&mut bootstrap));
+            swept?;
             bootstrap.batch_execute(&format!(
                 "DROP SCHEMA IF EXISTS {schema} CASCADE; CREATE SCHEMA {schema}"
             ))?;
+            // Registered before use, so a process that dies mid-test still
+            // leaves a row for the next run to sweep.
+            bootstrap.execute(
+                "INSERT INTO public.test_schemas (name) VALUES ($1)
+                 ON CONFLICT (name) DO UPDATE SET created_at = now()",
+                &[&schema],
+            )?;
             drop(bootstrap);
 
             let manager = PostgresConnectionManager::new(config.to_postgres_config(), NoTls);
