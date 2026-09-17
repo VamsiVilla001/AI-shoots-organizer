@@ -260,7 +260,12 @@ mod tests {
             &NewFace {
                 media_id,
                 shoot_id: reference_shoot.id,
-                bbox: BoundingBox { x: 0.1, y: 0.1, w: 0.2, h: 0.2 },
+                bbox: BoundingBox {
+                    x: 0.1,
+                    y: 0.1,
+                    w: 0.2,
+                    h: 0.2,
+                },
                 landmarks: None,
                 detection_confidence: 1.0,
                 embedding: Some(vec![1.0, 0.0]),
@@ -293,7 +298,12 @@ mod tests {
             &NewFace {
                 media_id: tagged_media_id,
                 shoot_id: tagged_shoot.id,
-                bbox: BoundingBox { x: 0.1, y: 0.1, w: 0.2, h: 0.2 },
+                bbox: BoundingBox {
+                    x: 0.1,
+                    y: 0.1,
+                    w: 0.2,
+                    h: 0.2,
+                },
                 landmarks: None,
                 detection_confidence: 0.95,
                 embedding: Some(vec![0.0, 1.0]),

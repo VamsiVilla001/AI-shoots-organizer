@@ -49,21 +49,51 @@ pub struct Database {
     path: PathBuf,
 }
 
+/// Where the database file lives, which decides how it may be journalled.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum StorageMode {
+    /// A local disk: WAL, so the UI reads while workers write.
+    #[default]
+    Local,
+    /// A shared network folder. WAL needs shared memory the SMB client cannot
+    /// provide, so the rollback journal is used and writers wait much longer
+    /// for each other over the wire.
+    NetworkShare,
+}
+
 impl Database {
     /// Opens (creating if needed) the database at `path` and brings the schema
     /// up to the current version.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        Self::open_with_mode(path, StorageMode::Local)
+    }
+
+    /// As [`Database::open`], with the journal and timeouts the storage the
+    /// file sits on can actually support.
+    pub fn open_with_mode(path: impl AsRef<Path>, mode: StorageMode) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| DbError::other(format!("create {}: {e}", parent.display())))?;
         }
 
-        let manager = SqliteConnectionManager::file(&path).with_init(|conn| {
-            // WAL lets the UI read while background workers write.
-            conn.pragma_update(None, "journal_mode", "WAL")?;
-            conn.pragma_update(None, "synchronous", "NORMAL")?;
+        let manager = SqliteConnectionManager::file(&path).with_init(move |conn| {
+            match mode {
+                StorageMode::Local => {
+                    // WAL lets the UI read while background workers write.
+                    conn.pragma_update(None, "journal_mode", "WAL")?;
+                    conn.pragma_update(None, "synchronous", "NORMAL")?;
+                    conn.pragma_update(None, "busy_timeout", 10_000)?;
+                }
+                StorageMode::NetworkShare => {
+                    // TRUNCATE keeps the journal in one file the share can lock,
+                    // FULL survives a dropped connection mid-write, and the long
+                    // timeout absorbs another workstation holding the lock.
+                    conn.pragma_update(None, "journal_mode", "TRUNCATE")?;
+                    conn.pragma_update(None, "synchronous", "FULL")?;
+                    conn.pragma_update(None, "busy_timeout", 30_000)?;
+                }
+            }
             conn.pragma_update(None, "foreign_keys", "ON")?;
-            conn.pragma_update(None, "busy_timeout", 10_000)?;
             conn.pragma_update(None, "temp_store", "MEMORY")?;
             Ok(())
         });

@@ -5,49 +5,15 @@ import * as api from '../api'
 export type { Project, ProjectCollection, ProjectMember, ProjectVisibility }
 export type CollectionSource = ProjectCollection['sources'][number]
 
+/** Labels a project; it does not decide what is inside one. */
 export const PROJECT_TYPES = ['Esports tournament', 'Sports tournament', 'Wedding', 'Other'] as const
-
-export interface CollectionTemplate { name: string; children?: CollectionTemplate[] }
-
-export const PROJECT_TEMPLATES: Record<(typeof PROJECT_TYPES)[number], CollectionTemplate[]> = {
-  'Esports tournament': [
-    { name: 'Teams', children: [{ name: 'Team Entry' }, { name: 'Team Reveal' }, { name: 'WWCD Moments' }] },
-    { name: 'Players', children: [{ name: 'Player Highlights' }, { name: 'Player vs Player' }] },
-    { name: 'MVP Videos' }, { name: 'Match Highlights' },
-  ],
-  'Sports tournament': [
-    { name: 'Teams', children: [{ name: 'Team Entry' }, { name: 'Team Highlights' }] },
-    { name: 'Players', children: [{ name: 'Player Highlights' }, { name: 'Player vs Player' }] },
-    { name: 'Matches', children: [{ name: 'Match Highlights' }, { name: 'Winning Moments' }] },
-    { name: 'Awards' },
-  ],
-  Wedding: [
-    { name: 'Couple', children: [{ name: 'Bride' }, { name: 'Groom' }, { name: 'Couple Moments' }] },
-    { name: 'Ceremony' }, { name: 'Family' }, { name: 'Guests' }, { name: 'Reception' }, { name: 'Highlights' },
-  ],
-  Other: [],
-}
-
-export function createTemplateCollections(kind: string, projectId = ''): ProjectCollection[] {
-  const template = PROJECT_TEMPLATES[kind as keyof typeof PROJECT_TEMPLATES] ?? []
-  const stamp = new Date().toISOString()
-  const build = (items: CollectionTemplate[], parentId: string | null): ProjectCollection[] => items.flatMap((item, index) => {
-    const id = crypto.randomUUID()
-    const collection: ProjectCollection = {
-      id, projectId, name: item.name, parentId, notes: null, sortOrder: index,
-      sources: [], createdAt: stamp, updatedAt: stamp,
-    }
-    return [collection, ...build(item.children ?? [], id)]
-  })
-  return build(template, null)
-}
 
 export function createProjectDraft(name: string, kind: string, visibility: ProjectVisibility = 'private'): Project {
   const id = crypto.randomUUID()
   const stamp = new Date().toISOString()
   return {
     id, name, kind, ownerAccountId: '', ownerEmail: '', organisation: null, visibility, status: 'active', coverMediaId: null,
-    accessRole: 'owner', collections: createTemplateCollections(kind, id), members: [], mediaCount: 0,
+    accessRole: 'owner', collections: [], members: [], mediaCount: 0,
     createdAt: stamp, updatedAt: stamp,
   }
 }

@@ -1,8 +1,10 @@
 # SKWAD Collections — Premiere Pro panel
 
-A UXP panel that lists your SKWAD Media Organiser Collections inside Premiere
-Pro and imports the selected one as a bin, referencing the original files on
-your NAS or local disk. Nothing is copied.
+A UXP panel that browses your SKWAD Media Organiser Projects and Collections
+inside Premiere Pro — the same Personal / Shared with me / Organisation /
+Archived tabs and nested folder structure as the app's own Collections
+screen — and imports a Collection's media as a bin, referencing the original
+files on your NAS or local disk. Nothing is copied.
 
 It talks to a small local HTTP bridge that the desktop app runs on
 `127.0.0.1:51823` while it's open (see
@@ -26,19 +28,22 @@ you later choose to list the panel on the Creative Cloud Marketplace.
 
 ## First run
 
-The panel needs the bridge's access token. With SKWAD Media Organiser
-running, open `premiere-bridge.json` from its app data folder in a text
-editor and copy the `token` value into the panel's setup screen:
+Nothing to configure. The panel connects automatically as soon as it loads —
+no token to copy, no setup screen. It shows "Signed in as …" once connected,
+reflecting whichever SKWAD account is signed into the desktop app.
 
-- Windows: `%APPDATA%\com.skwad.mediaorganiser\premiere-bridge.json`
-- macOS: `~/Library/Application Support/com.skwad.mediaorganiser/premiere-bridge.json`
-- Linux: `~/.local/share/com.skwad.mediaorganiser/premiere-bridge.json`
+That's possible because the bridge's access token is a fixed value baked
+into both `apps/desktop/src-tauri/src/premiere_api.rs` and this panel's
+`main.js`, not a random per-install secret to discover and paste. See the
+comment at the top of `premiere_api.rs` for the reasoning — short version:
+the bridge only ever listens on loopback (unreachable from outside this
+machine), and *who* you are is answered by the desktop app's own signed-in
+session, not by the token, so a fixed constant protects exactly as much as
+a random one would have.
 
-The token is persisted by the app and remembered by the panel (via its local
-storage), so you shouldn't need to paste it again — it survives restarts on
-both sides. If the panel ever starts getting 401s (e.g. after the app's data
-was reset), open `premiere-bridge.json` again and re-paste the current
-token via **reconfigure** in the panel's toolbar.
+If the status line says it can't reach SKWAD Media Organiser, make sure the
+app is running. If it says you need to sign in, that's the desktop app's own
+SKWAD account — sign in there and hit **Refresh** here.
 
 ## Sending from the app itself
 

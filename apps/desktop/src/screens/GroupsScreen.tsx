@@ -119,8 +119,10 @@ function GroupsBody({ shootId }: { shootId: number }) {
   const activeGroup =
     view.kind === 'group' ? (groups.data ?? []).find((g) => g.id === view.id) ?? null : null
 
-  const toggle = (mediaId: number) => {
+  /** `additive` is Ctrl/Cmd-click; a plain click replaces the selection. */
+  const toggle = (mediaId: number, additive = true) => {
     setSelected((current) => {
+      if (!additive) return new Set([mediaId])
       const next = new Set(current)
       if (next.has(mediaId)) next.delete(mediaId)
       else next.add(mediaId)
@@ -404,8 +406,7 @@ function GroupsBody({ shootId }: { shootId: number }) {
           <MediaGrid
             media={visible}
             selected={selected}
-            selectMode
-            onToggleSelect={(mediaId) => toggle(mediaId)}
+            onToggleSelect={toggle}
             onSelectRange={selectRange}
             groupsFor={(mediaId) => groupNames.get(mediaId) ?? []}
             onDragMedia={(mediaId) => {

@@ -8,12 +8,15 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { AppSettings } from '@skwad/shared-types'
 import * as api from '../api'
 import { formatBytes } from '../media'
+import { LibraryLocationCard } from '../components/LibraryLocationCard'
+import { RosterImport } from '../components/RosterImport'
 import { useUi } from '../store'
 
 export function SettingsScreen() {
   const queryClient = useQueryClient()
   const pushNotice = useUi((s) => s.pushNotice)
   const info = useQuery({ queryKey: ['appInfo'], queryFn: api.appInfo })
+  const session = useQuery({ queryKey: ['catalogueSession'], queryFn: api.catalogueSessionStatus })
   const settingsQuery = useQuery({ queryKey: ['settings'], queryFn: api.getSettings })
   const [draft, setDraft] = useState<AppSettings | null>(null)
 
@@ -88,6 +91,10 @@ export function SettingsScreen() {
           </button>
         </div>
       </div>
+
+      <LibraryLocationCard isAdmin={session.data?.isAdmin === true} />
+
+      <div className="card roster-card"><RosterImport /></div>
 
       <div className="settings-grid">
         <div className="card">

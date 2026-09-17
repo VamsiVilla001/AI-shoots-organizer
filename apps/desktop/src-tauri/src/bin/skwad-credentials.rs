@@ -24,6 +24,8 @@ struct Credential {
     password_hash: String,
     enabled: bool,
     must_change_password: bool,
+    #[serde(default)]
+    role: String,
 }
 
 fn main() -> Result<(), String> {
@@ -31,6 +33,7 @@ fn main() -> Result<(), String> {
     let mut file = None;
     let mut email = None;
     let mut display_name = None;
+    let mut role = None;
     while let Some(argument) = arguments.next() {
         let value = arguments
             .next()
@@ -39,12 +42,18 @@ fn main() -> Result<(), String> {
             "--file" => file = Some(PathBuf::from(value)),
             "--email" => email = Some(value),
             "--display-name" => display_name = Some(value),
+            "--role" => role = Some(value),
             _ => return Err(format!("unknown option: {argument}")),
         }
     }
     let file = file.ok_or("--file is required")?;
     let email = email.ok_or("--email is required")?.trim().to_lowercase();
     let display_name = display_name.ok_or("--display-name is required")?.trim().to_owned();
+    let role = match role.as_deref().unwrap_or("member").trim().to_lowercase().as_str() {
+        "admin" => "admin".to_owned(),
+        "member" => "member".to_owned(),
+        other => return Err(format!("unknown role: {other} (use admin or member)")),
+    };
     if email.is_empty() || !email.contains('@') || display_name.is_empty() {
         return Err("provide a valid email and display name".into());
     }
@@ -79,6 +88,7 @@ fn main() -> Result<(), String> {
         existing.password_hash = password_hash;
         existing.enabled = true;
         existing.must_change_password = true;
+        existing.role = role;
     } else {
         document.users.push(Credential {
             id: Uuid::new_v4().to_string(),
@@ -87,6 +97,7 @@ fn main() -> Result<(), String> {
             password_hash,
             enabled: true,
             must_change_password: true,
+            role,
         });
     }
     if let Some(parent) = file.parent() {

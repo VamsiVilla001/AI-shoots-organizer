@@ -1,7 +1,9 @@
 //! Export (§11).
 //!
-//! The end of the workflow: lay native references to originals into group
-//! folders. Original media is never copied, modified, moved or renamed.
+//! The end of the workflow: lay the sorted groups out as folders on the
+//! destination — either as native shortcuts back to the originals, or as real
+//! copies for handing a self-contained folder to someone else. Either way the
+//! source media is only ever read: never modified, moved or renamed.
 
 pub mod naming;
 
@@ -49,6 +51,19 @@ pub enum ExportMode {
     AiAlbums,
 }
 
+/// What actually lands in the destination folder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ExportDelivery {
+    /// Native shortcuts back to the originals: instant, near-zero disk use,
+    /// but the folder is only usable while the originals stay put.
+    #[default]
+    Shortcut,
+    /// Real copies, so the destination folder stands on its own — what you
+    /// want when handing a drive to an editor who cannot reach the NAS.
+    Copy,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExportOptions {
@@ -56,6 +71,10 @@ pub struct ExportOptions {
     pub mode: ExportMode,
     /// Restrict a `Groups` export to these groups. `None` exports all of them.
     pub group_ids: Option<Vec<i64>>,
+    /// Shortcuts or real copies. Defaults to shortcuts so export records
+    /// written before this option existed still deserialize.
+    #[serde(default)]
+    pub delivery: ExportDelivery,
     /// Split each folder into `Photos/` and `Videos/` (§11).
     pub split_photos_videos: bool,
     /// `AiAlbums` only: include the unidentified album as its own folder.
@@ -63,7 +82,8 @@ pub struct ExportOptions {
     /// `AiAlbums` only: restrict the export to these players. `None` exports
     /// everyone.
     pub person_ids: Option<Vec<i64>>,
-    /// Retained for V1 settings compatibility; shortcuts do not copy metadata.
+    /// `Copy` delivery only: give each copy the original's timestamps. A
+    /// shortcut has no content of its own, so this does nothing for them.
     pub preserve_metadata: bool,
     pub existing: ExistingFilePolicy,
     /// `AiAlbums` only: also write multi-player albums as their own folders.
@@ -83,6 +103,7 @@ impl Default for ExportOptions {
         Self {
             mode: ExportMode::Groups,
             group_ids: None,
+            delivery: ExportDelivery::Shortcut,
             split_photos_videos: true,
             include_unidentified: true,
             person_ids: None,
@@ -222,7 +243,8 @@ pub struct ExportProgress {
     pub bytes_done: u64,
 }
 
-/// Executes a plan, creating native shortcuts to originals.
+/// Executes a plan, writing either native shortcuts or real copies depending
+/// on `options.delivery`.
 ///
 /// `should_continue` is polled between files so the UI can cancel a long
 /// export; `on_progress` reports after each one.
@@ -243,7 +265,11 @@ pub fn execute(
             return Err(ExportError::Cancelled);
         }
 
-        let target = native_shortcut_path(&destination.join(&item.relative));
+        let logical = destination.join(&item.relative);
+        let target = match options.delivery {
+            ExportDelivery::Shortcut => native_shortcut_path(&logical),
+            ExportDelivery::Copy => logical,
+        };
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent).map_err(|e| ExportError::Io {
                 path: parent.display().to_string(),
@@ -261,7 +287,10 @@ pub fn execute(
             _ => target,
         };
 
-        create_native_shortcut(&item.source, &final_target)?;
+        match options.delivery {
+            ExportDelivery::Shortcut => create_native_shortcut(&item.source, &final_target)?,
+            ExportDelivery::Copy => copy_original(&item.source, &final_target, options.preserve_metadata)?,
+        }
 
         progress.files_done += 1;
         progress.bytes_done += std::fs::metadata(&final_target)
@@ -272,8 +301,8 @@ pub fn execute(
 
     if options.write_manifest {
         // Best effort: a manifest that could not be written is worth a log
-        // line, not a failed export of shortcuts already created successfully.
-        if let Err(e) = write_manifest(plan, destination) {
+        // line, not a failed export of files already written successfully.
+        if let Err(e) = write_manifest(plan, destination, options.delivery) {
             tracing::warn!(error = %e, "could not write the sorting report");
         }
     }
@@ -281,14 +310,14 @@ pub fn execute(
     Ok(progress)
 }
 
-/// The name of the one file an export creates that is not a native shortcut
+/// The name of the one file an export creates that is not an exported media
 /// file. Prefixed with `_` so it sorts above the group folders.
 pub const MANIFEST_FILENAME: &str = "_sorting-report.txt";
 
 /// Writes a plain-text list of every folder and the files in it, with the
 /// source path each one came from. This is what makes an exported NAS folder
 /// self-describing once it leaves the app.
-pub fn write_manifest(plan: &ExportPlan, destination: &Path) -> std::io::Result<()> {
+pub fn write_manifest(plan: &ExportPlan, destination: &Path, delivery: ExportDelivery) -> std::io::Result<()> {
     use std::fmt::Write as _;
 
     let mut report = String::new();
@@ -298,7 +327,11 @@ pub fn write_manifest(plan: &ExportPlan, destination: &Path) -> std::io::Result<
     let _ = writeln!(report, "Files       : {}", plan.items.len());
     let _ = writeln!(
         report,
-        "\nNative shortcuts were created. No original media was copied or modified.\n"
+        "{}",
+        match delivery {
+            ExportDelivery::Shortcut => "\nNative shortcuts were created. No original media was copied or modified.\n",
+            ExportDelivery::Copy => "\nOriginals were copied here. The source media was only read, never modified.\n",
+        }
     );
 
     let mut current = String::new();
@@ -337,6 +370,39 @@ fn next_free_name(target: &Path) -> PathBuf {
         }
     }
     target.to_path_buf()
+}
+
+/// Copies one original into the destination folder.
+///
+/// A partial copy is deleted rather than left behind: a truncated file that
+/// looks like a real export is worse than an obvious failure, and `Skip`
+/// re-runs would treat the stub as already done.
+fn copy_original(source: &Path, target: &Path, preserve_timestamps: bool) -> Result<()> {
+    if let Err(e) = std::fs::copy(source, target) {
+        let _ = std::fs::remove_file(target);
+        return Err(ExportError::Io {
+            path: target.display().to_string(),
+            message: format!("could not copy {}: {e}", source.display()),
+        });
+    }
+
+    if preserve_timestamps {
+        // Best effort: the copy itself succeeded, and a file with today's
+        // timestamp is not worth failing an export over.
+        if let Err(e) = apply_source_timestamps(source, target) {
+            tracing::warn!(file = %target.display(), error = %e, "could not preserve the original timestamps");
+        }
+    }
+    Ok(())
+}
+
+fn apply_source_timestamps(source: &Path, target: &Path) -> std::io::Result<()> {
+    let metadata = std::fs::metadata(source)?;
+    let mut times = std::fs::FileTimes::new().set_modified(metadata.modified()?);
+    if let Ok(accessed) = metadata.accessed() {
+        times = times.set_accessed(accessed);
+    }
+    std::fs::File::options().write(true).open(target)?.set_times(times)
 }
 
 fn native_shortcut_path(logical: &Path) -> PathBuf {
@@ -622,6 +688,104 @@ mod tests {
         assert!(exported.is_file());
         // The source must be untouched and still present.
         assert_eq!(std::fs::read(&source_file).unwrap(), b"original bytes");
+    }
+
+    /// Builds a one-file plan whose source holds `contents`.
+    fn single_file_plan(source_dir: &Path, contents: &[u8]) -> (PathBuf, ExportPlan) {
+        let source_file = source_dir.join("IMG_0231.JPG");
+        std::fs::write(&source_file, contents).unwrap();
+        let plan = ExportPlan {
+            items: vec![ExportItem {
+                source: source_file.clone(),
+                relative: PathBuf::from("Jonathan").join("Photos").join("IMG_0231.JPG"),
+                size: contents.len() as u64,
+            }],
+            folders: vec!["Jonathan/Photos".into()],
+        };
+        (source_file, plan)
+    }
+
+    fn copy_options() -> ExportOptions {
+        ExportOptions {
+            delivery: ExportDelivery::Copy,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn copy_delivery_writes_the_real_file_not_a_shortcut() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let dest_dir = tempfile::tempdir().unwrap();
+        let (source_file, plan) = single_file_plan(source_dir.path(), b"original bytes");
+
+        let progress = execute(&plan, dest_dir.path(), &copy_options(), || true, |_| {}).unwrap();
+
+        // The exported file keeps its own name — no .lnk/.alias wrapper — and
+        // holds the actual bytes, so the folder works without the original.
+        let exported = dest_dir.path().join("Jonathan").join("Photos").join("IMG_0231.JPG");
+        assert_eq!(std::fs::read(&exported).unwrap(), b"original bytes");
+        assert!(
+            !native_shortcut_path(&exported).exists(),
+            "copy mode must not also leave a shortcut"
+        );
+        assert_eq!(progress.files_done, 1);
+        assert_eq!(progress.bytes_done, 14, "progress should count real copied bytes");
+        // The source is still untouched.
+        assert_eq!(std::fs::read(&source_file).unwrap(), b"original bytes");
+    }
+
+    #[test]
+    fn copy_delivery_can_preserve_the_originals_timestamps() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let dest_dir = tempfile::tempdir().unwrap();
+        let (source_file, plan) = single_file_plan(source_dir.path(), b"original bytes");
+
+        // Backdate the source so "same as the original" is distinguishable
+        // from "written just now".
+        let backdated = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        std::fs::File::options()
+            .write(true)
+            .open(&source_file)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(backdated))
+            .unwrap();
+
+        execute(&plan, dest_dir.path(), &copy_options(), || true, |_| {}).unwrap();
+
+        let exported = dest_dir.path().join("Jonathan").join("Photos").join("IMG_0231.JPG");
+        let copied = std::fs::metadata(&exported).unwrap().modified().unwrap();
+        let original = std::fs::metadata(&source_file).unwrap().modified().unwrap();
+        assert_eq!(copied, original);
+    }
+
+    #[test]
+    fn rerunning_a_copy_export_skips_what_is_already_there() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let dest_dir = tempfile::tempdir().unwrap();
+        let (_source_file, plan) = single_file_plan(source_dir.path(), b"original bytes");
+
+        execute(&plan, dest_dir.path(), &copy_options(), || true, |_| {}).unwrap();
+        let again = execute(&plan, dest_dir.path(), &copy_options(), || true, |_| {}).unwrap();
+
+        assert_eq!(again.files_done, 0);
+        assert_eq!(again.files_skipped, 1, "a second run must not re-copy gigabytes");
+    }
+
+    #[test]
+    fn the_manifest_says_which_kind_of_export_this_was() {
+        let dest_dir = tempfile::tempdir().unwrap();
+        let plan = ExportPlan {
+            items: vec![],
+            folders: vec!["Jonathan".into()],
+        };
+
+        write_manifest(&plan, dest_dir.path(), ExportDelivery::Copy).unwrap();
+        let report = std::fs::read_to_string(dest_dir.path().join(MANIFEST_FILENAME)).unwrap();
+        assert!(report.contains("copied here"), "got: {report}");
+
+        write_manifest(&plan, dest_dir.path(), ExportDelivery::Shortcut).unwrap();
+        let report = std::fs::read_to_string(dest_dir.path().join(MANIFEST_FILENAME)).unwrap();
+        assert!(report.contains("Native shortcuts"), "got: {report}");
     }
 
     #[test]

@@ -62,9 +62,14 @@ npm run dev
 npm run build
 ```
 
-Before signing in, provision a local account with the no-echo credential tool.
-It writes to the application-data file by default; `SKWAD_AUTH_FILE` can point
-the desktop at a shared local/LAN copy. See [local authentication](docs/local-auth.md).
+The first launch seeds the team roster; everyone signs in with the shared
+testing password and administrators manage accounts in Settings → Users. See
+[local authentication](docs/local-auth.md) for the roster, roles and the
+no-echo credential tool that provisions accounts from the command line.
+
+A team can work out of one library folder on the network — index, accounts,
+face embeddings and caches together. See [one library, shared across the
+network](docs/shared-library.md).
 
 To test the Windows OpenCV-assisted video path, download its project-local SDK
 and launch the feature build. The normal command above remains the

@@ -830,7 +830,10 @@ mod tests {
 
         // Safe to re-run: the face is no longer "unassigned" (it already
         // carries a suggestion), so nothing new is proposed.
-        assert_eq!(match_person_in_shoot(&db, shoot_id, mavi.id, &AppSettings::default()).unwrap(), 0);
+        assert_eq!(
+            match_person_in_shoot(&db, shoot_id, mavi.id, &AppSettings::default()).unwrap(),
+            0
+        );
     }
 
     #[test]

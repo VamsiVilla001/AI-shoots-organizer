@@ -2,17 +2,20 @@ import { useQuery } from '@tanstack/react-query'
 import * as api from '../api'
 import { useUi, type Screen } from '../store'
 import { ThemeToggle } from './ThemeToggle'
+import { Icon, type IconName } from './Icon'
+import { Wordmark } from './Wordmark'
 
-const ITEMS: Array<{ id: Screen; label: string; needsShoot: boolean }> = [
-  { id: 'shoots', label: 'Shoots', needsShoot: false },
-  { id: 'groups', label: 'Sort into Groups', needsShoot: true },
-  { id: 'players', label: 'Players', needsShoot: false },
-  { id: 'albums', label: 'AI Albums', needsShoot: true },
-  { id: 'review', label: 'Review', needsShoot: true },
-  { id: 'export', label: 'Shortcut Export', needsShoot: true },
-  { id: 'catalogues', label: 'Shared Catalogues', needsShoot: false },
-  { id: 'profile', label: 'Profile', needsShoot: false },
-  { id: 'settings', label: 'Settings', needsShoot: false },
+const ITEMS: Array<{ id: Screen; label: string; icon: IconName; needsShoot: boolean; adminOnly?: boolean }> = [
+  { id: 'shoots', label: 'Shoots', icon: 'shoots', needsShoot: false },
+  { id: 'groups', label: 'Sort into Groups', icon: 'groups', needsShoot: true },
+  { id: 'players', label: 'Players', icon: 'players', needsShoot: false },
+  { id: 'albums', label: 'AI Albums', icon: 'albums', needsShoot: true },
+  { id: 'review', label: 'Review', icon: 'review', needsShoot: true },
+  { id: 'export', label: 'Export', icon: 'export', needsShoot: true },
+  { id: 'catalogues', label: 'Shared Catalogues', icon: 'catalogues', needsShoot: false },
+  { id: 'profile', label: 'Profile', icon: 'profile', needsShoot: false },
+  { id: 'admin', label: 'Users', icon: 'admin', needsShoot: false, adminOnly: true },
+  { id: 'settings', label: 'Settings', icon: 'settings', needsShoot: false },
 ]
 
 export function Sidebar() {
@@ -21,6 +24,7 @@ export function Sidebar() {
   const activeShootId = useUi((s) => s.activeShootId)
   const progress = useUi((s) => s.progress)
 
+  const session = useQuery({ queryKey: ['catalogueSession'], queryFn: api.catalogueSessionStatus })
   const shoots = useQuery({ queryKey: ['shoots'], queryFn: api.listShoots })
   const activeShoot = shoots.data?.find((s) => s.id === activeShootId)
 
@@ -38,12 +42,9 @@ export function Sidebar() {
 
   return (
     <aside className="sidebar">
-      <div className="brand">
-        <img src="/logo/wordmark-dark-colour.svg" alt="SKWAD" />
-        <span>Media Organiser</span>
-      </div>
+      <Wordmark className="brand" />
       <nav>
-        {ITEMS.map((item) => (
+        {ITEMS.filter((item) => !item.adminOnly || session.data?.isAdmin === true).map((item) => (
           <button
             key={item.id}
             className={screen === item.id ? 'active' : undefined}
@@ -51,7 +52,7 @@ export function Sidebar() {
             onClick={() => navigate(item.id)}
             title={item.needsShoot && activeShootId === null ? 'Open a shoot first' : undefined}
           >
-            <span>{item.label}</span>
+            <span className="nav-label"><Icon name={item.icon} /><span>{item.label}</span></span>
             {item.id === 'review' && unknown !== undefined && unknown > 0 && (
               <span className="badge">{unknown}</span>
             )}

@@ -1,4 +1,7 @@
 import { useUi } from '../store'
+import { Icon, type IconName } from './Icon'
+
+const LEVEL_ICON: Record<string, IconName> = { success: 'success', error: 'error', info: 'info' }
 
 export function Notices() {
   const notices = useUi((s) => s.notices)
@@ -14,7 +17,8 @@ export function Notices() {
           onClick={() => dismiss(notice.id)}
           title="Click to dismiss"
         >
-          {notice.message}
+          <Icon name={LEVEL_ICON[notice.level] ?? 'info'} />
+          <span>{notice.message}</span>
         </div>
       ))}
     </div>

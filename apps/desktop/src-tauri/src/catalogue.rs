@@ -37,6 +37,77 @@ const DEFAULT_BACKEND: &str = "http://127.0.0.1:8787";
 const LOCAL_AUTH_VERSION: u32 = 1;
 const MAX_AUTH_FILE_BYTES: u64 = 1024 * 1024;
 const PROFILE_KEY_PREFIX: &str = "local_user_profile:";
+/// Testing build: SKWAD accepts the seeded password and never forces a change
+/// on first sign-in. Flip to `true` to restore the temporary-password flow.
+const ENFORCE_PASSWORD_CHANGE: bool = false;
+/// Password every seeded account starts with while the team tests the build.
+const SEED_PASSWORD: &str = "Tess@123";
+/// The team roster written to a fresh credential file on first launch.
+const SEED_USERS: &[(&str, &str, UserRole)] = &[
+    ("aashish.gupta@tesseractesports.com", "Aashish Gupta", UserRole::Member),
+    ("aniket.ajeet@tesseractesports.com", "Aniket Ajeet", UserRole::Member),
+    (
+        "biswadeep.chamling@tesseractesports.com",
+        "Biswadeep Chamling",
+        UserRole::Member,
+    ),
+    (
+        "dhanush.murugesan@tesseractesports.com",
+        "Dhanush Murugesan",
+        UserRole::Member,
+    ),
+    (
+        "dharmesh.joshi@tesseractesports.com",
+        "Dharmesh Joshi",
+        UserRole::Member,
+    ),
+    ("gopi.maddi@tesseractesports.com", "Gopi Maddi", UserRole::Member),
+    (
+        "kartik.chaudhary@tesseractesports.com",
+        "Kartik Chaudhary",
+        UserRole::Member,
+    ),
+    (
+        "mahendra.paljangir@tesseractesports.com",
+        "Mahendra Paljangir",
+        UserRole::Member,
+    ),
+    (
+        "muhsin.noorsha@tesseractesports.com",
+        "Muhsin Noorsha",
+        UserRole::Member,
+    ),
+    ("prakash.ks@tesseractesports.com", "Prakash KS", UserRole::Member),
+    ("praveen.anne@tesseractesports.com", "Praveen Anne", UserRole::Member),
+    ("rahul.kambogi@tesseractesports.com", "Rahul Kambogi", UserRole::Member),
+    ("rajesh.sarkar@tesseractesports.com", "Rajesh Sarkar", UserRole::Member),
+    ("ritupol.kro@tesseractesports.com", "Ritupol Kro", UserRole::Member),
+    (
+        "saicharan.guda@tesseractesports.com",
+        "Saicharan Guda",
+        UserRole::Member,
+    ),
+    ("saif.mohammed@tesseractesports.com", "Saif Mohammed", UserRole::Member),
+    (
+        "sayan.dasgupta@tesseractesports.com",
+        "Sayan Dasgupta",
+        UserRole::Member,
+    ),
+    (
+        "sumanth.sudamsetti@tesseractesports.com",
+        "Sumanth Sudamsetti",
+        UserRole::Member,
+    ),
+    ("suraj.sinha@tesseractesports.com", "Suraj Sinha", UserRole::Member),
+    ("tarson.tokbi@tesseractesports.com", "Tarson Tokbi", UserRole::Member),
+    ("vamsi.villa@tesseractesports.com", "Vamsi Villa", UserRole::Member),
+    ("yash.patle@tesseractesports.com", "Yash Patle", UserRole::Member),
+    (
+        "naresh.nallamothu@tesseractesports.com",
+        "Naresh Nallamothu",
+        UserRole::Admin,
+    ),
+];
 
 pub struct LoadedCatalogue {
     pub package_id: String,
@@ -50,6 +121,7 @@ pub struct LoadedCatalogue {
 pub struct SessionStatus {
     pub authenticated_once: bool,
     pub password_change_required: bool,
+    pub is_admin: bool,
     pub account_id: Option<String>,
     pub email: Option<String>,
     pub device_key_id: Option<String>,
@@ -149,6 +221,50 @@ struct LocalCredential {
     enabled: bool,
     #[serde(default)]
     must_change_password: bool,
+    #[serde(default)]
+    role: UserRole,
+}
+
+/// What a local account may do. Only admins reach the user-management panel.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UserRole {
+    Admin,
+    #[default]
+    Member,
+}
+
+/// One row of the admin panel. Password hashes never leave the backend.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalUser {
+    pub id: String,
+    pub email: String,
+    pub display_name: String,
+    pub role: UserRole,
+    pub enabled: bool,
+    pub must_change_password: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewLocalUser {
+    pub email: String,
+    pub display_name: String,
+    #[serde(default)]
+    pub role: UserRole,
+    /// Left empty, the account starts on the shared testing password.
+    #[serde(default)]
+    pub password: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalUserUpdate {
+    pub email: String,
+    pub display_name: String,
+    pub role: UserRole,
+    pub enabled: bool,
 }
 
 #[derive(Debug)]
@@ -156,6 +272,7 @@ struct LocalAccount {
     id: String,
     email: String,
     display_name: String,
+    role: UserRole,
 }
 
 pub(crate) fn current_project_identity(state: &AppState) -> Result<(String, String, Option<String>)> {
@@ -168,18 +285,24 @@ pub(crate) fn current_project_identity(state: &AppState) -> Result<(String, Stri
 
 #[tauri::command]
 pub fn catalogue_session_status(state: State<'_, Arc<AppState>>) -> Result<SessionStatus> {
-    let identity = load_identity().ok();
-    let active_identity = identity.and_then(|identity| {
+    let active = load_identity().ok().and_then(|identity| {
         let auth = load_local_auth(&state).ok()?;
-        auth.users
+        let role = auth
+            .users
             .iter()
-            .any(|user| user.enabled && !user.must_change_password && user.email.eq_ignore_ascii_case(&identity.email))
-            .then_some(identity)
+            .find(|user| {
+                user.enabled
+                    && (!ENFORCE_PASSWORD_CHANGE || !user.must_change_password)
+                    && user.email.eq_ignore_ascii_case(&identity.email)
+            })
+            .map(|user| user.role)?;
+        Some((identity, role))
     });
-    match active_identity {
-        Some(identity) => Ok(SessionStatus {
+    match active {
+        Some((identity, role)) => Ok(SessionStatus {
             authenticated_once: true,
             password_change_required: false,
+            is_admin: role == UserRole::Admin,
             account_id: Some(identity.account_id),
             email: Some(identity.email),
             device_key_id: Some(identity.device_key_id),
@@ -187,6 +310,7 @@ pub fn catalogue_session_status(state: State<'_, Arc<AppState>>) -> Result<Sessi
         None => Ok(SessionStatus {
             authenticated_once: false,
             password_change_required: false,
+            is_admin: false,
             account_id: None,
             email: None,
             device_key_id: None,
@@ -199,14 +323,16 @@ pub async fn sign_in_skwad(state: State<'_, Arc<AppState>>, email: String, passw
     let password = Zeroizing::new(password);
     let account = authenticate_local(&state, &email, &password)?;
     let auth = load_local_auth(&state)?;
-    let requires_change = auth
-        .users
-        .iter()
-        .any(|user| user.enabled && user.email.eq_ignore_ascii_case(&account.email) && user.must_change_password);
+    let requires_change = ENFORCE_PASSWORD_CHANGE
+        && auth
+            .users
+            .iter()
+            .any(|user| user.enabled && user.email.eq_ignore_ascii_case(&account.email) && user.must_change_password);
     if requires_change {
         return Ok(SessionStatus {
             authenticated_once: false,
             password_change_required: true,
+            is_admin: false,
             account_id: Some(account.id),
             email: Some(account.email),
             device_key_id: None,
@@ -239,6 +365,7 @@ pub async fn change_initial_password(
 
 async fn establish_local_identity(state: &AppState, account: LocalAccount) -> Result<SessionStatus> {
     let account_id = account.id;
+    let is_admin = account.role == UserRole::Admin;
     let existing = load_identity()
         .ok()
         .filter(|identity| identity.account_id == account_id);
@@ -278,10 +405,196 @@ async fn establish_local_identity(state: &AppState, account: LocalAccount) -> Re
     Ok(SessionStatus {
         authenticated_once: true,
         password_change_required: false,
+        is_admin,
         account_id: Some(account_id),
         email: Some(account.email),
         device_key_id: Some(device_key_id),
     })
+}
+
+/// Writes or adopts the roster at startup. Hashing two dozen passwords takes
+/// a moment, and doing it here keeps it off the first command the sign-in
+/// screen makes.
+pub fn ensure_local_auth(state: &AppState) {
+    match load_local_auth(state) {
+        Ok(auth) => tracing::info!(accounts = auth.users.len(), "local credential file ready"),
+        Err(error) => tracing::warn!(%error.message, "could not prepare the local credential file"),
+    }
+}
+
+// --- user administration --------------------------------------------------
+
+/// Reads the roster for the admin panel. Members never see this list.
+#[tauri::command]
+pub fn list_local_users(state: State<'_, Arc<AppState>>) -> Result<Vec<LocalUser>> {
+    let (auth, _) = require_admin(&state)?;
+    Ok(local_user_rows(&auth))
+}
+
+#[tauri::command]
+pub fn create_local_user(state: State<'_, Arc<AppState>>, user: NewLocalUser) -> Result<Vec<LocalUser>> {
+    let (mut auth, _) = require_admin(&state)?;
+    let email = clean_email(&user.email)?;
+    let display_name = clean_display_name(&user.display_name)?;
+    if auth
+        .users
+        .iter()
+        .any(|existing| existing.email.eq_ignore_ascii_case(&email))
+    {
+        return Err(command_error("an account with that email already exists"));
+    }
+    let password = Zeroizing::new(user.password.unwrap_or_else(|| SEED_PASSWORD.to_owned()));
+    check_password(&password)?;
+    auth.users.push(LocalCredential {
+        id: Some(Uuid::new_v4().to_string()),
+        email,
+        display_name,
+        password_hash: hash_password(&password)?,
+        enabled: true,
+        must_change_password: ENFORCE_PASSWORD_CHANGE,
+        role: user.role,
+    });
+    save_roster(&state, auth)
+}
+
+/// Renames an account, changes its role, or enables and disables it.
+#[tauri::command]
+pub fn update_local_user(state: State<'_, Arc<AppState>>, user: LocalUserUpdate) -> Result<Vec<LocalUser>> {
+    let (mut auth, signed_in) = require_admin(&state)?;
+    let email = clean_email(&user.email)?;
+    let display_name = clean_display_name(&user.display_name)?;
+    let is_self = email.eq_ignore_ascii_case(&signed_in);
+    if is_self && (user.role != UserRole::Admin || !user.enabled) {
+        return Err(command_error("you cannot remove your own administrator access"));
+    }
+    let record = auth
+        .users
+        .iter_mut()
+        .find(|record| record.email.eq_ignore_ascii_case(&email))
+        .ok_or_else(|| command_error("that account no longer exists"))?;
+    record.display_name = display_name;
+    record.role = user.role;
+    record.enabled = user.enabled;
+    require_remaining_admin(&auth)?;
+    save_roster(&state, auth)
+}
+
+/// Sets a new password for another account. The member is not asked to change
+/// it while the testing password policy is muted.
+#[tauri::command]
+pub fn reset_local_user_password(
+    state: State<'_, Arc<AppState>>,
+    email: String,
+    password: String,
+) -> Result<Vec<LocalUser>> {
+    let (mut auth, _) = require_admin(&state)?;
+    let email = clean_email(&email)?;
+    let password = Zeroizing::new(password);
+    check_password(&password)?;
+    let hash = hash_password(&password)?;
+    let record = auth
+        .users
+        .iter_mut()
+        .find(|record| record.email.eq_ignore_ascii_case(&email))
+        .ok_or_else(|| command_error("that account no longer exists"))?;
+    record.password_hash = hash;
+    record.must_change_password = ENFORCE_PASSWORD_CHANGE;
+    save_roster(&state, auth)
+}
+
+#[tauri::command]
+pub fn delete_local_user(state: State<'_, Arc<AppState>>, email: String) -> Result<Vec<LocalUser>> {
+    let (mut auth, signed_in) = require_admin(&state)?;
+    let email = clean_email(&email)?;
+    if email.eq_ignore_ascii_case(&signed_in) {
+        return Err(command_error("you cannot remove the account you are signed in with"));
+    }
+    let before = auth.users.len();
+    auth.users.retain(|record| !record.email.eq_ignore_ascii_case(&email));
+    if auth.users.len() == before {
+        return Err(command_error("that account no longer exists"));
+    }
+    require_remaining_admin(&auth)?;
+    save_roster(&state, auth)
+}
+
+/// Loads the roster and confirms the signed-in account may administer it.
+/// Returns the roster and the signed-in email so callers can protect it.
+fn require_admin(state: &AppState) -> Result<(LocalAuthFile, String)> {
+    let identity = load_identity().map_err(|_| command_error("sign in to manage users"))?;
+    let auth = load_local_auth(state)?;
+    let is_admin = auth
+        .users
+        .iter()
+        .any(|user| user.enabled && user.role == UserRole::Admin && user.email.eq_ignore_ascii_case(&identity.email));
+    if !is_admin {
+        return Err(command_error("only an administrator can manage users"));
+    }
+    Ok((auth, identity.email))
+}
+
+fn require_remaining_admin(auth: &LocalAuthFile) -> Result<()> {
+    if auth
+        .users
+        .iter()
+        .any(|user| user.enabled && user.role == UserRole::Admin)
+    {
+        return Ok(());
+    }
+    Err(command_error(
+        "the workspace must keep at least one enabled administrator",
+    ))
+}
+
+fn save_roster(state: &AppState, auth: LocalAuthFile) -> Result<Vec<LocalUser>> {
+    write_local_auth(&auth_file_path(state), &auth)?;
+    Ok(local_user_rows(&auth))
+}
+
+fn local_user_rows(auth: &LocalAuthFile) -> Vec<LocalUser> {
+    let mut rows: Vec<LocalUser> = auth
+        .users
+        .iter()
+        .map(|user| LocalUser {
+            id: credential_id(user),
+            email: user.email.trim().to_lowercase(),
+            display_name: user.display_name.clone(),
+            role: user.role,
+            enabled: user.enabled,
+            must_change_password: user.must_change_password,
+        })
+        .collect();
+    rows.sort_by_key(|row| row.display_name.to_lowercase());
+    rows
+}
+
+fn clean_email(email: &str) -> Result<String> {
+    let email = email.trim().to_lowercase();
+    let valid = email.len() <= 254
+        && !email.starts_with('@')
+        && !email.ends_with('@')
+        && email.matches('@').count() == 1
+        && email.split('@').nth(1).is_some_and(|domain| domain.contains('.'))
+        && !email.contains(char::is_whitespace);
+    if !valid {
+        return Err(command_error("enter a valid email address"));
+    }
+    Ok(email)
+}
+
+fn clean_display_name(name: &str) -> Result<String> {
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > 80 {
+        return Err(command_error("display name must contain between 1 and 80 characters"));
+    }
+    Ok(name.to_owned())
+}
+
+fn check_password(password: &str) -> Result<()> {
+    if password.chars().count() < 6 {
+        return Err(command_error("the password must contain at least 6 characters"));
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -652,6 +965,9 @@ fn auth_file_path(state: &AppState) -> PathBuf {
 
 fn load_local_auth(state: &AppState) -> Result<LocalAuthFile> {
     let path = auth_file_path(state);
+    if !path.exists() {
+        seed_local_auth(&path)?;
+    }
     let metadata = std::fs::metadata(&path).map_err(|_| {
         command_error(format!(
             "local credential file not found at {}; set SKWAD_AUTH_FILE or create the default file",
@@ -662,7 +978,7 @@ fn load_local_auth(state: &AppState) -> Result<LocalAuthFile> {
         return Err(command_error("local credential file exceeds the 1 MiB safety limit"));
     }
     let bytes = std::fs::read(&path).map_err(command_error)?;
-    let auth: LocalAuthFile = serde_json::from_slice(&bytes)
+    let mut auth: LocalAuthFile = serde_json::from_slice(&bytes)
         .map_err(|error| command_error(format!("local credential file is invalid: {error}")))?;
     if auth.version != LOCAL_AUTH_VERSION {
         return Err(command_error(format!(
@@ -670,7 +986,48 @@ fn load_local_auth(state: &AppState) -> Result<LocalAuthFile> {
             auth.version
         )));
     }
+    // A file written before roles existed has nobody who can open the admin
+    // panel, so the roster is adopted once. After that the panel owns the file
+    // and accounts an administrator removed stay removed.
+    if !auth.users.iter().any(|user| user.role == UserRole::Admin) && adopt_seed_roster(&mut auth)? {
+        write_local_auth(&path, &auth)?;
+    }
     Ok(auth)
+}
+
+/// Adds the seeded roster to a credential file that predates roles, keeping
+/// the passwords of accounts that are already there. Answers whether anything
+/// changed.
+fn adopt_seed_roster(auth: &mut LocalAuthFile) -> Result<bool> {
+    let mut changed = false;
+    for (email, display_name, role) in SEED_USERS {
+        match auth
+            .users
+            .iter_mut()
+            .find(|user| user.email.eq_ignore_ascii_case(email))
+        {
+            Some(existing) => {
+                if existing.role != *role || existing.must_change_password != ENFORCE_PASSWORD_CHANGE {
+                    existing.role = *role;
+                    existing.must_change_password = ENFORCE_PASSWORD_CHANGE;
+                    changed = true;
+                }
+            }
+            None => {
+                auth.users.push(LocalCredential {
+                    id: Some(Uuid::new_v4().to_string()),
+                    email: (*email).to_owned(),
+                    display_name: (*display_name).to_owned(),
+                    password_hash: hash_password(SEED_PASSWORD)?,
+                    enabled: true,
+                    must_change_password: ENFORCE_PASSWORD_CHANGE,
+                    role: *role,
+                });
+                changed = true;
+            }
+        }
+    }
+    Ok(changed)
 }
 
 fn authenticate_local(state: &AppState, email: &str, password: &str) -> Result<LocalAccount> {
@@ -687,11 +1044,7 @@ fn authenticate_local(state: &AppState, email: &str, password: &str) -> Result<L
         .verify_password(password.as_bytes(), &parsed)
         .map_err(|_| command_error("email or password is incorrect"))?;
     let canonical_email = user.email.trim().to_lowercase();
-    let id = user
-        .id
-        .clone()
-        .filter(|id| !id.trim().is_empty())
-        .unwrap_or_else(|| format!("local-{}", &blake3::hash(canonical_email.as_bytes()).to_hex()[..32]));
+    let id = credential_id(user);
     let display_name = user.display_name.trim();
     if canonical_email.is_empty() || display_name.is_empty() || display_name.chars().count() > 80 {
         return Err(command_error("the credential file contains an invalid user record"));
@@ -700,6 +1053,7 @@ fn authenticate_local(state: &AppState, email: &str, password: &str) -> Result<L
         id,
         email: canonical_email,
         display_name: display_name.to_owned(),
+        role: user.role,
     })
 }
 
@@ -717,16 +1071,61 @@ fn update_local_password(state: &AppState, email: &str, new_password: &str) -> R
         .map_err(command_error)?
         .to_string();
     user.must_change_password = false;
-    let encoded = serde_json::to_vec_pretty(&auth).map_err(command_error)?;
+    write_local_auth(&path, &auth)
+}
+
+fn write_local_auth(path: &Path, auth: &LocalAuthFile) -> Result<()> {
+    let encoded = serde_json::to_vec_pretty(auth).map_err(command_error)?;
     let parent = path
         .parent()
         .ok_or_else(|| command_error("credential file path has no parent directory"))?;
     std::fs::create_dir_all(parent).map_err(command_error)?;
     let temporary = path.with_extension("json.tmp");
     std::fs::write(&temporary, &encoded).map_err(command_error)?;
-    std::fs::copy(&temporary, &path).map_err(command_error)?;
+    std::fs::copy(&temporary, path).map_err(command_error)?;
     let _ = std::fs::remove_file(temporary);
     Ok(())
+}
+
+fn credential_id(user: &LocalCredential) -> String {
+    user.id.clone().filter(|id| !id.trim().is_empty()).unwrap_or_else(|| {
+        let canonical = user.email.trim().to_lowercase();
+        format!("local-{}", &blake3::hash(canonical.as_bytes()).to_hex()[..32])
+    })
+}
+
+fn hash_password(password: &str) -> Result<String> {
+    let salt = SaltString::encode_b64(Uuid::new_v4().as_bytes()).map_err(command_error)?;
+    Ok(Argon2::default()
+        .hash_password(password.as_bytes(), &salt)
+        .map_err(command_error)?
+        .to_string())
+}
+
+/// Writes the team roster the first time the app runs on a machine, so the
+/// build is testable without running the provisioning binary by hand.
+fn seed_local_auth(path: &Path) -> Result<()> {
+    let users = SEED_USERS
+        .iter()
+        .map(|(email, display_name, role)| {
+            Ok(LocalCredential {
+                id: Some(Uuid::new_v4().to_string()),
+                email: (*email).to_owned(),
+                display_name: (*display_name).to_owned(),
+                password_hash: hash_password(SEED_PASSWORD)?,
+                enabled: true,
+                must_change_password: ENFORCE_PASSWORD_CHANGE,
+                role: *role,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    write_local_auth(
+        path,
+        &LocalAuthFile {
+            version: LOCAL_AUTH_VERSION,
+            users,
+        },
+    )
 }
 
 fn profile_key(account_id: &str) -> String {
@@ -893,7 +1292,9 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        authenticate_local, clean_optional, load_local_auth, update_local_password, LocalAuthFile, LocalCredential,
+        auth_file_path, authenticate_local, check_password, clean_display_name, clean_email, clean_optional,
+        load_local_auth, require_remaining_admin, update_local_password, write_local_auth, LocalAuthFile,
+        LocalCredential, UserRole, SEED_PASSWORD, SEED_USERS,
     };
     use crate::{paths::AppPaths, settings::AppSettings, state::AppState};
 
@@ -936,6 +1337,7 @@ mod tests {
                 password_hash: hash,
                 enabled: true,
                 must_change_password: true,
+                role: UserRole::Member,
             }],
         };
         std::fs::write(
@@ -956,6 +1358,120 @@ mod tests {
         assert!(authenticate_local(&state, "person@example.com", "temporary-password").is_err());
         assert!(authenticate_local(&state, "person@example.com", "a-new-private-password").is_ok());
         assert!(!load_local_auth(&state).unwrap().users[0].must_change_password);
+    }
+
+    #[test]
+    fn a_missing_credential_file_is_seeded_with_the_team_roster() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = AppPaths::create(temp.path()).unwrap();
+        let state = Arc::new(AppState::new(
+            Database::open_in_memory().unwrap(),
+            paths,
+            AppSettings::default(),
+            "skwadmedia://".into(),
+        ));
+
+        let auth = load_local_auth(&state).unwrap();
+        assert_eq!(auth.users.len(), SEED_USERS.len());
+        assert!(auth.users.iter().all(|user| user.enabled && !user.must_change_password));
+        let admins: Vec<&str> = auth
+            .users
+            .iter()
+            .filter(|user| user.role == UserRole::Admin)
+            .map(|user| user.email.as_str())
+            .collect();
+        assert_eq!(admins, ["naresh.nallamothu@tesseractesports.com"]);
+
+        // The seeded password signs in, and no first-change prompt follows it.
+        let account = authenticate_local(&state, "NARESH.NALLAMOTHU@tesseractesports.com", SEED_PASSWORD).unwrap();
+        assert_eq!(account.role, UserRole::Admin);
+        assert!(authenticate_local(&state, "yash.patle@tesseractesports.com", SEED_PASSWORD).is_ok());
+        assert!(authenticate_local(&state, "yash.patle@tesseractesports.com", "wrong").is_err());
+    }
+
+    #[test]
+    fn a_credential_file_without_an_administrator_adopts_the_roster_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = AppPaths::create(temp.path()).unwrap();
+        let auth_dir = paths.root.join("auth");
+        std::fs::create_dir_all(&auth_dir).unwrap();
+        let salt = SaltString::encode_b64(Uuid::new_v4().as_bytes()).unwrap();
+        let hash = Argon2::default()
+            .hash_password(b"their-own-password", &salt)
+            .unwrap()
+            .to_string();
+        let document = LocalAuthFile {
+            version: 1,
+            users: vec![LocalCredential {
+                id: Some("local-test-user".into()),
+                email: "yash.patle@tesseractesports.com".into(),
+                display_name: "Yash Patle".into(),
+                password_hash: hash,
+                enabled: true,
+                must_change_password: true,
+                role: UserRole::Member,
+            }],
+        };
+        std::fs::write(
+            auth_dir.join("credentials.json"),
+            serde_json::to_vec_pretty(&document).unwrap(),
+        )
+        .unwrap();
+        let state = Arc::new(AppState::new(
+            Database::open_in_memory().unwrap(),
+            paths,
+            AppSettings::default(),
+            "skwadmedia://".into(),
+        ));
+
+        let auth = load_local_auth(&state).unwrap();
+        assert_eq!(auth.users.len(), SEED_USERS.len());
+        // The account that was already there keeps its own password.
+        assert!(authenticate_local(&state, "yash.patle@tesseractesports.com", "their-own-password").is_ok());
+        assert!(authenticate_local(&state, "naresh.nallamothu@tesseractesports.com", SEED_PASSWORD).is_ok());
+
+        // An administrator removing somebody sticks: the roster is not re-adopted.
+        let mut auth = load_local_auth(&state).unwrap();
+        auth.users
+            .retain(|user| !user.email.eq_ignore_ascii_case("yash.patle@tesseractesports.com"));
+        write_local_auth(&auth_file_path(&state), &auth).unwrap();
+        assert_eq!(load_local_auth(&state).unwrap().users.len(), SEED_USERS.len() - 1);
+    }
+
+    #[test]
+    fn credential_records_without_a_role_are_members() {
+        let json = r#"{"version":1,"users":[{"email":"person@example.com","displayName":"Person","passwordHash":"hash","enabled":true}]}"#;
+        let auth: LocalAuthFile = serde_json::from_str(json).unwrap();
+        assert_eq!(auth.users[0].role, UserRole::Member);
+    }
+
+    #[test]
+    fn the_roster_keeps_an_enabled_administrator() {
+        let mut auth = LocalAuthFile {
+            version: 1,
+            users: vec![LocalCredential {
+                id: None,
+                email: "person@example.com".into(),
+                display_name: "Person".into(),
+                password_hash: "hash".into(),
+                enabled: true,
+                must_change_password: false,
+                role: UserRole::Admin,
+            }],
+        };
+        assert!(require_remaining_admin(&auth).is_ok());
+        auth.users[0].role = UserRole::Member;
+        assert!(require_remaining_admin(&auth).is_err());
+    }
+
+    #[test]
+    fn admin_input_is_validated() {
+        assert_eq!(clean_email(" Person@Example.COM ").unwrap(), "person@example.com");
+        assert!(clean_email("person@example").is_err());
+        assert!(clean_email("person.example.com").is_err());
+        assert!(clean_display_name("  ").is_err());
+        assert!(check_password("12345").is_err());
+        assert!(check_password("Tess@123").is_ok());
     }
 
     #[test]

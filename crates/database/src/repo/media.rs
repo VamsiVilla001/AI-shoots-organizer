@@ -713,8 +713,14 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(!all.iter().any(|m| m.id == ref_media), "the reference shoot's media is excluded");
-        assert!(all.iter().any(|m| m.shoot_id == real_shoot), "media from other shoots is untouched");
+        assert!(
+            !all.iter().any(|m| m.id == ref_media),
+            "the reference shoot's media is excluded"
+        );
+        assert!(
+            all.iter().any(|m| m.shoot_id == real_shoot),
+            "media from other shoots is untouched"
+        );
     }
 
     #[test]

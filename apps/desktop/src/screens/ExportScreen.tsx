@@ -1,7 +1,8 @@
 /**
  * The Export screen (§11, §34): choose a destination — a NAS share is the usual
- * one — pick which groups to write, preview the folder list and file count, run
- * native shortcuts with live progress. Originals are never copied.
+ * one — pick which groups to write, preview the folder list and file count, and
+ * run it with live progress, as either native shortcuts back to the originals
+ * or real copies for a folder that stands on its own.
  *
  * Originals are only ever read. The destination is refused if it sits inside
  * the shoot's own source folder.
@@ -19,6 +20,7 @@ import { useUi } from '../store'
 const DEFAULT_OPTIONS: ExportOptions = {
   mode: 'groups',
   groupIds: null,
+  delivery: 'shortcut',
   splitPhotosVideos: true,
   includeUnidentified: true,
   personIds: null,
@@ -97,11 +99,12 @@ function ExportBody({ shootId, initialGroupIds }: { shootId: number; initialGrou
   const groupsWithMedia = groups.data?.filter((g) => g.mediaCount > 0) ?? []
   const busy = running && exportProgress != null && !exportProgress.finished
   const groupMode = options.mode === 'groups'
+  const copyMode = options.delivery === 'copy'
 
   return (
     <>
       <div className="workspace-header">
-        <h1>Shortcut Export — {shoot.data?.name ?? ''}</h1>
+        <h1>{copyMode ? 'Copy Export' : 'Shortcut Export'} — {shoot.data?.name ?? ''}</h1>
       </div>
 
       {options.personIds !== null && (
@@ -129,6 +132,27 @@ function ExportBody({ shootId, initialGroupIds }: { shootId: number; initialGrou
           <div className="hint">
             A local folder or a NAS share. One folder is created per group; the shoot's source
             folder is only read from.
+          </div>
+
+          <h2 style={{ marginTop: 8 }}>What lands in the folder</h2>
+          <div className="filter-bar" style={{ marginBottom: 0 }}>
+            <button
+              className={`small${copyMode ? '' : ' primary'}`}
+              onClick={() => setOptions({ ...options, delivery: 'shortcut' })}
+            >
+              Shortcuts
+            </button>
+            <button
+              className={`small${copyMode ? ' primary' : ''}`}
+              onClick={() => setOptions({ ...options, delivery: 'copy' })}
+            >
+              Copies
+            </button>
+          </div>
+          <div className="hint">
+            {copyMode
+              ? 'Real copies of each file, so the folder works on its own — needs the full disk space and takes as long as the transfer does.'
+              : 'Native shortcuts back to the originals: instant and near-zero disk space, but only usable while the originals stay where they are.'}
           </div>
 
           <h2 style={{ marginTop: 8 }}>Folders come from</h2>
@@ -189,14 +213,16 @@ function ExportBody({ shootId, initialGroupIds }: { shootId: number; initialGrou
               </label>
             </>
           )}
-          <label className="checkbox-row">
-            <input
-              type="checkbox"
-              checked={options.preserveMetadata}
-              onChange={(e) => setOptions({ ...options, preserveMetadata: e.target.checked })}
-            />
-            Preserve file timestamps
-          </label>
+          {copyMode && (
+            <label className="checkbox-row">
+              <input
+                type="checkbox"
+                checked={options.preserveMetadata}
+                onChange={(e) => setOptions({ ...options, preserveMetadata: e.target.checked })}
+              />
+              Give each copy the original's timestamps
+            </label>
+          )}
           <label className="checkbox-row">
             <input
               type="checkbox"
@@ -311,7 +337,10 @@ function ExportBody({ shootId, initialGroupIds }: { shootId: number; initialGrou
             <>
               <div className="hint">
                 {formatCount(preview.fileCount)} files · {formatBytes(preview.totalBytes)} into{' '}
-                {preview.folders.length} folder(s). Native shortcuts are created; originals are never copied or modified.
+                {preview.folders.length} folder(s).{' '}
+                {copyMode
+                  ? `Copies ${formatBytes(preview.totalBytes)} to the destination; originals are only read.`
+                  : 'Native shortcuts are created; originals are never copied or modified.'}
               </div>
               {preview.folders.length > 0 && (
                 <div className="folder-preview mono">
@@ -339,7 +368,7 @@ function ExportBody({ shootId, initialGroupIds }: { shootId: number; initialGrou
                 />
               </div>
               <div className="hint">
-                {formatCount(exportProgress.filesDone)} shortcuts created
+                {formatCount(exportProgress.filesDone)} {copyMode ? 'files copied' : 'shortcuts created'}
                 {exportProgress.filesSkipped > 0 && `, ${exportProgress.filesSkipped} skipped`} ·{' '}
                 {formatBytes(exportProgress.bytesDone)}
               </div>
@@ -354,7 +383,7 @@ function ExportBody({ shootId, initialGroupIds }: { shootId: number; initialGrou
               disabled={!preview || preview.fileCount === 0 || busy || !!error}
               onClick={start}
             >
-              {busy ? 'Creating shortcuts…' : 'Create shortcut folders'}
+              {copyMode ? (busy ? 'Copying files…' : 'Copy files into folders') : busy ? 'Creating shortcuts…' : 'Create shortcut folders'}
             </button>
             {destination && !busy && (
               <button onClick={() => api.openPath(destination)}>Open folder</button>
@@ -365,7 +394,7 @@ function ExportBody({ shootId, initialGroupIds }: { shootId: number; initialGrou
 
       {(history.data?.length ?? 0) > 0 && (
         <div className="section" style={{ marginTop: 26 }}>
-          <h2>Previous shortcut exports</h2>
+          <h2>Previous exports</h2>
           <div className="row-list">
             {history.data?.map((record) => (
               <div className="row" key={record.id}>

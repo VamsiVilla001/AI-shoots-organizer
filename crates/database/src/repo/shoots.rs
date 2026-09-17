@@ -35,8 +35,7 @@ pub fn get_by_id(conn: &Connection, id: i64) -> Result<Option<Shoot>> {
 }
 
 pub fn list(conn: &Connection) -> Result<Vec<Shoot>> {
-    let mut stmt =
-        conn.prepare("SELECT * FROM shoots WHERE is_reference = 0 ORDER BY created_at DESC, id DESC")?;
+    let mut stmt = conn.prepare("SELECT * FROM shoots WHERE is_reference = 0 ORDER BY created_at DESC, id DESC")?;
     let rows = stmt.query_map([], map)?.collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
 }
@@ -48,11 +47,9 @@ pub fn list(conn: &Connection) -> Result<Vec<Shoot>> {
 /// part of any real import.
 pub fn get_or_create_reference_library(conn: &Connection) -> Result<Shoot> {
     let existing: Option<i64> = conn
-        .query_row(
-            "SELECT id FROM shoots WHERE is_reference = 1 LIMIT 1",
-            [],
-            |row| row.get(0),
-        )
+        .query_row("SELECT id FROM shoots WHERE is_reference = 1 LIMIT 1", [], |row| {
+            row.get(0)
+        })
         .optional()?;
     if let Some(id) = existing {
         return get_by_id(conn, id)?.ok_or_else(|| crate::DbError::other("reference library shoot vanished"));
@@ -72,7 +69,9 @@ pub fn get_or_create_reference_library(conn: &Connection) -> Result<Shoot> {
 /// a side effect of merely checking whether anyone has enrolled yet.
 pub fn reference_library_id(conn: &Connection) -> Result<Option<i64>> {
     Ok(conn
-        .query_row("SELECT id FROM shoots WHERE is_reference = 1 LIMIT 1", [], |row| row.get(0))
+        .query_row("SELECT id FROM shoots WHERE is_reference = 1 LIMIT 1", [], |row| {
+            row.get(0)
+        })
         .optional()?)
 }
 
@@ -215,7 +214,11 @@ mod tests {
         let second = get_or_create_reference_library(&conn).unwrap();
         assert_eq!(first.id, second.id, "the reference shoot is a singleton");
 
-        assert_eq!(list(&conn).unwrap().len(), 1, "the reference shoot never appears in normal listings");
+        assert_eq!(
+            list(&conn).unwrap().len(),
+            1,
+            "the reference shoot never appears in normal listings"
+        );
         assert_eq!(list_summaries(&conn).unwrap().len(), 1);
     }
 

@@ -12,17 +12,22 @@
 
 :root {
   color-scheme: light;
-  --background: #f4f2ee;
-  --foreground: #1d1b17;
-  --card: #fffefc;
-  --secondary: #ece8e1;
-  --muted-foreground: #716c63;
-  --input: #d9d4cb;
-  --border: #e3dfd7;
-  --ember: #d95f18;
-  --ember-deep: #a84b10;
-  --ember-bright: #f58138;
-  --ember-tint: #f7e9dc;
+  /* Brand anchors, exact: Cream ground, Ink text, Ember accent, Cocoa for
+     supporting text. Everything else on this palette is mixed from them. */
+  --cream: #f3ede4;
+  --ink: #1b0c10;
+  --cocoa: #28110c;
+  --background: #f3ede4;
+  --foreground: #1b0c10;
+  --card: #fffdf9;
+  --secondary: #eae2d6;
+  --muted-foreground: #75655e;
+  --input: #d8cec0;
+  --border: #e4dcd0;
+  --ember: #f15a29;
+  --ember-deep: #c64a22;
+  --ember-bright: #f27f58;
+  --ember-tint: #f9e4d9;
   --ok: #2e7d5b;
   --ok-tint: #e3efe8;
   --warn: #b98216;
@@ -62,17 +67,20 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme='light']) {
     color-scheme: dark;
-    --background: #17140f;
-    --foreground: #f3efe8;
-    --card: #201c16;
-    --secondary: #2b2620;
-    --muted-foreground: #a39c8f;
-    --input: #3a352c;
-    --border: #34302a;
-    --ember: #e0691f;
-    --ember-deep: #c3591a;
-    --ember-bright: #f8945a;
-    --ember-tint: #3a2415;
+    --cream: #f3ede4;
+    --ink: #1b0c10;
+    --cocoa: #28110c;
+    --background: #1b0c10;
+    --foreground: #f3ede4;
+    --card: #28191d;
+    --secondary: #332527;
+    --muted-foreground: #a19793;
+    --input: #46363a;
+    --border: #3e3032;
+    --ember: #f15a29;
+    --ember-deep: #c64a22;
+    --ember-bright: #f27f58;
+    --ember-tint: #411a14;
     --ok: #4caf82;
     --ok-tint: #1c2f24;
     --warn: #d9a53c;
@@ -90,17 +98,20 @@
 
 :root[data-theme='dark'] {
   color-scheme: dark;
-  --background: #17140f;
-  --foreground: #f3efe8;
-  --card: #201c16;
-  --secondary: #2b2620;
-  --muted-foreground: #a39c8f;
-  --input: #3a352c;
-  --border: #34302a;
-  --ember: #e0691f;
-  --ember-deep: #c3591a;
-  --ember-bright: #f8945a;
-  --ember-tint: #3a2415;
+  --cream: #f3ede4;
+  --ink: #1b0c10;
+  --cocoa: #28110c;
+  --background: #1b0c10;
+  --foreground: #f3ede4;
+  --card: #28191d;
+  --secondary: #332527;
+  --muted-foreground: #a19793;
+  --input: #46363a;
+  --border: #3e3032;
+  --ember: #f15a29;
+  --ember-deep: #c64a22;
+  --ember-bright: #f27f58;
+  --ember-tint: #411a14;
   --ok: #4caf82;
   --ok-tint: #1c2f24;
   --warn: #d9a53c;
@@ -287,28 +298,9 @@ h2 {
   gap: 4px;
 }
 
+/* Placement only — see the brand lockup section for the mark and its label. */
 .sidebar .brand {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 7px;
   min-height: 52px;
-  padding: 4px 8px 18px;
-}
-
-.sidebar .brand img {
-  display: block;
-  width: 92px;
-  height: auto;
-}
-
-.sidebar .brand span {
-  color: var(--text-dim);
-  font-family: 'JetBrains Mono', ui-monospace, monospace;
-  font-size: 9px;
-  font-weight: 600;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
 }
 
 .sidebar nav {
@@ -615,19 +607,7 @@ h2 {
   box-shadow: var(--shadow-pop);
 }
 
-.auth-brand {
-  margin-bottom: 28px;
-  color: var(--text-dim);
-  font-family: 'Anybody', system-ui, sans-serif;
-  font-weight: 800;
-  letter-spacing: 0.03em;
-  text-transform: uppercase;
-}
 
-.auth-brand span {
-  color: var(--accent);
-  letter-spacing: 0.08em;
-}
 
 .auth-panel h1 {
   font-size: 26px;
@@ -1622,6 +1602,51 @@ h2 {
 
 /* ---- notices -------------------------------------------------------- */
 
+/* Sits in the same corner as the notices, just above them, so a long copy
+   stays visible without pinning the user to the dialog that started it. */
+.export-card {
+  position: fixed;
+  bottom: 18px;
+  right: 18px;
+  z-index: 101;
+  width: 320px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--accent);
+  border-radius: 8px;
+  box-shadow: var(--shadow-pop);
+  font-size: 12.5px;
+}
+
+.export-card-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.export-card-title strong {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.export-card-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--text-dim);
+}
+
+/* While a copy is running the notices stack above the card instead of under it. */
+.export-card ~ .notices {
+  bottom: 122px;
+}
+
 .notices {
   position: fixed;
   bottom: 18px;
@@ -2071,26 +2096,6 @@ label.field > span:first-child,
   border-bottom: 1px solid var(--border);
 }
 
-.auth-brand {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 8px;
-}
-
-.auth-brand img {
-  width: 112px;
-  height: auto;
-}
-
-.auth-brand span {
-  color: var(--text-dim);
-  font-family: 'JetBrains Mono', ui-monospace, monospace;
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.1em;
-}
-
 .mono,
 .sidebar .shoot-chip,
 .catalogue-kind,
@@ -2262,4 +2267,984 @@ label.field > span:first-child,
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+/* ---- user administration -------------------------------------------- */
+
+.admin-card + .admin-card {
+  margin-top: 16px;
+}
+
+.admin-heading {
+  margin: 0 0 12px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.admin-filter {
+  min-width: 220px;
+}
+
+.admin-new {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  align-items: start;
+}
+
+/* The submit button gets its own row rather than sitting in a field slot. */
+.admin-new > button {
+  grid-column: 1 / -1;
+  justify-self: start;
+  margin-top: 2px;
+}
+
+.admin-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.admin-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.admin-row.disabled {
+  opacity: 0.6;
+}
+
+.admin-identity {
+  display: flex;
+  flex-direction: column;
+  min-width: 220px;
+  flex: 1;
+}
+
+.admin-identity span {
+  font-size: 12.5px;
+  color: var(--text-dim);
+}
+
+.admin-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.admin-tag {
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-dim);
+}
+
+.admin-tag.strong {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.admin-tag.muted {
+  font-weight: 500;
+}
+
+.admin-row .actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-left: auto;
+}
+
+.admin-edit,
+.admin-reset {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 12px;
+  width: 100%;
+}
+
+.admin-reset {
+  padding-top: 10px;
+  border-top: 1px dashed var(--border);
+}
+
+.admin-reset .field,
+.admin-edit .field {
+  min-width: 200px;
+}
+
+.admin-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+  padding-bottom: 6px;
+}
+
+.admin-note {
+  margin-top: 12px;
+}
+
+/* ---- team library location ------------------------------------------ */
+
+.library-card {
+  margin-bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.library-card h2 {
+  margin: 0;
+}
+
+.library-card p {
+  margin: 0;
+}
+
+.library-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 8px 16px;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.library-facts dt {
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.library-facts dd {
+  margin: 2px 0 0;
+  font-size: 12.5px;
+  word-break: break-all;
+}
+
+.library-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.library-row input {
+  flex: 1;
+  min-width: 240px;
+}
+
+.library-restart {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--accent-soft);
+}
+
+.library-restart p {
+  margin: 0;
+  font-size: 12.5px;
+}
+
+/* ---- responsive layout ----------------------------------------------
+   The window is resized far more than it is maximised: snapped to half a
+   screen, dragged onto a 1366x768 laptop, or shared next to Premiere. The
+   project workspace already collapses (workspace.css); these rules give the
+   classic shell the same treatment and stop fixed floors from clipping.
+   -------------------------------------------------------------------- */
+
+/* A grid floor wider than the space available overflows instead of
+   reflowing, and the shell hides the overflow — so the last column simply
+   disappears. min() keeps every track inside the container. */
+.card-grid {
+  grid-template-columns: repeat(auto-fill, minmax(min(250px, 100%), 1fr));
+}
+
+.media-grid {
+  grid-template-columns: repeat(auto-fill, minmax(min(168px, 100%), 1fr));
+}
+
+.catalogue-media-grid {
+  grid-template-columns: repeat(auto-fill, minmax(min(190px, 100%), 1fr));
+}
+
+.face-grid {
+  grid-template-columns: repeat(auto-fill, minmax(min(150px, 100%), 1fr));
+}
+
+.progress-stats {
+  grid-template-columns: repeat(auto-fit, minmax(min(130px, 100%), 1fr));
+}
+
+.telemetry-times {
+  grid-template-columns: repeat(auto-fit, minmax(min(145px, 100%), 1fr));
+}
+
+.settings-grid {
+  grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr));
+}
+
+.admin-new {
+  grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr));
+}
+
+.library-facts {
+  grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr));
+}
+
+/* A flex child defaults to min-content width, so one wide table or path
+   pushes the whole shell sideways rather than scrolling inside itself. */
+.workspace {
+  min-width: 0;
+}
+
+/* Floating cards follow the viewport instead of hanging off it. */
+.export-card {
+  width: min(320px, calc(100vw - 36px));
+}
+
+.notices {
+  max-width: min(380px, calc(100vw - 36px));
+}
+
+@media (max-width: 1100px) {
+  :root {
+    --sidebar-width: 190px;
+  }
+
+  .workspace {
+    padding: 20px 20px 32px;
+  }
+
+  .catalogue-browser {
+    grid-template-columns: 180px 1fr;
+  }
+}
+
+@media (max-width: 900px) {
+  /* The catalogue group list sits above the media instead of beside it. */
+  .catalogue-browser {
+    grid-template-columns: minmax(0, 1fr);
+    min-height: 0;
+  }
+
+  .catalogue-groups {
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+
+  .grouping-bar select {
+    min-width: 0;
+    width: 100%;
+  }
+}
+
+/* Below this the sidebar costs more room than it earns, so it becomes a top
+   bar — the same shape the project workspace takes. */
+@media (max-width: 860px) {
+  .shell {
+    flex-direction: column;
+  }
+
+  .sidebar {
+    width: 100%;
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 16px;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .sidebar .brand {
+    flex-direction: row;
+    align-items: center;
+    gap: 10px;
+    min-height: 0;
+    padding: 0;
+  }
+
+  .sidebar .brand img {
+    width: 76px;
+  }
+
+  .sidebar .brand span {
+    display: none;
+  }
+
+  /* The brand and the theme toggle hold the first row; the nav takes the
+     next one in full, so a wrapping nav never pushes the logo off-centre. */
+  .sidebar .brand {
+    margin-right: auto;
+  }
+
+  .sidebar nav {
+    order: 3;
+    flex: 1 0 100%;
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+
+  .sidebar nav button {
+    gap: 6px;
+    padding: 5px 10px;
+  }
+
+  .sidebar .spacer {
+    display: none;
+  }
+
+  .sidebar-theme-toggle {
+    order: 2;
+    width: auto;
+  }
+
+  .sidebar .shoot-chip {
+    order: 4;
+    width: 100%;
+    padding: 0 2px;
+    border-top: 0;
+  }
+
+  .workspace {
+    padding: 18px 16px 28px;
+  }
+
+  .pw-classic-switch {
+    flex-wrap: wrap;
+  }
+}
+
+/* Half-screen and narrower: every row that pairs a label with controls
+   stacks, so nothing is squeezed to an unusable width. */
+@media (max-width: 720px) {
+  .workspace-header .actions {
+    width: 100%;
+  }
+
+  .admin-filter {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .admin-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .admin-row .actions {
+    margin-left: 0;
+  }
+
+  .admin-identity {
+    min-width: 0;
+  }
+
+  .admin-edit .field,
+  .admin-reset .field,
+  .library-row input {
+    min-width: 0;
+  }
+
+  .library-restart {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .library-facts dd {
+    font-size: 12px;
+  }
+}
+
+/* ---- icons ----------------------------------------------------------- */
+
+/* Icons take the colour and size of the control they sit in, and never
+   shrink when the label beside them runs long. */
+.icon {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
+/* Buttons become flex rows so an icon and its label line up on their
+   centres. Stated for every button rather than with :has(), which the
+   WKWebView on macOS 11 and early 12 does not support. Rules that set their
+   own display or alignment (the nav, the profile button) are more specific
+   and still win. */
+button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+}
+
+/* Navigation: icon, label, then the badge the nav button already puts at
+   the far end. The label truncates rather than pushing the badge out. */
+.nav-label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.nav-label > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar nav button .icon,
+.pw-sidebar nav button .icon {
+  color: var(--text-dim);
+}
+
+.sidebar nav button.active .icon,
+.pw-sidebar nav button[aria-current='page'] .icon {
+  color: var(--accent);
+}
+
+.pw-sidebar nav button {
+  gap: 10px;
+}
+
+/* A search field with the magnifier inside it. */
+.input-with-icon {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.input-with-icon > .icon {
+  position: absolute;
+  left: 10px;
+  color: var(--text-dim);
+  pointer-events: none;
+}
+
+.input-with-icon > input {
+  width: 100%;
+  padding-left: 32px;
+}
+
+.library-card h2,
+.admin-tag {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.admin-tag {
+  display: inline-flex;
+}
+
+.admin-tag .icon {
+  width: 13px;
+  height: 13px;
+}
+
+/* The notice keeps its icon beside a message that may run to several lines. */
+.notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+}
+
+.notice .icon {
+  margin-top: 1px;
+}
+
+.notice.success .icon {
+  color: var(--accent);
+}
+
+.notice.error .icon {
+  color: var(--error);
+}
+
+/* ---- long text ------------------------------------------------------- */
+
+/* Names and emails are user data: they truncate inside their own column
+   instead of stretching the row that holds them. */
+.admin-identity {
+  overflow: hidden;
+}
+
+.admin-identity strong,
+.admin-identity span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pw-profile {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+}
+
+.pw-profile-text {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  text-align: left;
+}
+
+.pw-profile-text strong,
+.pw-profile-text span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Paths and file names break anywhere rather than escaping their card. */
+.library-facts dd,
+.admin-reset .field > span {
+  overflow-wrap: anywhere;
+}
+
+/* Headings are user-supplied in places (shoot and project names), so they
+   wrap instead of running past the panel edge. */
+.workspace-header h1,
+.pw-heading h1 {
+  overflow-wrap: anywhere;
+}
+
+/* The project sidebar holds "Media Processing" and its badge on one line
+   in Manrope; the label only truncates once the sidebar itself narrows. */
+.pw-sidebar {
+  width: 240px;
+}
+
+.pw-sidebar .nav-label {
+  gap: 8px;
+}
+
+/* ---- roster-aware name field ----------------------------------------- */
+
+.player-name-field {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.player-name-field > input {
+  width: 100%;
+}
+
+/* The suggestion list floats over whatever follows the field, so a dialog
+   does not jump about as matches appear and disappear. */
+.player-name-list {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 30;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  max-height: 260px;
+  overflow-y: auto;
+  background: var(--bg-raised);
+  border: 1px solid var(--input);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-pop, 0 12px 32px rgb(0 0 0 / 0.25));
+}
+
+.player-name-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 9px;
+  border-radius: 2px;
+  cursor: pointer;
+  min-width: 0;
+}
+
+.player-name-list li.active {
+  background: var(--accent-soft);
+}
+
+.player-name-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 700;
+  font-size: 13px;
+  min-width: 0;
+}
+
+.player-name-main > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.player-name-main .icon {
+  width: 14px;
+  height: 14px;
+  color: var(--text-dim);
+}
+
+.player-name-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  font-size: 11.5px;
+  color: var(--text-dim);
+  max-width: 55%;
+  overflow: hidden;
+}
+
+.player-name-meta > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.player-name-team {
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--accent);
+  font-weight: 700;
+}
+
+/* Confirmation that the roster recognised the name, shown under the field. */
+.roster-hit {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.roster-hit .icon {
+  width: 14px;
+  height: 14px;
+  color: var(--accent);
+}
+
+/* ---- roster import ---------------------------------------------------- */
+
+.roster-import {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.roster-import h2 {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.roster-import p {
+  margin: 0;
+}
+
+.roster-import.compact {
+  gap: 10px;
+  padding-top: 12px;
+}
+
+.roster-loaded,
+.roster-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.roster-preview {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.roster-preview h3 {
+  margin: 0;
+  font-size: 13px;
+}
+
+.roster-counts strong {
+  font-size: 15px;
+}
+
+.roster-sources {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.roster-sources li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 12.5px;
+}
+
+.roster-sources li > span:first-child {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Teams are shown as chips so twenty of them stay scannable. */
+.roster-teams {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.roster-team {
+  padding: 2px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-raised);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.roster-problems,
+.roster-format {
+  font-size: 12.5px;
+}
+
+.roster-problems summary,
+.roster-format summary {
+  cursor: pointer;
+  color: var(--text-dim);
+  font-weight: 600;
+}
+
+.roster-problems ul {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  color: var(--text-dim);
+}
+
+.roster-format pre {
+  margin: 8px 0;
+  padding: 10px 12px;
+  overflow-x: auto;
+  font-size: 11.5px;
+  line-height: 1.7;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.pw-autoteam {
+  margin-top: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.pw-autoteam > summary {
+  cursor: pointer;
+  font-weight: 700;
+  font-size: 12.5px;
+}
+
+/* ---- brand lockup ----------------------------------------------------
+   The wordmark is the drawn file, never rebuilt or recoloured; the theme
+   picks Cream or Cocoa. "Media Organiser" sits below it as mono microcopy
+   at the brand's Micro size (11px, +0.1em, uppercase) rather than being
+   welded into a custom lockup — and the wordmark is sized so the two read
+   as one column with matching edges.
+   -------------------------------------------------------------------- */
+
+.wordmark {
+  --wordmark-width: 115px;
+  display: flex;
+  flex-direction: column;
+  /* Clearspace: half the mark's height, per the brand system. */
+  gap: 9px;
+  align-items: flex-start;
+  min-width: 0;
+}
+
+.wordmark img {
+  display: block;
+  width: var(--wordmark-width);
+  height: auto;
+}
+
+.wordmark-label {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  /* Tracking is added after the last letter too; cancelling it makes the
+     text box end where the glyphs do, so it lines up with the mark above. */
+  margin-right: -0.1em;
+  text-transform: uppercase;
+  line-height: 1;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+/* Each shell gives the lockup its own breathing room; the mark itself is
+   never re-spaced. */
+.sidebar .wordmark.brand {
+  padding: 4px 8px 18px;
+}
+
+.pw-sidebar .wordmark.pw-brand {
+  padding: 0 14px 40px;
+}
+
+.auth-shell .wordmark.auth-brand {
+  margin-bottom: 26px;
+}
+
+/* ---- section separation ----------------------------------------------
+   One rhythm for every panel: a heading row, a hairline, then the content.
+   Settings, Users, the library card and the roster panel were each drifting
+   into their own spacing.
+   -------------------------------------------------------------------- */
+
+.section-head,
+.admin-heading,
+.library-card > h2,
+.roster-import > h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 14px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.library-card > h2 .icon,
+.roster-import > h2 .icon,
+.section-head .icon {
+  width: 14px;
+  height: 14px;
+  color: var(--accent);
+}
+
+/* Cards carry the same internal rhythm wherever they appear. */
+.admin-card,
+.library-card,
+.roster-card {
+  padding: 18px;
+}
+
+.admin-card + .admin-card,
+.library-card + .admin-card,
+.roster-card {
+  margin-top: 16px;
+}
+
+.library-card,
+.roster-card {
+  margin-bottom: 16px;
+}
+
+/* A settings block's own subheads sit in the same voice as the panel heads,
+   so a card does not mix two heading styles. */
+.settings-grid .card h2 {
+  margin: 0 0 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+/* A second heading inside one card needs space above it or the sections run
+   together — this is the "Storage"/"Privacy" case in Settings. */
+.settings-grid .card h2:not(:first-child) {
+  margin-top: 22px;
+}
+
+/* The workspace header sits above its content with a rule, matching the
+   panels below it. */
+.workspace-header {
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.workspace-header + .card,
+.workspace-header + .settings-grid,
+.workspace-header + .library-card {
+  margin-top: 16px;
+}
+
+/* ---- type ------------------------------------------------------------
+   Display voice is Anybody 800 uppercase at +0.03em; data and labels are
+   JetBrains Mono uppercase at +0.1em. Both are brand rules the app already
+   followed loosely — this states them in one place.
+   -------------------------------------------------------------------- */
+
+.pw-eyebrow,
+.admin-tag,
+.roster-team,
+.player-name-team {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.admin-tag,
+.roster-team,
+.player-name-team {
+  font-size: 10.5px;
+}
+
+/* Numbers line up in columns when they are tabular. */
+.roster-counts,
+.library-facts dd,
+.admin-list {
+  font-variant-numeric: tabular-nums;
 }

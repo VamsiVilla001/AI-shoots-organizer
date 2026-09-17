@@ -64,14 +64,9 @@
     </section>
 
     <section>
-      <h2>2. Collections (needs the bridge token)</h2>
-      <label>
-        Token (from <code>premiere-bridge.json</code> in the app's data
-        folder — see the panel's README for the default path per OS)
-        <input id="token" type="text" placeholder="paste token here" />
-      </label>
-      <button id="listCollections">GET /collections</button>
-      <pre id="collectionsResult">not checked yet</pre>
+      <h2>2. Projects and Collections</h2>
+      <button id="listProjects">GET /projects</button>
+      <pre id="projectsResult">not checked yet</pre>
     </section>
 
     <section>
@@ -86,6 +81,10 @@
 
     <script>
       const BASE = "http://127.0.0.1:51823";
+      // Fixed shared secret, not a per-install one — see premiere_api.rs's
+      // module doc comment for why. Must match BRIDGE_TOKEN there and in
+      // main.js exactly.
+      const BRIDGE_TOKEN = "skwad-premiere-bridge-v1";
 
       function show(el, ok, data) {
         el.textContent = typeof data === "string" ? data : JSON.stringify(data, null, 2);
@@ -96,15 +95,7 @@
         el.textContent = "loading…";
         el.className = "";
         try {
-          const headers = {};
-          if (useToken) {
-            const token = document.getElementById("token").value.trim();
-            if (!token) {
-              show(el, false, "enter a token first");
-              return;
-            }
-            headers.Authorization = `Bearer ${token}`;
-          }
+          const headers = useToken ? { Authorization: `Bearer ${BRIDGE_TOKEN}` } : {};
           const response = await fetch(BASE + path, { headers });
           const text = await response.text();
           let body;
@@ -123,8 +114,8 @@
         call(document.getElementById("healthResult"), "/health", false);
       });
 
-      document.getElementById("listCollections").addEventListener("click", () => {
-        call(document.getElementById("collectionsResult"), "/collections", true);
+      document.getElementById("listProjects").addEventListener("click", () => {
+        call(document.getElementById("projectsResult"), "/projects", true);
       });
 
       document.getElementById("getMedia").addEventListener("click", () => {

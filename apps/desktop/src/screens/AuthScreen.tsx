@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import * as api from '../api'
+import { Wordmark } from '../components/Wordmark'
 import { useUi } from '../store'
 
 type Mode = 'signin' | 'changePassword'
@@ -46,10 +47,7 @@ export function AuthScreen() {
 
   return <div className="auth-shell">
     <section className="auth-panel">
-      <div className="auth-brand">
-        <img src="/logo/wordmark-dark-colour.svg" alt="SKWAD" />
-        <span>Media Organiser</span>
-      </div>
+      <Wordmark className="auth-brand" />
       <h1>{mode === 'signin' ? 'Welcome back' : 'Set your private password'}</h1>
       <p className="hint">
         {mode === 'signin'

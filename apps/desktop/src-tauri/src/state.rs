@@ -48,12 +48,6 @@ pub struct AppState {
     pub video_frames: VideoFrameCache,
     /// Base URL the webview uses to fetch media through our custom protocol.
     pub media_url_base: String,
-    /// Bearer token the Premiere bridge requires on every request (§ premiere_api).
-    /// Persisted in the settings table so it survives a restart — the UXP
-    /// panel is a separate process that only learns it once (or on
-    /// "reconfigure"), so regenerating it every launch meant re-pasting the
-    /// token after every restart.
-    pub premiere_token: String,
 
     settings: RwLock<AppSettings>,
     /// Bumped whenever settings change. Workers watch this and rebuild their
@@ -79,29 +73,6 @@ pub struct AppState {
     premiere_queue: Mutex<Vec<PremiereJob>>,
 }
 
-const PREMIERE_TOKEN_KEY: &str = "premiere_bridge_token";
-
-/// Reuses the stored token across restarts; only generates (and persists) a
-/// new one the first time, or if the database can't be reached at all — in
-/// which case the token is ephemeral for that run rather than failing startup.
-fn load_or_create_premiere_token(db: &Database) -> String {
-    let attempt = || -> skwad_database::Result<String> {
-        let conn = db.conn()?;
-        if let Some(token) = skwad_database::repo::settings::get_raw(&conn, PREMIERE_TOKEN_KEY)? {
-            if !token.is_empty() {
-                return Ok(token);
-            }
-        }
-        let token = uuid::Uuid::new_v4().to_string();
-        skwad_database::repo::settings::set_raw(&conn, PREMIERE_TOKEN_KEY, &token)?;
-        Ok(token)
-    };
-    attempt().unwrap_or_else(|e| {
-        tracing::warn!(error = %e, "could not persist the Premiere bridge token; using a one-off token for this run");
-        uuid::Uuid::new_v4().to_string()
-    })
-}
-
 #[derive(Default)]
 struct Scheduler {
     paused_shoots: HashSet<i64>,
@@ -118,7 +89,6 @@ impl AppState {
         let thumbnails = ThumbnailCache::new(&paths.thumbnails);
         let proxies = VideoProxyCache::new(&paths.proxies);
         let video_frames = VideoFrameCache::new(paths.face_cache.join("video_frames"));
-        let premiere_token = load_or_create_premiere_token(&db);
         Self {
             db,
             thumbnails,
@@ -126,7 +96,6 @@ impl AppState {
             video_frames,
             paths,
             media_url_base,
-            premiere_token,
             settings: RwLock::new(settings),
             settings_version: AtomicU64::new(1),
             cancellations: Mutex::new(HashMap::new()),
@@ -442,10 +411,20 @@ mod tests {
         let drained = state.drain_premiere_queue();
         assert_eq!(drained.len(), 2);
         assert_eq!(drained[0].label, "Highlights");
-        assert_eq!(drained[0].bin.as_deref(), Some("Highlights"), "a collection send creates its own bin");
+        assert_eq!(
+            drained[0].bin.as_deref(),
+            Some("Highlights"),
+            "a collection send creates its own bin"
+        );
         assert_eq!(drained[1].label, "a.mp4");
-        assert_eq!(drained[1].bin, None, "an ad-hoc file send goes to the project root, not a new bin");
-        assert!(state.drain_premiere_queue().is_empty(), "a second drain must come back empty");
+        assert_eq!(
+            drained[1].bin, None,
+            "an ad-hoc file send goes to the project root, not a new bin"
+        );
+        assert!(
+            state.drain_premiere_queue().is_empty(),
+            "a second drain must come back empty"
+        );
     }
 
     #[test]

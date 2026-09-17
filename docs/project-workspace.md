@@ -36,8 +36,9 @@ disclosed only when needed.
   organisation only; indexed media and original groups stay in the library.
 - Media Processing shows each imported folder as a collection card. The card name
   is the `Name` entered during import; opening it reveals its reusable media.
-- Choosing a project type creates a useful starter collection structure. Esports,
-  sports, and wedding templates include nested collections; `Other` starts empty.
+- Every project starts empty. The project type is a label on the project card;
+  it does not create collections. Collections are added by hand or by publishing
+  processed media into the project.
 - Collections can contain other collections at any depth. Existing project
   metadata is migrated to root-level collections automatically.
 - Right-clicking a collection folder opens its settings menu: open, rename,

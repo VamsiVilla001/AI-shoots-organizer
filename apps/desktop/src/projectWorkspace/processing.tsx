@@ -12,7 +12,7 @@ import { PlayersScreen } from '../screens/PlayersScreen'
 import { GroupsScreen } from '../screens/GroupsScreen'
 import { ExportScreen } from '../screens/ExportScreen'
 import { MediaBrowser } from './mediaBrowser'
-import { PublishCollection } from './publishCollection'
+import { AddToExistingCollection, PublishCollection } from './publishCollection'
 import { WorkspaceDialog } from './WorkspaceDialog'
 import type { Project } from './model'
 import { TaggedMedia } from './taggedMedia'
@@ -26,6 +26,7 @@ export function Processing({ projects, save, onPublished }: { projects: Project[
   const [collectionSearch, setCollectionSearch] = useState('')
   const [importing, setImporting] = useState(false)
   const [selected, setSelected] = useState<Media[] | null>(null)
+  const [addingToExisting, setAddingToExisting] = useState<Media[] | null>(null)
   const [autoTagSource, setAutoTagSource] = useState<number | null>(null)
   const [reviewingAutoTags, setReviewingAutoTags] = useState(false)
   const [managingPeople, setManagingPeople] = useState(false)
@@ -111,7 +112,7 @@ export function Processing({ projects, save, onPublished }: { projects: Project[
         {source === null && <p className="pw-help">Search every imported collection together to find a person or missing media.</p>}
       {tool && source !== null ? <><div className="pw-toolbar"><button onClick={() => setTool(null)}>Back to media</button><label>Organising tools <select value={activeTool ?? tool} onChange={e => goTool(e.target.value as typeof tool)}><option value="albums">Sampled faces & AI suggestions</option><option value="review">Review face matches</option><option value="players">Manage people</option><option value="groups">Manual grouping</option></select></label></div><div className="pw-existing" key={`${source}-${activeTool}`}>
         {screen === 'export' ? <><button onClick={() => goTool(tool)}>Back to organising</button><ExportScreen /></> : activeTool === 'albums' ? <AlbumsScreen /> : activeTool === 'review' ? <ReviewScreen /> : activeTool === 'players' ? <PlayersScreen /> : <GroupsScreen />}
-      </div></> : <MediaBrowser key={source ?? 'all'} shootId={source ?? undefined} onCollect={setSelected} />}
+      </div></> : <MediaBrowser key={source ?? 'all'} shootId={source ?? undefined} onCollect={setSelected} onAddToExisting={setAddingToExisting} />}
       </>}
     </>}
     {tab === 'jobs' && <>
@@ -119,15 +120,16 @@ export function Processing({ projects, save, onPublished }: { projects: Project[
       {!shoots.isPending && processedJobs.length === 0 && <div className="pw-empty"><h2>No processed jobs yet</h2><p>Completed imports will appear here automatically.</p><button className="primary" onClick={() => setImporting(true)}>Add media</button></div>}
       <div className="pw-jobs">{processedJobs.map(shoot => <JobCard key={shoot.id} shoot={shoot} onOpen={() => { setSource(shoot.id); setTab('library'); setTool(null) }} onActions={event => openSourceMenu(shoot, event)} />)}</div>
     </>}
-    {tab === 'tags' && (managingPeople ? <><nav className="pw-breadcrumb" aria-label="Breadcrumb"><button onClick={() => setManagingPeople(false)}>Tag media</button><span>/</span><span aria-current="page">Manage people</span></nav><div className="pw-existing"><PlayersScreen /></div></> : <TaggedMedia onCollect={setSelected} onManagePeople={() => setManagingPeople(true)} />)}
+    {tab === 'tags' && (managingPeople ? <><nav className="pw-breadcrumb" aria-label="Breadcrumb"><button onClick={() => setManagingPeople(false)}>Tag media</button><span>/</span><span aria-current="page">Manage people</span></nav><div className="pw-existing"><PlayersScreen /></div></> : <TaggedMedia onCollect={setSelected} onAddToExisting={setAddingToExisting} onManagePeople={() => setManagingPeople(true)} />)}
     {tab === 'auto-tags' && <>
       {autoTagSource === null ? <><p className="pw-help">Choose a processed media collection to review people and groups found automatically by SKWAD.</p><div className="pw-card-grid">{processedJobs.map(shoot => <ImportCollectionCard key={shoot.id} shoot={shoot} onOpen={() => { useUi.getState().openShoot(shoot.id, 'albums'); setAutoTagSource(shoot.id); setReviewingAutoTags(false) }} onActions={event => openSourceMenu(shoot, event)} />)}</div>{!shoots.isPending && processedJobs.length === 0 && <div className="pw-empty"><h2>No media ready for auto tagging</h2><p>Finish processing an import first. It will appear here when analysis is complete.</p></div>}</> : <><nav className="pw-breadcrumb" aria-label="Breadcrumb"><button onClick={() => { setAutoTagSource(null); setReviewingAutoTags(false) }}>Auto tags</button><span>/</span><span aria-current="page">{shoots.data?.find(shoot => shoot.id === autoTagSource)?.name ?? 'Media collection'}</span></nav><div className="pw-toolbar"><p className="pw-help">Review recognised people, name unknown groups, and add any automatic album directly to a project collection.</p><button onClick={() => { useUi.getState().openShoot(autoTagSource, 'review'); setReviewingAutoTags(current => !current) }}>{reviewingAutoTags ? 'Back to auto tags' : 'Review face matches'}</button></div><div className="pw-existing">{reviewingAutoTags ? <ReviewScreen /> : <AlbumsScreen onAddToCollection={album => void collectAlbum(album)} />}</div></>}
     </>}
-    {tab === 'pre-process' && <PreProcess onCollect={setSelected} />}
+    {tab === 'pre-process' && <PreProcess onCollect={setSelected} onAddToExisting={setAddingToExisting} />}
     {sourceMenu && menuSource && <SourceContextMenu shoot={menuSource} x={sourceMenu.x} y={sourceMenu.y} busy={busySourceId === menuSource.id} onClose={() => setSourceMenu(null)} onOpen={() => { setSource(menuSource.id); setTab('library'); setTool(null) }} onReprocess={() => void reprocessSource(menuSource)} onRename={() => setRenamingSource(menuSource)} onShowFolder={() => void api.openPath(menuSource.sourcePath).catch(error => pushNotice({ level: 'error', message: String(error) }))} onRemove={() => void removeSource(menuSource)} />}
     {renamingSource && <RenameSourceDialog shoot={renamingSource} onClose={() => setRenamingSource(null)} onSave={async name => { setBusySourceId(renamingSource.id); try { await api.renameShoot(renamingSource.id, name); await refreshSources(); setRenamingSource(null); pushNotice({ level: 'success', message: `Renamed to ${name}.` }) } catch (error) { pushNotice({ level: 'error', message: String(error) }) } finally { setBusySourceId(null) } }} busy={busySourceId === renamingSource.id} />}
     {importing && <ImportMedia onClose={() => setImporting(false)} onCreated={() => { setSource(null); setTab('library'); setImporting(false) }} />}
     {selected && <PublishCollection media={selected} projects={projects} save={save} onClose={() => setSelected(null)} onPublished={id => { setSelected(null); onPublished(id) }} />}
+    {addingToExisting && <AddToExistingCollection media={addingToExisting} projects={projects} save={save} onClose={() => setAddingToExisting(null)} onAdded={(_projectId, _collectionId, added) => { setAddingToExisting(null); pushNotice({ level: 'success', message: added > 0 ? `Added ${added} file${added === 1 ? '' : 's'} to the collection.` : 'Those files were already in that collection.' }) }} />}
   </>
 }
 
@@ -176,7 +178,7 @@ function ImportCollectionCard({ shoot, onOpen, onActions }: { shoot: ShootSummar
   const total = shoot.photoCount + shoot.videoCount
   const status = shoot.status === 'completed' ? 'Ready' : shoot.status
   return <article className="pw-cover-card" onContextMenu={onActions}>
-    <button className="pw-card-open" onClick={onOpen}><div className="pw-cover">{mediaId != null && !failed ? <img src={thumbUrl(mediaId)} alt="" loading="lazy" onError={() => setFailed(true)} /> : <span>Media collection</span>}</div>
+    <button className="pw-card-open" onDoubleClick={onOpen} onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); onOpen() } }}><div className="pw-cover">{mediaId != null && !failed ? <img src={thumbUrl(mediaId)} alt="" loading="lazy" onError={() => setFailed(true)} /> : <span>Media collection</span>}</div>
     <div className="pw-card-body"><div className="pw-card-title"><h2>{shoot.name}</h2><span className={`badge ${shoot.status}`}>{status}</span></div><p>{total} files <span>{shoot.photoCount} photos · {shoot.videoCount} videos</span></p></div></button>
     <button className="pw-card-actions" aria-label={`Actions for ${shoot.name}`} onClick={onActions}>Actions</button>
   </article>

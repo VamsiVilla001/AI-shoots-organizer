@@ -164,6 +164,77 @@ code-signing certificate (an OV certificate warms up reputation slowly; Azure
 Trusted Signing is the cheaper modern route). Configure it under
 `bundle.windows.signCommand` in `tauri.conf.json` when you have one.
 
+## Handing the installer out from your own Apache server
+
+The team installs from an Apache server on the office network instead of a
+shared drive or a chat attachment. Apache only ever serves the **installer
+file**: SKWAD is a desktop application whose UI talks to its Rust backend over
+Tauri IPC, not HTTP, so there is nothing here to host as a website — a browser
+build would render and then fail on every action.
+
+**Apache must not host the shared library.** The library is a SQLite database
+that needs real file locking; over WebDAV or HTTP it corrupts. It goes on a
+Windows file share — see [one library, shared across the
+network](shared-library.md).
+
+### Publish a build
+
+```powershell
+npm run build   # produces target\release\bundle\nsis\*.exe
+
+powershell -ExecutionPolicy Bypass -File scripts\publish-installer.ps1 `
+  -Destination "C:\Apache24\htdocs\skwad" `
+  -LibraryPath "\\STUDIO-PC\skwad-library"
+```
+
+The script copies the newest installer into the document root, writes a
+`.sha256` beside it, keeps the last three builds (`-Keep`) and regenerates
+`index.html`: a download page listing each build with its size and checksum,
+the post-install steps, and the shared library path to enter. Send the team the
+URL once — the same URL serves every future build.
+
+### The virtual host
+
+```apache
+# httpd.conf: mod_headers and mod_authz_host must be loaded.
+<VirtualHost *:80>
+    ServerName skwad.local
+    DocumentRoot "C:/Apache24/htdocs/skwad"
+
+    <Directory "C:/Apache24/htdocs/skwad">
+        Options -Indexes +FollowSymLinks
+        AllowOverride None
+        # Office network only — never expose the installer to the internet.
+        Require ip 192.168.0.0/16
+    </Directory>
+
+    # Browsers must download the installer, not try to display it.
+    AddType application/octet-stream .exe .dmg
+    <FilesMatch "\.(exe|dmg)$">
+        Header set Content-Disposition "attachment"
+        Header set Cache-Control "public, max-age=0, must-revalidate"
+    </FilesMatch>
+
+    ErrorLog "logs/skwad-error.log"
+    CustomLog "logs/skwad-access.log" common
+</VirtualHost>
+```
+
+Adjust `Require ip` to your subnet. `must-revalidate` matters: without it a
+workstation that downloaded the previous build can be served it again from
+cache.
+
+Add `skwad.local` to your DNS, or tell people the server's IP
+(`http://192.168.1.10/`). On the Apache machine, allow port 80 through the
+Windows firewall for the private network profile only.
+
+### There is no auto-update
+
+A new version is a new installer: publish it, tell the team, they download and
+run it over the top. The library, settings and accounts live outside the
+install folder, so nothing is lost. If that gets tedious, see [updating an
+installed copy](#updating-an-installed-copy) for what an updater would need.
+
 ## What the recipient should know
 
 - **Nothing is uploaded.** Everything runs locally; the source folder is only

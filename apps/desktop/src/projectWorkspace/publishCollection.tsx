@@ -2,9 +2,9 @@ import { useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import type { Media } from '@skwad/shared-types'
 import * as api from '../api'
-import { createProjectDraft, createTemplateCollections, PROJECT_TYPES, type CollectionSource, type Project, type ProjectVisibility } from './model'
-import { ProjectTemplatePreview } from './ProjectTemplatePreview'
+import { createProjectDraft, PROJECT_TYPES, type CollectionSource, type Project, type ProjectVisibility } from './model'
 import { WorkspaceDialog } from './WorkspaceDialog'
+import { addMediaToCollection } from './collectionOps'
 import { GROUP_CHANGE_KEYS, invalidateKeys } from '../queryKeys'
 
 export function PublishCollection({ media, projects, save, onClose, onPublished }: { media: Media[]; projects: Project[]; save: (projects: Project[]) => void; onClose: () => void; onPublished: (id: string) => void }) {
@@ -50,12 +50,7 @@ export function PublishCollection({ media, projects, save, onClose, onPublished 
       if (projectId === 'new') {
         const project = createProjectDraft(projectName.trim(), kind, visibility)
         collection.projectId = project.id
-        const templateCollections = createTemplateCollections(kind, project.id)
-        const matchingRoot = templateCollections.find(item => item.parentId === null && item.name.toLocaleLowerCase() === collection.name.toLocaleLowerCase())
-        const collections = matchingRoot
-          ? templateCollections.map(item => item.id === matchingRoot.id ? { ...item, sources: collection.sources } : item)
-          : [...templateCollections, collection]
-        save([...projects, { ...project, collections }])
+        save([...projects, { ...project, collections: [collection] }])
         onPublished(project.id)
       } else {
         save(projects.map(p => p.id === id ? { ...p, collections: [...p.collections, collection] } : p))
@@ -72,9 +67,53 @@ export function PublishCollection({ media, projects, save, onClose, onPublished 
     <label className="field">Collection name<input autoFocus required maxLength={120} value={name} disabled={busy || started} onChange={e => setName(e.target.value)} placeholder="e.g. Finals highlights" /></label>
     <label className="field">Project<select value={projectId} disabled={busy} onChange={e => { setProjectId(e.target.value); setParentId('root') }}>{editableProjects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}<option value="new">Create a new project</option></select></label>
     {projectId !== 'new' && <label className="field">Location<select value={parentId} disabled={busy} onChange={e => setParentId(e.target.value)}><option value="root">Project root</option>{collectionOptions(projects.find(p => p.id === projectId)?.collections ?? []).map(({ collection, depth }) => <option key={collection.id} value={collection.id}>{`${'— '.repeat(depth + 1)}${collection.name}`}</option>)}</select></label>}
-    {projectId === 'new' && <><label className="field">New project name<input required value={projectName} disabled={busy} onChange={e => setProjectName(e.target.value)} placeholder="e.g. BGIS 2026" /></label><label className="field">Project type<select value={kind} disabled={busy} onChange={e => setKind(e.target.value)}>{PROJECT_TYPES.map(k => <option key={k}>{k}</option>)}</select></label><label className="field">Access<select value={visibility} onChange={event => setVisibility(event.target.value as ProjectVisibility)}><option value="private">Private · only you</option><option value="invited">Invited people</option><option value="organisation">Everyone in your organisation</option></select></label><ProjectTemplatePreview kind={kind} /></>}
+    {projectId === 'new' && <><label className="field">New project name<input required value={projectName} disabled={busy} onChange={e => setProjectName(e.target.value)} placeholder="e.g. BGIS 2026" /></label><label className="field">Project type<select value={kind} disabled={busy} onChange={e => setKind(e.target.value)}>{PROJECT_TYPES.map(k => <option key={k}>{k}</option>)}</select></label><label className="field">Access<select value={visibility} onChange={event => setVisibility(event.target.value as ProjectVisibility)}><option value="private">Private · only you</option><option value="invited">Invited people</option><option value="organisation">Everyone in your organisation</option></select></label></>}
     <div className="pw-note">Media stays in the reusable library. This collection follows the selected project's access.</div>
     {error && <p role="alert" className="pw-error">{error}</p>}<div className="pw-dialog-actions"><button type="button" disabled={busy} onClick={onClose}>Cancel</button><button className="primary" disabled={busy || !name.trim() || (projectId === 'new' && !projectName.trim())}>{busy ? 'Creating collection…' : 'Create collection'}</button></div>
+  </form></WorkspaceDialog>
+}
+
+/**
+ * Adds the selected media to a collection that already exists, rather than
+ * creating another one. A collection points at `{shootId, groupId}` sources,
+ * so the media joins the source group for its own shoot — and gains a new
+ * source only when the selection spans a shoot the collection has never
+ * covered before.
+ */
+export function AddToExistingCollection({ media, projects, save, onClose, onAdded }: { media: Media[]; projects: Project[]; save: (projects: Project[]) => void; onClose: () => void; onAdded: (projectId: string, collectionId: string, added: number) => void }) {
+  const editableProjects = projects.filter(project => project.status === 'active' && project.accessRole !== 'viewer')
+  const [projectId, setProjectId] = useState(editableProjects.find(project => project.collections.length > 0)?.id ?? editableProjects[0]?.id ?? '')
+  const [collectionId, setCollectionId] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  // Same guard as PublishCollection: `busy` only lands on the next render, so
+  // a fast double submit could otherwise add the media twice.
+  const adding = useRef(false)
+  const client = useQueryClient()
+  const project = editableProjects.find(item => item.id === projectId)
+  const options = collectionOptions(project?.collections ?? [])
+  const collection = project?.collections.find(item => item.id === collectionId)
+
+  const submit = async () => {
+    if (adding.current || !project || !collection) return
+    adding.current = true
+    setBusy(true); setError('')
+    try {
+      const added = await addMediaToCollection(media, project, collection, projects, save, client)
+      onAdded(project.id, collection.id, added)
+    } catch (e) {
+      setError(String(e))
+    } finally { adding.current = false; setBusy(false) }
+  }
+
+  return <WorkspaceDialog title="Add to existing collection" onClose={() => { if (!busy) onClose() }}><form onSubmit={e => { e.preventDefault(); void submit() }}>
+    <p>{media.length} selected file{media.length === 1 ? '' : 's'}. Your media stays in the library and can belong to more than one collection.</p>
+    <label className="field">Project<select value={projectId} disabled={busy} onChange={e => { setProjectId(e.target.value); setCollectionId('') }}>{editableProjects.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+    <label className="field">Collection<select required value={collectionId} disabled={busy || options.length === 0} onChange={e => setCollectionId(e.target.value)}><option value="">Choose a collection…</option>{options.map(({ collection: item, depth }) => <option key={item.id} value={item.id}>{`${'— '.repeat(depth)}${item.name}`}</option>)}</select></label>
+    {editableProjects.length === 0 && <p className="pw-help">No editable projects yet. Create a collection instead.</p>}
+    {project && options.length === 0 && <p className="pw-help">This project has no collections yet. Create one instead.</p>}
+    {error && <p role="alert" className="pw-error">{error}</p>}
+    <div className="pw-dialog-actions"><button type="button" disabled={busy} onClick={onClose}>Cancel</button><button className="primary" disabled={busy || !collection}>{busy ? 'Adding…' : 'Add to collection'}</button></div>
   </form></WorkspaceDialog>
 }
 

@@ -13,6 +13,7 @@ pub mod logs;
 pub mod media;
 pub mod people;
 pub mod projects;
+pub mod roster;
 pub mod settings;
 pub mod shoots;
 pub mod storage;

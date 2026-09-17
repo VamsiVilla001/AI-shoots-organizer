@@ -419,10 +419,12 @@ pub fn replace_project_members(
     members: Vec<ProjectMember>,
 ) -> Result<Project> {
     let (account_id, email, organisation) = crate::catalogue::current_project_identity(&state)?;
-    state
-        .db
-        .transaction(|conn| projects::replace_members(conn, &project_id, &members, &account_id, &email))?;
+    // `replace_members` opens its own transaction, so it takes a plain
+    // connection — wrapping it in `db.transaction` made SQLite reject the
+    // inner BEGIN ("cannot start a transaction within a transaction") and
+    // broke sharing outright.
     let conn = state.db.conn()?;
+    projects::replace_members(&conn, &project_id, &members, &account_id, &email)?;
     projects::get(&conn, &project_id, &account_id, &email, organisation.as_deref())?
         .ok_or_else(|| err("the project could not be loaded after sharing"))
 }
@@ -635,74 +637,10 @@ pub async fn enroll_person(
         let mut rejected = 0usize;
 
         for photo_path in &photo_paths {
-            let path = PathBuf::from(photo_path);
-            let orientation = skwad_media_core::metadata::read_orientation(
-                &path,
-                skwad_media_core::formats::MediaKind::Photo,
-                engine.ffmpeg(),
-            )
-            .unwrap_or(1);
-            let decoded = match skwad_media_core::decode::decode_image(
-                &path,
-                orientation,
-                Some(settings.analysis_max_dim),
-                engine.ffmpeg(),
-            ) {
-                Ok(decoded) => decoded,
-                Err(error) => {
-                    tracing::warn!(file = %photo_path, %error, "could not read a reference photo");
-                    rejected += 1;
-                    continue;
-                }
-            };
-
-            let mut detected = engine.detect_and_embed(&decoded.image)?;
-            detected.retain(|face| face.embedding.is_some());
-            if detected.len() != 1 {
-                rejected += 1;
-                continue;
+            match reference_sample_from_photo(&state, &mut engine, &settings, reference_shoot.id, photo_path)? {
+                Some(sample) => samples.push(sample),
+                None => rejected += 1,
             }
-            let face = detected.pop().expect("checked length above");
-            let (width, height) = decoded.image.dimensions();
-            let (x, y, w, h) = face.detection.bbox.normalised(width, height);
-            let quality = face.detection.quality(width, height);
-
-            let media_id = {
-                let conn = state.db.conn()?;
-                media_repo::upsert(
-                    &conn,
-                    &NewMedia {
-                        shoot_id: reference_shoot.id,
-                        path: photo_path.clone(),
-                        filename: path
-                            .file_name()
-                            .map(|f| f.to_string_lossy().to_string())
-                            .unwrap_or_else(|| photo_path.clone()),
-                        media_type: MediaType::Photo,
-                        extension: path
-                            .extension()
-                            .map(|e| e.to_string_lossy().to_lowercase())
-                            .unwrap_or_default(),
-                        file_size: std::fs::metadata(&path).map(|m| m.len() as i64).unwrap_or(0),
-                        content_key: photo_path.clone(),
-                        captured_at: None,
-                    },
-                )?
-            };
-            let item = {
-                let conn = state.db.conn()?;
-                media_repo::get_by_id(&conn, media_id)?
-                    .ok_or_else(|| err("the reference photo could not be indexed"))?
-            };
-            crate::pipeline::index_media(&state.db, &state.thumbnails, engine.ffmpeg(), &item)?;
-
-            samples.push(ReferenceSample {
-                media_id,
-                bbox: BoundingBox { x, y, w, h },
-                embedding: face.embedding.expect("filtered above").into_vec(),
-                quality,
-                frame_time: None,
-            });
         }
 
         if let Some(video_path) = &video_path {
@@ -793,47 +731,301 @@ pub async fn enroll_person(
         }
 
         let samples_added = samples.len();
-        let mut media_ids: Vec<i64> = samples.iter().map(|s| s.media_id).collect();
-        media_ids.sort_unstable();
-        media_ids.dedup();
-
-        state.db.transaction(|conn| {
-            for sample in &samples {
-                let face_id = faces::insert_manual(
-                    conn,
-                    &NewFace {
-                        media_id: sample.media_id,
-                        shoot_id: reference_shoot.id,
-                        bbox: sample.bbox,
-                        landmarks: None,
-                        detection_confidence: 1.0,
-                        embedding: Some(sample.embedding.clone()),
-                        quality: Some(sample.quality),
-                        frame_time: sample.frame_time,
-                        crop_path: None,
-                    },
-                )?;
-                faces::assign(conn, face_id, person.id, Some(1.0))?;
-            }
-            for media_id in &media_ids {
-                media_repo::refresh_face_count(conn, *media_id)?;
-            }
-            logs::record_quiet(
-                conn,
-                logs::EVENT_PLAYER_CREATED,
-                None,
-                None,
-                Some(person.id),
-                Some(&format!("enrolled with {samples_added} reference sample(s)")),
-            );
-            Ok(())
-        })?;
+        write_reference_samples(&state, person.id, reference_shoot.id, &samples)?;
 
         Ok(EnrollPersonResult {
             person,
             samples_added,
             rejected_count: rejected,
         })
+    })
+    .await
+    .map_err(|e| err(format!("enrollment stopped unexpectedly: {e}")))??;
+
+    events::emit(&app, events::LIBRARY_CHANGED, ());
+    Ok(result)
+}
+
+/// Turns one reference photo into a sample, indexing it into the Reference
+/// Library on the way. `None` means the photo was unusable — unreadable, no
+/// face, or more than one face — and belongs in the rejected count rather
+/// than being guessed at.
+fn reference_sample_from_photo(
+    state: &AppState,
+    engine: &mut crate::pipeline::Engine,
+    settings: &AppSettings,
+    reference_shoot_id: i64,
+    photo_path: &str,
+) -> Result<Option<ReferenceSample>> {
+    let path = PathBuf::from(photo_path);
+    let orientation = skwad_media_core::metadata::read_orientation(
+        &path,
+        skwad_media_core::formats::MediaKind::Photo,
+        engine.ffmpeg(),
+    )
+    .unwrap_or(1);
+    let decoded = match skwad_media_core::decode::decode_image(
+        &path,
+        orientation,
+        Some(settings.analysis_max_dim),
+        engine.ffmpeg(),
+    ) {
+        Ok(decoded) => decoded,
+        Err(error) => {
+            tracing::warn!(file = %photo_path, %error, "could not read a reference photo");
+            return Ok(None);
+        }
+    };
+
+    let mut detected = engine.detect_and_embed(&decoded.image)?;
+    detected.retain(|face| face.embedding.is_some());
+    if detected.len() != 1 {
+        return Ok(None);
+    }
+    let face = detected.pop().expect("checked length above");
+    let (width, height) = decoded.image.dimensions();
+    let (x, y, w, h) = face.detection.bbox.normalised(width, height);
+    let quality = face.detection.quality(width, height);
+
+    let media_id = {
+        let conn = state.db.conn()?;
+        media_repo::upsert(
+            &conn,
+            &NewMedia {
+                shoot_id: reference_shoot_id,
+                path: photo_path.to_string(),
+                filename: path
+                    .file_name()
+                    .map(|f| f.to_string_lossy().to_string())
+                    .unwrap_or_else(|| photo_path.to_string()),
+                media_type: MediaType::Photo,
+                extension: path
+                    .extension()
+                    .map(|e| e.to_string_lossy().to_lowercase())
+                    .unwrap_or_default(),
+                file_size: std::fs::metadata(&path).map(|m| m.len() as i64).unwrap_or(0),
+                content_key: photo_path.to_string(),
+                captured_at: None,
+            },
+        )?
+    };
+    let item = {
+        let conn = state.db.conn()?;
+        media_repo::get_by_id(&conn, media_id)?.ok_or_else(|| err("the reference photo could not be indexed"))?
+    };
+    crate::pipeline::index_media(&state.db, &state.thumbnails, engine.ffmpeg(), &item)?;
+
+    Ok(Some(ReferenceSample {
+        media_id,
+        bbox: BoundingBox { x, y, w, h },
+        embedding: face.embedding.expect("filtered above").into_vec(),
+        quality,
+        frame_time: None,
+    }))
+}
+
+/// Writes accepted reference faces as this person's confirmed ground truth.
+fn write_reference_samples(
+    state: &AppState,
+    person_id: i64,
+    reference_shoot_id: i64,
+    samples: &[ReferenceSample],
+) -> Result<()> {
+    let samples_added = samples.len();
+    let mut media_ids: Vec<i64> = samples.iter().map(|s| s.media_id).collect();
+    media_ids.sort_unstable();
+    media_ids.dedup();
+
+    Ok(state.db.transaction(|conn| {
+        for sample in samples {
+            let face_id = faces::insert_manual(
+                conn,
+                &NewFace {
+                    media_id: sample.media_id,
+                    shoot_id: reference_shoot_id,
+                    bbox: sample.bbox,
+                    landmarks: None,
+                    detection_confidence: 1.0,
+                    embedding: Some(sample.embedding.clone()),
+                    quality: Some(sample.quality),
+                    frame_time: sample.frame_time,
+                    crop_path: None,
+                },
+            )?;
+            faces::assign(conn, face_id, person_id, Some(1.0))?;
+        }
+        for media_id in &media_ids {
+            media_repo::refresh_face_count(conn, *media_id)?;
+        }
+        logs::record_quiet(
+            conn,
+            logs::EVENT_PLAYER_CREATED,
+            None,
+            None,
+            Some(person_id),
+            Some(&format!("enrolled with {samples_added} reference sample(s)")),
+        );
+        Ok(())
+    })?)
+}
+
+/// The angle subfolders a reference directory is expected to hold. One person
+/// per filename, the same filename in each folder.
+const REFERENCE_ANGLE_FOLDERS: [&str; 3] = ["front", "left", "right"];
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnrolledFromDirectory {
+    pub name: String,
+    /// Which angle folders this person was found in, e.g. `["front", "left"]`.
+    pub angles: Vec<String>,
+    pub samples_added: usize,
+    /// Photos with zero or more than one detected face, skipped rather than guessed.
+    pub rejected_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnrollDirectoryResult {
+    pub enrolled: Vec<EnrolledFromDirectory>,
+    /// People whose photos yielded no usable face at all, so nothing was written.
+    pub skipped: Vec<String>,
+}
+
+/// One person's reference photos, gathered from the angle folders they appear in.
+#[derive(Debug)]
+struct RosterEntry {
+    name: String,
+    /// `(angle folder, photo path)`, in front/left/right order.
+    photos: Vec<(&'static str, String)>,
+}
+
+/// Reads a `front`/`left`/`right` reference folder into one entry per person,
+/// keyed on the filename stem so the same name across angle folders is one
+/// person. Angle folders are matched case-insensitively, non-photos are
+/// ignored, and a person present in only some of the folders is still
+/// returned with whatever angles exist — a missing profile shot is worth
+/// reporting, not worth failing the whole roster over.
+fn reference_roster(root: &std::path::Path) -> Result<Vec<RosterEntry>> {
+    if !root.is_dir() {
+        return Err(err("choose a folder that exists"));
+    }
+
+    let mut angle_dirs: Vec<(&'static str, PathBuf)> = Vec::new();
+    for angle in REFERENCE_ANGLE_FOLDERS {
+        let entries = std::fs::read_dir(root).map_err(|e| err(format!("could not read that folder: {e}")))?;
+        let found = entries
+            .flatten()
+            .find(|entry| entry.path().is_dir() && entry.file_name().to_string_lossy().eq_ignore_ascii_case(angle));
+        if let Some(entry) = found {
+            angle_dirs.push((angle, entry.path()));
+        }
+    }
+    if angle_dirs.is_empty() {
+        return Err(err(
+            "that folder has no front, left or right subfolder — expected one folder per angle, with the same filename per person in each",
+        ));
+    }
+
+    // BTreeMap keeps the roster alphabetical; the lowercased stem is the key
+    // so "Naresh.png" and "naresh.jpg" across angles land on one person.
+    let mut roster: std::collections::BTreeMap<String, RosterEntry> = std::collections::BTreeMap::new();
+    for (angle, dir) in &angle_dirs {
+        let entries = std::fs::read_dir(dir).map_err(|e| err(format!("could not read the {angle} folder: {e}")))?;
+        let mut paths: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
+        // read_dir order is filesystem-defined; sort so a roster import is
+        // reproducible run to run.
+        paths.sort();
+        for path in paths {
+            if !path.is_file() {
+                continue;
+            }
+            let is_photo = skwad_media_core::formats::classify(&path)
+                .is_some_and(|(kind, _)| kind == skwad_media_core::formats::MediaKind::Photo);
+            if !is_photo {
+                continue;
+            }
+            let Some(stem) = path.file_stem().map(|s| s.to_string_lossy().trim().to_string()) else {
+                continue;
+            };
+            if stem.is_empty() {
+                continue;
+            }
+            roster
+                .entry(stem.to_lowercase())
+                .or_insert_with(|| RosterEntry {
+                    name: stem.clone(),
+                    photos: Vec::new(),
+                })
+                .photos
+                .push((angle, path.to_string_lossy().to_string()));
+        }
+    }
+    if roster.is_empty() {
+        return Err(err("no photos were found in those angle folders"));
+    }
+    Ok(roster.into_values().collect())
+}
+
+/// Bulk-enrolls a whole roster from one directory laid out as
+/// `front/`, `left/` and `right/`, where the same filename in each folder is
+/// the same person (`front/naresh.png`, `left/naresh.png`, …). The filename
+/// stem becomes the person's name.
+///
+/// Like single-person enrollment this deliberately bypasses the scan/analyse
+/// job pipeline: reference headshots are ground truth the user curated, so
+/// faces are detected inline and written straight to `confirmed`. Nothing is
+/// imported as a shoot and no processing jobs are queued.
+#[tauri::command]
+pub async fn enroll_people_from_directory(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    root: String,
+    team: Option<String>,
+) -> Result<EnrollDirectoryResult> {
+    let roster = reference_roster(std::path::Path::new(&root))?;
+
+    let state = Arc::clone(&state);
+    let result = tauri::async_runtime::spawn_blocking(move || -> Result<EnrollDirectoryResult> {
+        let settings = state.settings();
+        let mut engine = crate::pipeline::Engine::new(&state.paths, &settings)?;
+        let reference_shoot = {
+            let conn = state.db.conn()?;
+            shoots::get_or_create_reference_library(&conn)?
+        };
+
+        let mut enrolled = Vec::new();
+        let mut skipped = Vec::new();
+
+        for entry in roster {
+            let mut samples = Vec::new();
+            let mut rejected = 0usize;
+            for (_angle, photo_path) in &entry.photos {
+                match reference_sample_from_photo(&state, &mut engine, &settings, reference_shoot.id, photo_path)? {
+                    Some(sample) => samples.push(sample),
+                    None => rejected += 1,
+                }
+            }
+            if samples.is_empty() {
+                skipped.push(entry.name);
+                continue;
+            }
+
+            let person = {
+                let conn = state.db.conn()?;
+                people::get_or_create(&conn, &entry.name, team.as_deref())?
+            };
+            let samples_added = samples.len();
+            write_reference_samples(&state, person.id, reference_shoot.id, &samples)?;
+            enrolled.push(EnrolledFromDirectory {
+                name: person.name,
+                angles: entry.photos.iter().map(|(angle, _)| angle.to_string()).collect(),
+                samples_added,
+                rejected_count: rejected,
+            });
+        }
+
+        Ok(EnrollDirectoryResult { enrolled, skipped })
     })
     .await
     .map_err(|e| err(format!("enrollment stopped unexpectedly: {e}")))??;
@@ -862,36 +1054,37 @@ pub async fn find_person_media(
     shoot_id: Option<i64>,
 ) -> Result<MatchPersonReport> {
     let state = Arc::clone(&state);
-    let (result, changed_shoots) = tauri::async_runtime::spawn_blocking(move || -> Result<(MatchPersonReport, Vec<i64>)> {
-        let settings = state.settings();
-        let shoot_ids: Vec<i64> = match shoot_id {
-            Some(id) => vec![id],
-            None => {
-                let conn = state.db.conn()?;
-                shoots::list(&conn)?.into_iter().map(|s| s.id).collect()
-            }
-        };
+    let (result, changed_shoots) =
+        tauri::async_runtime::spawn_blocking(move || -> Result<(MatchPersonReport, Vec<i64>)> {
+            let settings = state.settings();
+            let shoot_ids: Vec<i64> = match shoot_id {
+                Some(id) => vec![id],
+                None => {
+                    let conn = state.db.conn()?;
+                    shoots::list(&conn)?.into_iter().map(|s| s.id).collect()
+                }
+            };
 
-        let mut new_suggestions = 0usize;
-        let mut changed_shoots = Vec::new();
-        for id in &shoot_ids {
-            let matched = stages::match_person_in_shoot(&state.db, *id, person_id, &settings)?;
-            new_suggestions += matched;
-            if matched > 0 {
-                changed_shoots.push(*id);
+            let mut new_suggestions = 0usize;
+            let mut changed_shoots = Vec::new();
+            for id in &shoot_ids {
+                let matched = stages::match_person_in_shoot(&state.db, *id, person_id, &settings)?;
+                new_suggestions += matched;
+                if matched > 0 {
+                    changed_shoots.push(*id);
+                }
             }
-        }
 
-        Ok((
-            MatchPersonReport {
-                shoots_scanned: shoot_ids.len(),
-                new_suggestions,
-            },
-            changed_shoots,
-        ))
-    })
-    .await
-    .map_err(|e| err(format!("finding matches stopped unexpectedly: {e}")))??;
+            Ok((
+                MatchPersonReport {
+                    shoots_scanned: shoot_ids.len(),
+                    new_suggestions,
+                },
+                changed_shoots,
+            ))
+        })
+        .await
+        .map_err(|e| err(format!("finding matches stopped unexpectedly: {e}")))??;
 
     if !changed_shoots.is_empty() {
         events::emit(&app, events::LIBRARY_CHANGED, ());
@@ -1404,7 +1597,12 @@ pub fn assign_faces(
     let updated = state.db.transaction(|conn| {
         let person_id = match (person_id, person_name.as_deref()) {
             (Some(id), _) => id,
-            (None, Some(name)) => people::get_or_create(conn, name, None)?.id,
+            // A name on an imported roster brings its team with it, so bulk
+            // assignment files the player the same way naming one face does.
+            (None, Some(name)) => {
+                let team = skwad_database::repo::roster::resolve(conn, name)?.map(|entry| entry.team);
+                people::get_or_create(conn, name, team.as_deref())?.id
+            }
             (None, None) => return Err(skwad_database::DbError::other("choose or name a player")),
         };
         let n = faces::assign_many(conn, &face_ids, person_id)?;
@@ -1575,6 +1773,11 @@ pub struct NameFaceResult {
     pub matches_found: usize,
     pub group: Group,
     pub files_added: usize,
+    /// The team the roster matched this name to, when it matched one.
+    pub team: Option<String>,
+    /// The team's own group, which now holds this player's media alongside
+    /// every other named player from the same team.
+    pub team_group: Option<Group>,
 }
 
 #[tauri::command]
@@ -1592,6 +1795,15 @@ pub async fn name_face(
 
     let state = Arc::clone(&state);
     let result = tauri::async_runtime::spawn_blocking(move || -> Result<NameFaceResult> {
+        // An imported roster knows which team this name plays for. Whatever the
+        // reviewer typed is looked up; an unambiguous hit supplies the team, and
+        // anything else leaves the caller's own value alone.
+        let roster_entry = {
+            let conn = state.db.conn()?;
+            skwad_database::repo::roster::resolve(&conn, &name)?
+        };
+        let team = team.or_else(|| roster_entry.as_ref().map(|entry| entry.team.clone()));
+
         let (person, faces_named, shoot_id, appearances_before_matching) = state.db.transaction(|conn| {
             let face = faces::get_by_id(conn, face_id)?
                 .ok_or_else(|| skwad_database::DbError::other("that face is no longer in the library"))?;
@@ -1651,12 +1863,27 @@ pub async fn name_face(
                 });
 
                 let group = groups::get_or_create(conn, shoot_id, &person.name, Some(person.id))?;
-                let files_added = match player_album {
+                let files_added = match &player_album {
                     Some(album) => groups::add_media(conn, group.id, &albums::media_ids(conn, album.id, None)?)?,
                     None => 0,
                 };
                 let group = groups::get_by_id(conn, group.id)?
                     .ok_or_else(|| skwad_database::DbError::other("that group no longer exists"))?;
+
+                // Every player the roster places on a team shares one group, so
+                // the team's media collects itself as faces are named. The group
+                // carries no person id: it belongs to the team, not to anybody.
+                let person_team = person.team.clone();
+                let team_group = match person.team.as_deref().filter(|team| !team.trim().is_empty()) {
+                    Some(team) => {
+                        let team_group = groups::get_or_create(conn, shoot_id, team.trim(), None)?;
+                        if let Some(album) = &player_album {
+                            groups::add_media(conn, team_group.id, &albums::media_ids(conn, album.id, None)?)?;
+                        }
+                        groups::get_by_id(conn, team_group.id)?
+                    }
+                    None => None,
+                };
 
                 Ok(NameFaceResult {
                     person,
@@ -1664,6 +1891,8 @@ pub async fn name_face(
                     matches_found,
                     group,
                     files_added,
+                    team: person_team,
+                    team_group,
                 })
             })
             .map_err(CommandError::from)
@@ -1844,14 +2073,15 @@ pub fn send_collection_to_premiere(state: State<'_, Arc<AppState>>, collection_i
         .find(|collection| collection.id == collection_id)
         .ok_or_else(|| err("collection not found"))?;
 
-    let files: Vec<crate::state::PremiereJobFile> = crate::export::resolve_collection_files(&state.db, &collection.sources)?
-        .into_iter()
-        .map(|file| crate::state::PremiereJobFile {
-            path: file.path.display().to_string(),
-            filename: file.filename,
-            is_video: file.is_video,
-        })
-        .collect();
+    let files: Vec<crate::state::PremiereJobFile> =
+        crate::export::resolve_collection_files(&state.db, &collection.sources)?
+            .into_iter()
+            .map(|file| crate::state::PremiereJobFile {
+                path: file.path.display().to_string(),
+                filename: file.filename,
+                is_video: file.is_video,
+            })
+            .collect();
     if files.is_empty() {
         return Err(err("this collection has no files to send"));
     }
@@ -1974,5 +2204,98 @@ mod tests {
         let samples = review_sample_times(vec![2.2, 10.0], Some(16.0), &config);
 
         assert_eq!(samples, vec![0.0, 2.2, 5.0, 10.0, 15.0]);
+    }
+
+    fn write_reference_photo(dir: &std::path::Path, name: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join(name), b"not a real image").unwrap();
+    }
+
+    #[test]
+    fn a_reference_folder_groups_each_name_across_its_angles() {
+        let root = tempfile::tempdir().unwrap();
+        for angle in ["front", "left", "right"] {
+            write_reference_photo(&root.path().join(angle), "naresh.png");
+            write_reference_photo(&root.path().join(angle), "mavi.jpg");
+        }
+
+        let roster = reference_roster(root.path()).unwrap();
+
+        // Alphabetical, one entry per person, all three angles each.
+        assert_eq!(
+            roster.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
+            vec!["mavi", "naresh"]
+        );
+        for entry in &roster {
+            assert_eq!(
+                entry.photos.iter().map(|(angle, _)| *angle).collect::<Vec<_>>(),
+                vec!["front", "left", "right"]
+            );
+        }
+    }
+
+    #[test]
+    fn angle_folders_match_whatever_case_they_were_typed_in() {
+        let root = tempfile::tempdir().unwrap();
+        write_reference_photo(&root.path().join("Front"), "naresh.png");
+        write_reference_photo(&root.path().join("LEFT"), "naresh.png");
+
+        let roster = reference_roster(root.path()).unwrap();
+        assert_eq!(roster.len(), 1);
+        assert_eq!(roster[0].photos.len(), 2, "both angle folders should be read");
+    }
+
+    #[test]
+    fn a_person_missing_an_angle_is_still_enrolled_with_the_rest() {
+        let root = tempfile::tempdir().unwrap();
+        write_reference_photo(&root.path().join("front"), "naresh.png");
+        write_reference_photo(&root.path().join("left"), "naresh.png");
+        write_reference_photo(&root.path().join("right"), "mavi.png");
+
+        let roster = reference_roster(root.path()).unwrap();
+        let naresh = roster.iter().find(|e| e.name == "naresh").unwrap();
+        let mavi = roster.iter().find(|e| e.name == "mavi").unwrap();
+
+        assert_eq!(
+            naresh.photos.len(),
+            2,
+            "a missing profile shot must not drop the person"
+        );
+        assert_eq!(mavi.photos.len(), 1);
+    }
+
+    #[test]
+    fn the_same_name_in_different_cases_or_formats_is_one_person() {
+        let root = tempfile::tempdir().unwrap();
+        write_reference_photo(&root.path().join("front"), "Naresh.png");
+        write_reference_photo(&root.path().join("left"), "naresh.jpg");
+
+        let roster = reference_roster(root.path()).unwrap();
+        assert_eq!(roster.len(), 1, "case and extension must not split one person in two");
+        assert_eq!(roster[0].photos.len(), 2);
+    }
+
+    #[test]
+    fn non_photos_and_stray_folders_are_ignored() {
+        let root = tempfile::tempdir().unwrap();
+        write_reference_photo(&root.path().join("front"), "naresh.png");
+        write_reference_photo(&root.path().join("front"), "notes.txt");
+        write_reference_photo(&root.path().join("front"), "clip.mp4");
+        write_reference_photo(&root.path().join("blooper"), "someone.png");
+
+        let roster = reference_roster(root.path()).unwrap();
+        assert_eq!(
+            roster.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
+            vec!["naresh"]
+        );
+    }
+
+    #[test]
+    fn a_folder_without_any_angle_subfolder_explains_the_expected_layout() {
+        let root = tempfile::tempdir().unwrap();
+        write_reference_photo(root.path(), "naresh.png");
+
+        let error = reference_roster(root.path()).unwrap_err();
+        assert!(error.message.contains("front"), "got: {}", error.message);
     }
 }

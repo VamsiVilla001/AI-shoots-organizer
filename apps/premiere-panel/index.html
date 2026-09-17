@@ -3,109 +3,219 @@
   <head>
     <meta charset="utf-8" />
     <style>
+      /* Ports the app's own design tokens (apps/desktop/src/styles.css) and
+         Collections-screen rules (apps/desktop/src/projectWorkspace/workspace.css)
+         so the panel reads as part of the same product, not a separate tool.
+         Premiere's own chrome is always dark, so this skips the app's light
+         theme and @media query — the dark values are the only ones that will
+         ever actually render here. */
+      @font-face { font-family: 'Anybody'; font-style: normal; font-weight: 700; src: url('fonts/Anybody-700.woff2') format('woff2'); font-display: swap; }
+      @font-face { font-family: 'Anybody'; font-style: normal; font-weight: 800; src: url('fonts/Anybody-800.woff2') format('woff2'); font-display: swap; }
+      @font-face { font-family: 'Manrope'; font-style: normal; font-weight: 500; src: url('fonts/Manrope-500.woff2') format('woff2'); font-display: swap; }
+      @font-face { font-family: 'Manrope'; font-style: normal; font-weight: 600; src: url('fonts/Manrope-600.woff2') format('woff2'); font-display: swap; }
+      @font-face { font-family: 'Manrope'; font-style: normal; font-weight: 700; src: url('fonts/Manrope-700.woff2') format('woff2'); font-display: swap; }
+      @font-face { font-family: 'Manrope'; font-style: normal; font-weight: 800; src: url('fonts/Manrope-800.woff2') format('woff2'); font-display: swap; }
+      @font-face { font-family: 'JetBrains Mono'; font-style: normal; font-weight: 500; src: url('fonts/JetBrainsMono-500.woff2') format('woff2'); font-display: swap; }
+      @font-face { font-family: 'JetBrains Mono'; font-style: normal; font-weight: 600; src: url('fonts/JetBrainsMono-600.woff2') format('woff2'); font-display: swap; }
+
+      :root {
+        --background: #17140f;
+        --foreground: #f3efe8;
+        --card: #201c16;
+        --secondary: #2b2620;
+        --muted-foreground: #a39c8f;
+        --input: #3a352c;
+        --border: #34302a;
+        --ember: #e0691f;
+        --ember-tint: #3a2415;
+        --ok: #4caf82;
+        --error: #e08175;
+        --danger-tint: #3a201d;
+        --radius: 4px;
+        --ease-swift: cubic-bezier(0.2, 0, 0, 1);
+      }
+
       [hidden] {
         display: none !important;
       }
+      * {
+        box-sizing: border-box;
+      }
       body {
         margin: 0;
-        font-family: -apple-system, "Segoe UI", sans-serif;
-        font-size: 12px;
-        color: #ddd;
-        background: #262626;
+        font-family: 'Manrope', system-ui, sans-serif;
+        font-size: 12.5px;
+        color: var(--foreground);
+        background: var(--background);
       }
-      #setup {
-        padding: 10px;
-        display: flex;
-        flex-direction: column;
-        gap: 6px;
+      button, input {
+        font: inherit;
       }
-      #setup label {
-        display: flex;
-        flex-direction: column;
-        gap: 2px;
-      }
-      #setup input {
-        background: #1c1c1c;
-        border: 1px solid #444;
-        color: #ddd;
-        padding: 4px;
-      }
+
       #toolbar {
         display: flex;
         align-items: center;
         justify-content: space-between;
-        padding: 8px 10px;
-        border-bottom: 1px solid #3a3a3a;
+        padding: 10px 12px;
+        border-bottom: 1px solid var(--border);
       }
-      #status {
-        padding: 8px 10px;
-        color: #999;
-      }
-      #list {
-        overflow-y: auto;
-      }
-      .collection {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        padding: 8px 10px;
-        border-bottom: 1px solid #333;
-      }
-      .collection .meta {
+      .brand-block {
         display: flex;
         flex-direction: column;
         gap: 2px;
-        overflow: hidden;
       }
-      .collection .name {
-        font-weight: 600;
+      .brand {
+        font-family: 'Anybody', system-ui, sans-serif;
+        font-size: 14px;
+        font-weight: 800;
+        letter-spacing: 0.03em;
+        text-transform: uppercase;
+      }
+      #signedInAs {
+        font-size: 10.5px;
+        color: var(--muted-foreground);
+      }
+
+      #status {
+        padding: 8px 12px;
+        color: var(--muted-foreground);
+      }
+
+      #tabs {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 16px;
+        padding: 8px 12px 0;
+        border-bottom: 1px solid var(--border);
+      }
+      #tabs button {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        border: 0;
+        border-bottom: 2px solid transparent;
+        border-radius: 0;
+        background: transparent;
+        padding: 0 0 10px;
+        color: var(--muted-foreground);
+      }
+      #tabs button[aria-selected="true"] {
+        color: var(--foreground);
+        border-bottom-color: var(--ember);
+      }
+      #tabs button span {
+        min-width: 16px;
+        padding: 1px 5px;
+        border-radius: 20px;
+        background: var(--secondary);
+        color: var(--muted-foreground);
+        font-size: 10px;
+      }
+
+      #breadcrumb {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 12px;
+        border-bottom: 1px solid var(--border);
+        color: var(--muted-foreground);
+      }
+      #breadcrumb button {
+        background: transparent;
+        border: 0;
+        padding: 0;
+        color: var(--muted-foreground);
+        cursor: pointer;
+      }
+      #breadcrumb button:hover {
+        color: var(--foreground);
+      }
+
+      #list {
+        overflow-y: auto;
+      }
+      .node {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 10px 12px;
+        border-bottom: 1px solid var(--border);
+        transition: background 120ms var(--ease-swift);
+      }
+      .node:hover {
+        background: var(--secondary);
+      }
+      .node .meta {
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+        overflow: hidden;
+        cursor: pointer;
+        min-width: 0;
+      }
+      .node .name {
+        font-weight: 700;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
       }
-      .collection .project {
-        color: #999;
+      .node .detail {
+        color: var(--muted-foreground);
+        font-size: 11.5px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
       }
+      .node .actions {
+        display: flex;
+        gap: 6px;
+        flex-shrink: 0;
+      }
+
       button {
-        background: #3a3a3a;
-        border: 1px solid #4d4d4d;
-        color: #ddd;
-        padding: 4px 10px;
+        min-height: 28px;
+        font-size: 11.5px;
+        font-weight: 700;
+        color: inherit;
+        background: var(--card);
+        border: 1px solid var(--input);
+        border-radius: 2px;
+        padding: 0 12px;
         cursor: pointer;
+        transition: background 120ms var(--ease-swift), border-color 120ms var(--ease-swift);
       }
-      button:hover {
-        background: #474747;
+      button:hover:not(:disabled) {
+        background: var(--secondary);
+        border-color: var(--ember);
       }
       button:disabled {
         opacity: 0.5;
         cursor: default;
       }
-      a#reconfigure {
-        color: #7ab8ff;
-        cursor: pointer;
-        text-decoration: underline;
-        font-size: 11px;
+      button.primary {
+        background: var(--ember);
+        border-color: var(--ember);
+        color: #1a1a1a;
+      }
+      button.primary:hover:not(:disabled) {
+        background: var(--ember-tint);
+        color: var(--ember);
       }
     </style>
   </head>
   <body>
-    <div id="setup" hidden>
-      <label>
-        Bridge token — open <code>premiere-bridge.json</code> in SKWAD Media
-        Organiser's app data folder and paste its <code>token</code> value
-        <input id="token" type="text" placeholder="paste token here" />
-      </label>
-      <button id="connect">Connect</button>
-    </div>
-
-    <div id="toolbar" hidden>
-      <span>SKWAD Collections</span>
-      <span>
-        <a id="reconfigure">reconfigure</a>
-        <button id="refresh">Refresh</button>
+    <div id="toolbar">
+      <span class="brand-block">
+        <span class="brand">SKWAD Collections</span>
+        <span id="signedInAs"></span>
       </span>
+      <button id="refresh">Refresh</button>
     </div>
     <div id="status"></div>
+    <nav id="tabs" hidden></nav>
+    <div id="breadcrumb" hidden></div>
     <div id="list"></div>
 
     <script src="main.js"></script>

@@ -13,6 +13,7 @@ import type {
   AppSettings,
   BoundingBox,
   ClusterSummary,
+  EnrollDirectoryResult,
   EnrollPersonResult,
   ExportOptions,
   ExportPreview,
@@ -47,6 +48,13 @@ import type {
   PublishSkwadResult,
   ProfileUpdate,
   UserProfile,
+  LocalUser,
+  NewLocalUser,
+  LocalUserUpdate,
+  LibraryLocation,
+  RosterEntry,
+  RosterPreview,
+  RosterSummary,
   Project,
   ProjectMember,
 } from '@skwad/shared-types'
@@ -79,6 +87,28 @@ export const signInSkwad = (email: string, password: string) =>
 export const changeInitialPassword = (email: string, currentPassword: string, newPassword: string) =>
   call<CatalogueSessionStatus>('change_initial_password', { email, currentPassword, newPassword })
 export const signOutSkwad = () => call<void>('sign_out_skwad')
+export const listLocalUsers = () => call<LocalUser[]>('list_local_users')
+export const createLocalUser = (user: NewLocalUser) => call<LocalUser[]>('create_local_user', { user })
+export const updateLocalUser = (user: LocalUserUpdate) => call<LocalUser[]>('update_local_user', { user })
+export const resetLocalUserPassword = (email: string, password: string) =>
+  call<LocalUser[]>('reset_local_user_password', { email, password })
+export const deleteLocalUser = (email: string) => call<LocalUser[]>('delete_local_user', { email })
+export const getLibraryLocation = () => call<LibraryLocation>('get_library_location')
+export const setLibraryLocation = (root: string | null, cacheRoot: string | null, networkShare: boolean | null) =>
+  call<LibraryLocation>('set_library_location', { root, cacheRoot, networkShare })
+export const restartForLibraryChange = () => call<void>('restart_for_library_change')
+
+// --- team rosters ----------------------------------------------------------
+
+export const previewRosterFile = (path: string) => call<RosterPreview>('preview_roster_file', { path })
+export const importRoster = (source: string, entries: RosterEntry[]) =>
+  call<RosterSummary>('import_roster', { source, entries })
+export const rosterSummary = () => call<RosterSummary>('roster_summary')
+export const listRoster = () => call<RosterEntry[]>('list_roster')
+export const searchRoster = (query: string, limit?: number) =>
+  call<RosterEntry[]>('search_roster', { query, limit: limit ?? null })
+export const resolveRosterName = (name: string) => call<RosterEntry | null>('resolve_roster_name', { name })
+export const clearRoster = (source?: string | null) => call<RosterSummary>('clear_roster', { source: source ?? null })
 export const getUserProfile = () => call<UserProfile>('get_user_profile')
 export const updateUserProfile = (update: ProfileUpdate) =>
   call<UserProfile>('update_user_profile', { update })
@@ -177,6 +207,13 @@ export const enrollPerson = (args: {
     photoPaths: args.photoPaths ?? [],
     videoPath: args.videoPath ?? null,
   })
+/**
+ * Bulk-enrols a roster from one folder holding `front/`, `left/` and `right/`
+ * subfolders, where the same filename in each is the same person. Like
+ * `enrollPerson`, this skips the scan/analyse pipeline entirely.
+ */
+export const enrollPeopleFromDirectory = (root: string, team?: string | null) =>
+  call<EnrollDirectoryResult>('enroll_people_from_directory', { root, team: team ?? null })
 /** Retroactively matches a pre-registered person against already-processed media (one shoot, or every shoot). */
 export const findPersonMedia = (personId: number, shootId?: number | null) =>
   call<MatchPersonReport>('find_person_media', { personId, shootId: shootId ?? null })

@@ -32,12 +32,23 @@ pub struct AppPaths {
 impl AppPaths {
     /// Builds the layout under `root` and creates every directory.
     pub fn create(root: impl AsRef<Path>) -> std::io::Result<Self> {
+        Self::create_with_cache(root, None::<&Path>)
+    }
+
+    /// As [`AppPaths::create`], with the rebuildable caches — thumbnails,
+    /// proxies and face crops — kept somewhere else. A team sharing the
+    /// library over the network can keep those on each local disk instead of
+    /// pushing every preview across the wire.
+    pub fn create_with_cache(root: impl AsRef<Path>, cache_root: Option<impl AsRef<Path>>) -> std::io::Result<Self> {
         let root = root.as_ref().to_path_buf();
+        let cache = cache_root
+            .map(|path| path.as_ref().to_path_buf())
+            .unwrap_or_else(|| root.clone());
         let paths = Self {
             database: root.join("database"),
-            thumbnails: root.join("thumbnails"),
-            proxies: root.join("proxies"),
-            face_cache: root.join("face_cache"),
+            thumbnails: cache.join("thumbnails"),
+            proxies: cache.join("proxies"),
+            face_cache: cache.join("face_cache"),
             models: root.join("models"),
             logs: root.join("logs"),
             root,

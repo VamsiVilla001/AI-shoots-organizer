@@ -1,7 +1,7 @@
 import { useState, type MouseEvent } from 'react'
 import { open } from '@tauri-apps/plugin-dialog'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import type { Media, PersonSummary } from '@skwad/shared-types'
+import type { EnrollDirectoryResult, Media, PersonSummary } from '@skwad/shared-types'
 import * as api from '../api'
 import { useUi } from '../store'
 import { FaceCrop } from '../components/FaceCrop'
@@ -24,7 +24,7 @@ function fileName(path: string) {
  * collection automatically — matches land as suggestions the user reviews
  * and adds on their own terms, exactly like every other recognition result.
  */
-export function PreProcess({ onCollect }: { onCollect: (media: Media[]) => void }) {
+export function PreProcess({ onCollect, onAddToExisting }: { onCollect: (media: Media[]) => void; onAddToExisting?: (media: Media[]) => void }) {
   const queryClient = useQueryClient()
   const pushNotice = useUi(state => state.pushNotice)
 
@@ -34,6 +34,11 @@ export function PreProcess({ onCollect }: { onCollect: (media: Media[]) => void 
   const [photoPaths, setPhotoPaths] = useState<string[]>([])
   const [videoPath, setVideoPath] = useState<string | null>(null)
   const [pickerError, setPickerError] = useState('')
+
+  const [folderPath, setFolderPath] = useState<string | null>(null)
+  const [folderTeam, setFolderTeam] = useState('')
+  const [folderError, setFolderError] = useState('')
+  const [folderResult, setFolderResult] = useState<EnrollDirectoryResult | null>(null)
 
   const [search, setSearch] = useState('')
   const [personId, setPersonId] = useState<number | null>(null)
@@ -85,6 +90,33 @@ export function PreProcess({ onCollect }: { onCollect: (media: Media[]) => void 
     },
     onError: (e: unknown) => setPickerError(String(e)),
   })
+
+  const enrollFolder = useMutation({
+    mutationFn: () => api.enrollPeopleFromDirectory(folderPath!, folderTeam.trim() || null),
+    onSuccess: result => {
+      setFolderResult(result)
+      const samples = result.enrolled.reduce((total, item) => total + item.samplesAdded, 0)
+      pushNotice({
+        level: result.enrolled.length > 0 ? 'success' : 'warn',
+        message: result.enrolled.length > 0
+          ? `Enrolled ${result.enrolled.length} ${result.enrolled.length === 1 ? 'person' : 'people'} from ${samples} reference photo${samples === 1 ? '' : 's'}.`
+          : 'No usable faces were found in that folder.',
+      })
+      void queryClient.invalidateQueries({ queryKey: ['people'] })
+    },
+    onError: (e: unknown) => setFolderError(String(e)),
+  })
+
+  const pickFolder = async () => {
+    setFolderError(''); setFolderResult(null)
+    try {
+      const picked = await open({ directory: true, multiple: false })
+      if (typeof picked !== 'string') return
+      setFolderPath(picked)
+    } catch (e) {
+      setFolderError(String(e))
+    }
+  }
 
   const addPhotos = async () => {
     setPickerError('')
@@ -157,7 +189,7 @@ export function PreProcess({ onCollect }: { onCollect: (media: Media[]) => void 
     <section className="pw-media-section">
       <h2 className="pw-section-heading">Media found</h2>
       <p className="pw-help">Matches from already-processed collections. Select any and add them to a collection yourself.</p>
-      <MediaBrowser key={person.id} personId={person.id} excludeShootId={referenceShoot.data ?? undefined} onCollect={onCollect} />
+      <MediaBrowser key={person.id} personId={person.id} excludeShootId={referenceShoot.data ?? undefined} onCollect={onCollect} onAddToExisting={onAddToExisting} />
     </section>
   </>
 
@@ -199,11 +231,42 @@ export function PreProcess({ onCollect }: { onCollect: (media: Media[]) => void 
       </div>
     </section>
 
+    <section className="pw-enroll-card">
+      <div className="pw-tag-heading">
+        <div>
+          <span className="pw-eyebrow">Enroll a roster</span>
+          <h2>Add from a folder</h2>
+          <p>Point at a folder holding <code>front</code>, <code>left</code> and <code>right</code> subfolders. The same filename in each is the same person — <code>front/naresh.png</code>, <code>left/naresh.png</code>, <code>right/naresh.png</code> enrolls "naresh" from all three angles. Faces are read straight into the reference library; no media is imported and no processing job runs.</p>
+        </div>
+      </div>
+
+      <div className="pw-enroll-grid">
+        <label className="field"><span>Team for everyone in this folder (optional)</span><input value={folderTeam} onChange={e => setFolderTeam(e.target.value)} placeholder="e.g. Gods Reign" /></label>
+      </div>
+
+      <div className="pw-enroll-sources">
+        <button onClick={() => void pickFolder()}>Choose folder</button>
+        {folderPath && <div className="pw-chip-list"><span className="pw-chip">{folderPath}<button onClick={() => { setFolderPath(null); setFolderResult(null) }} aria-label="Remove folder">×</button></span></div>}
+      </div>
+
+      {folderError && <p role="alert" className="pw-error">{folderError}</p>}
+
+      {folderResult && <div className="pw-note">
+        {folderResult.enrolled.length > 0 && <><strong>Enrolled {folderResult.enrolled.length}</strong>
+          <div className="pw-chip-list">{folderResult.enrolled.map(item => <span key={item.name} className="pw-chip">{item.name} · {item.samplesAdded}/{item.angles.length} {item.angles.join('/')}</span>)}</div></>}
+        {folderResult.skipped.length > 0 && <p className="pw-help" style={{ margin: '8px 0 0' }}>No usable face found for: {folderResult.skipped.join(', ')}. Try clearer, front-facing photos with exactly one face.</p>}
+      </div>}
+
+      <div className="pw-enroll-actions">
+        <button className="primary" disabled={!folderPath || enrollFolder.isPending} onClick={() => enrollFolder.mutate()}>{enrollFolder.isPending ? 'Enrolling roster…' : 'Enroll everyone in folder'}</button>
+      </div>
+    </section>
+
     <div className="pw-toolbar"><label className="pw-search"><span className="sr-only">Search enrolled people</span><input type="search" placeholder="Search enrolled people or teams…" value={search} onChange={event => setSearch(event.target.value)} /></label><span>{people.data?.length ?? 0} enrolled</span></div>
     <p className="pw-help">People enrolled above appear here. Open one to search already-processed media, or use Find media directly from this list.</p>
     {rowError && <p role="alert" className="pw-error">{rowError}</p>}
     {people.isPending ? <p role="status" className="pw-loading">Loading enrolled people…</p> : people.isError ? <div className="pw-empty"><h2>Couldn't load enrolled people</h2><button onClick={() => void people.refetch()}>Try again</button></div> : visible.length > 0 ? <div className="pw-tag-list">{visible.map(item => <div className="pw-tag-row" key={item.id} onContextMenu={event => openMenu(item, event)}>
-      <button className="pw-tag-open" onClick={() => setPersonId(item.id)}><span><strong>{item.name}</strong><small>{item.team || 'No team'}</small></span><span>{item.faceSampleCount} sample{item.faceSampleCount === 1 ? '' : 's'}</span><span>{item.mediaCount} files</span></button>
+      <button className="pw-tag-open" onDoubleClick={() => setPersonId(item.id)}><span><strong>{item.name}</strong><small>{item.team || 'No team'}</small></span><span>{item.faceSampleCount} sample{item.faceSampleCount === 1 ? '' : 's'}</span><span>{item.mediaCount} files</span></button>
       <button disabled={findingId !== null} onClick={() => void findMedia(item.id, `${item.name}: `)}>{findingId === item.id ? 'Searching…' : 'Find media'}</button>
       <button disabled={addingId !== null || item.mediaCount === 0} onClick={async () => {
         setAddingId(item.id); setRowError('')

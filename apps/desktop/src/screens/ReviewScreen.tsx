@@ -10,6 +10,8 @@ import * as api from '../api'
 import { formatConfidence, formatCount } from '../media'
 import { FaceCrop } from '../components/FaceCrop'
 import { Modal } from '../components/Modal'
+import { PlayerNameField } from '../components/PlayerNameField'
+import { Icon } from '../components/Icon'
 import { useUi } from '../store'
 
 type Filter = 'suggested' | 'unassigned' | 'confirmed' | 'all'
@@ -208,6 +210,8 @@ function FaceCard(props: {
 /** Bulk "assign selected to player" (§10) — pick an existing player or type a new name. */
 function AssignModal(props: { faceIds: number[]; onDone: () => void; onClose: () => void }) {
   const [name, setName] = useState('')
+  // The team the roster matched, shown so the reviewer sees where this lands.
+  const [team, setTeam] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const people = useQuery({ queryKey: ['people'], queryFn: () => api.listPeople(null) })
   const pushNotice = useUi((s) => s.pushNotice)
@@ -228,17 +232,15 @@ function AssignModal(props: { faceIds: number[]; onDone: () => void; onClose: ()
     <Modal title={`Assign ${props.faceIds.length} face(s)`} onClose={props.onClose}>
       <label className="field">
         <span>Player</span>
-        <input
+        <PlayerNameField
           autoFocus
           value={name}
-          onChange={(e) => setName(e.target.value)}
-          placeholder="Type a name — existing or new"
-          list="assign-player-list"
+          onChange={(next) => { setName(next); setTeam(null) }}
+          onPick={(entry) => setTeam(entry.team)}
+          knownNames={people.data?.map((p) => p.name) ?? []}
         />
-        <datalist id="assign-player-list">
-          {people.data?.map((p) => <option key={p.id} value={p.name} />)}
-        </datalist>
       </label>
+      {team && <div className="hint roster-hit"><Icon name="players" />On the roster for <strong>{team}</strong> — their media joins that team's group.</div>}
       <div className="hint">
         Assignments count as confirmed and become library samples, improving future recognition.
       </div>

@@ -94,7 +94,10 @@ fn serve_thumbnail(media: &skwad_database::models::Media) -> Response<Vec<u8>> {
         return error(StatusCode::NOT_FOUND, "no thumbnail yet");
     };
     // Photo thumbnails are cached as WebP, video posters as JPEG (§ ThumbnailCache).
-    let mime = if Path::new(path).extension().is_some_and(|ext| ext.eq_ignore_ascii_case("webp")) {
+    let mime = if Path::new(path)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("webp"))
+    {
         "image/webp"
     } else {
         "image/jpeg"

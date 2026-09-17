@@ -5,9 +5,9 @@
  */
 
 import { create } from 'zustand'
-import type { ExportProgressEvent, NoticeEvent, ProgressEvent } from '@skwad/shared-types'
+import type { ExportProgressEvent, Media, NoticeEvent, ProgressEvent } from '@skwad/shared-types'
 
-export type Screen = 'shoots' | 'groups' | 'players' | 'albums' | 'review' | 'export' | 'catalogues' | 'profile' | 'settings'
+export type Screen = 'shoots' | 'groups' | 'players' | 'albums' | 'review' | 'export' | 'catalogues' | 'profile' | 'admin' | 'settings'
 
 export interface Notice extends NoticeEvent {
   id: number
@@ -28,6 +28,38 @@ function initialTheme(): Theme {
   return window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
 }
 
+/**
+ * What Cut/Copy is holding, waiting for a Paste onto a collection.
+ *
+ * Media carries the whole rows rather than ids because a paste has to know
+ * each file's shoot to find (or create) the right group inside the target
+ * collection. `source` is the group the files were cut *from* — null when
+ * they were copied from the library at large, where there is nothing to cut
+ * them out of.
+ */
+export type WorkspaceClipboard =
+  | { kind: 'media'; mode: 'cut' | 'copy'; media: Media[]; source: { shootId: number; groupId: number } | null }
+  | { kind: 'collection'; mode: 'cut' | 'copy'; projectId: string; collectionId: string; name: string }
+
+/**
+ * A collection export running in the background. It lives here rather than in
+ * the dialog that started it so the dialog can close and the copy keeps going
+ * with only the corner progress card on screen.
+ */
+export interface CollectionExportJob {
+  collectionName: string
+  destination: string
+  /** One export run per shoot the collection draws from. */
+  runs: Array<{ shootId: number; groupIds: number[] }>
+  /** Which entry of `runs` is copying now. */
+  index: number
+  /** The export record the backend reports progress against. */
+  exportId: number
+  /** The user asked to stop. A cancelled run reports `finished` with no
+   *  error, so remembering the ask is the only way to tell it from success. */
+  stopping: boolean
+}
+
 interface UiState {
   screen: Screen
   /** Applied to <html data-theme> by App; both the Classic and Project-workspace shells share it. */
@@ -37,6 +69,10 @@ interface UiState {
   /** Latest progress per shoot, pushed by the backend monitor. */
   progress: Record<number, ProgressEvent>
   exportProgress: ExportProgressEvent | null
+  /** The background collection export, if one is running. */
+  collectionExport: CollectionExportJob | null
+  /** What Cut/Copy is holding, if anything. */
+  clipboard: WorkspaceClipboard | null
   /** Person ids handed from Albums to the Export screen; null means no filter. */
   exportPersonIds: number[] | null
   notices: Notice[]
@@ -51,6 +87,8 @@ interface UiState {
   openShoot: (shootId: number, screen?: Screen) => void
   setProgress: (event: ProgressEvent) => void
   setExportProgress: (event: ExportProgressEvent | null) => void
+  setCollectionExport: (job: CollectionExportJob | null) => void
+  setClipboard: (clipboard: WorkspaceClipboard | null) => void
   pushNotice: (notice: NoticeEvent) => void
   dismissNotice: (id: number) => void
   openViewer: (mediaId: number, preferVideoFaces?: boolean) => void
@@ -66,6 +104,8 @@ export const useUi = create<UiState>((set) => ({
   activeShootId: null,
   progress: {},
   exportProgress: null,
+  collectionExport: null,
+  clipboard: null,
   exportPersonIds: null,
   notices: [],
   viewerMediaId: null,
@@ -99,6 +139,8 @@ export const useUi = create<UiState>((set) => ({
     set((state) => ({ progress: { ...state.progress, [event.shootId]: event } })),
 
   setExportProgress: (event) => set({ exportProgress: event }),
+  setCollectionExport: (job) => set({ collectionExport: job }),
+  setClipboard: (clipboard) => set({ clipboard }),
 
   pushNotice: (notice) =>
     set((state) => {
@@ -121,6 +163,7 @@ export const useUi = create<UiState>((set) => ({
       activeShootId: null,
       progress: {},
       exportProgress: null,
+      collectionExport: null,
       exportPersonIds: null,
       viewerMediaId: null,
       viewerPreferVideoFaces: false,

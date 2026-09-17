@@ -16,7 +16,9 @@ import { SettingsScreen } from './screens/SettingsScreen'
 import { CataloguesScreen } from './screens/CataloguesScreen'
 import { AuthScreen } from './screens/AuthScreen'
 import { ProfileScreen } from './screens/ProfileScreen'
+import { AdminScreen } from './screens/AdminScreen'
 import { ProjectWorkspace } from './projectWorkspace/ProjectWorkspace'
+import { ExportProgressCard } from './projectWorkspace/exportProgressCard'
 
 export default function App() {
   const [experience, setExperience] = useState<'classic' | 'projects'>(() => {
@@ -58,7 +60,7 @@ export default function App() {
   if (experience === 'projects') {
     const accountId = session.data.accountId ?? session.data.email ?? 'local'
     return <><ProjectWorkspace key={accountId} accountId={accountId} onClassic={() => switchExperience('classic')} />
-      {viewerMediaId !== null && <MediaViewer mediaId={viewerMediaId} preferVideoFaces={viewerPreferVideoFaces} />}<Notices /></>
+      {viewerMediaId !== null && <MediaViewer mediaId={viewerMediaId} preferVideoFaces={viewerPreferVideoFaces} />}<ExportProgressCard /><Notices /></>
   }
 
   return (
@@ -74,9 +76,11 @@ export default function App() {
         {screen === 'export' && <ExportScreen />}
         {screen === 'catalogues' && <CataloguesScreen />}
         {screen === 'profile' && <ProfileScreen />}
+        {screen === 'admin' && <AdminScreen />}
         {screen === 'settings' && <SettingsScreen />}
       </main>
       {viewerMediaId !== null && <MediaViewer mediaId={viewerMediaId} preferVideoFaces={viewerPreferVideoFaces} />}
+      <ExportProgressCard />
       <Notices />
     </div>
   )

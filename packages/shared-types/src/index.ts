@@ -56,9 +56,94 @@ export type Accelerator = 'auto' | 'cpu' | 'directMl' | 'coreMl' | 'cuda'
 export interface CatalogueSessionStatus {
   authenticatedOnce: boolean
   passwordChangeRequired: boolean
+  /** Administrators reach the user-management panel; members do not. */
+  isAdmin: boolean
   accountId: string | null
   email: string | null
   deviceKeyId: string | null
+}
+
+/**
+ * One player on an imported team roster.
+ *
+ * The roster is what turns naming a face into team grouping: a reviewer types
+ * any part of the in-game name, player name or team tag, and SKWAD knows which
+ * team that person plays for.
+ */
+export interface RosterEntry {
+  id: number
+  /** The in-game name, e.g. "iQOOS8ULNaresh". Unique across the workspace. */
+  ign: string
+  /** The person behind the IGN. May be empty on IGN-only rosters. */
+  playerName: string
+  team: string
+  /** player, coach, analyst, staff, substitute… */
+  role: string
+  /** The file this row was imported from. */
+  source: string
+}
+
+/** What a roster file turned out to hold, before anything is saved. */
+export interface RosterPreview {
+  source: string
+  entries: RosterEntry[]
+  teams: string[]
+  /** Rows that could not be read, with the reason. */
+  problems: string[]
+}
+
+export interface RosterSummary {
+  entries: number
+  teams: string[]
+  sources: Array<{ source: string; entries: number }>
+}
+
+/** Where the library folder came from: an env var, the admin, or app data. */
+export type LibrarySource = 'environment' | 'configured' | 'appData'
+
+/**
+ * The shared library location. One machine (or a NAS) holds the folder and
+ * everyone on the network points at the same path, so the database, caches,
+ * face embeddings, profiles and accounts are common to the team.
+ */
+export interface LibraryLocation {
+  activeRoot: string
+  activeCacheRoot: string
+  configuredRoot: string | null
+  configuredCacheRoot: string | null
+  source: LibrarySource
+  networkShare: boolean
+  databaseFile: string
+  appDataRoot: string
+  restartRequired: boolean
+  existingLibrary: boolean
+}
+
+export type LocalUserRole = 'admin' | 'member'
+
+/** One account in the local credential file, as the admin panel shows it. */
+export interface LocalUser {
+  id: string
+  email: string
+  displayName: string
+  role: LocalUserRole
+  enabled: boolean
+  mustChangePassword: boolean
+}
+
+export interface NewLocalUser {
+  email: string
+  displayName: string
+  role: LocalUserRole
+  /** Left null, the account starts on the shared testing password. */
+  password: string | null
+}
+
+export interface LocalUserUpdate {
+  email: string
+  displayName: string
+  role: LocalUserRole
+  enabled: boolean
 }
 
 export interface UserProfile {
@@ -225,6 +310,23 @@ export interface EnrollPersonResult {
   samplesAdded: number
   /** Photos with zero or more than one detected face, skipped rather than guessed. */
   rejectedCount: number
+}
+
+/** One person enrolled by the front/left/right directory import. */
+export interface EnrolledFromDirectory {
+  name: string
+  /** Which angle folders this person was found in, e.g. `['front', 'left']`. */
+  angles: string[]
+  samplesAdded: number
+  /** Photos with zero or more than one detected face, skipped rather than guessed. */
+  rejectedCount: number
+}
+
+/** What a front/left/right reference-folder import produced. */
+export interface EnrollDirectoryResult {
+  enrolled: EnrolledFromDirectory[]
+  /** People whose photos yielded no usable face at all, so nothing was written. */
+  skipped: string[]
 }
 
 /** On-demand retroactive matching of one pre-registered person against already-processed media. */
@@ -674,10 +776,19 @@ export type ExistingFilePolicy = 'skip' | 'rename' | 'overwrite'
 /** Whether the exported folders come from the editor's groups or the AI albums. */
 export type ExportMode = 'groups' | 'aiAlbums'
 
+/**
+ * What actually lands in the destination: `shortcut` writes native shortcuts
+ * back to the originals (instant, near-zero disk use, only usable while the
+ * originals stay put); `copy` writes real files so the folder stands alone.
+ */
+export type ExportDelivery = 'shortcut' | 'copy'
+
 export interface ExportOptions {
   mode: ExportMode
   /** `groups` mode: which groups to write. `null` writes all of them. */
   groupIds: number[] | null
+  /** Native shortcuts back to the originals, or real copies. */
+  delivery: ExportDelivery
   splitPhotosVideos: boolean
   /** `aiAlbums` mode only. */
   includeUnidentified: boolean

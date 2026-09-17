@@ -7,7 +7,7 @@ import type { Media, MediaPickState } from '@skwad/shared-types'
  * inside or outside the project workspace shell, so this stays free of any
  * workspace-only state.
  */
-export function MediaContextMenu({ media, x, y, onClose, onOpen, onShowFolder, onEditorial, onSendToPremiere }: {
+export function MediaContextMenu({ media, x, y, onClose, onOpen, onShowFolder, onEditorial, onSendToPremiere, onClipboard, canCut, clipboardCount }: {
   media: Media
   x: number
   y: number
@@ -19,6 +19,12 @@ export function MediaContextMenu({ media, x, y, onClose, onOpen, onShowFolder, o
   onEditorial?: (args: { rating?: number; pickState?: MediaPickState }) => void
   /** Omitted where the caller has no Premiere bridge context (e.g. read-only browsing). */
   onSendToPremiere?: () => void
+  /** Puts the selection on the clipboard for pasting onto a collection. */
+  onClipboard?: (mode: 'cut' | 'copy') => void
+  /** Cut needs a group to remove the files from, so it is not always offered. */
+  canCut?: boolean
+  /** How many files the Cut/Copy would take — the click target may be one of many selected. */
+  clipboardCount?: number
 }) {
   useEffect(() => {
     const close = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose() }
@@ -34,6 +40,10 @@ export function MediaContextMenu({ media, x, y, onClose, onOpen, onShowFolder, o
         <strong>{media.filename}</strong>
         {onOpen && <button autoFocus role="menuitem" onClick={() => run(onOpen)}>Open</button>}
         <button role="menuitem" onClick={() => run(onShowFolder)}>Show in folder</button>
+        {onClipboard && <>
+          <button role="menuitem" onClick={() => run(() => onClipboard('copy'))}>Copy{clipboardCount && clipboardCount > 1 ? ` ${clipboardCount} files` : ''}</button>
+          {canCut && <button role="menuitem" onClick={() => run(() => onClipboard('cut'))}>Cut{clipboardCount && clipboardCount > 1 ? ` ${clipboardCount} files` : ''}</button>}
+        </>}
         {onSendToPremiere && <button role="menuitem" onClick={() => run(onSendToPremiere)}>Send to Premiere</button>}
         {onEditorial && <>
           <div className="media-context-rating" role="group" aria-label="Rating">

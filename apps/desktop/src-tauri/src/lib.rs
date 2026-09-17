@@ -4,12 +4,14 @@ pub mod catalogue;
 pub mod commands;
 pub mod events;
 pub mod export;
+pub mod library;
 pub mod models;
 pub mod paths;
 pub mod pipeline;
 pub mod premiere_api;
 pub mod protocol;
 pub mod resource_monitor;
+pub mod roster;
 pub mod settings;
 pub mod stages;
 pub mod state;
@@ -18,7 +20,7 @@ pub mod worker;
 
 use std::sync::Arc;
 
-use skwad_database::Database;
+use skwad_database::{Database, StorageMode};
 use tauri::Manager;
 
 use crate::paths::AppPaths;
@@ -39,19 +41,41 @@ pub fn run() {
                 .app_data_dir()
                 .map_err(|e| format!("could not resolve the application data directory: {e}"))?;
             let migration = paths::migrate_legacy_data_dir(&data_dir)?;
-            let paths = AppPaths::create(&data_dir)?;
+
+            // A team shares one library folder over the network; until an
+            // administrator points this machine at one, it is this machine's
+            // own application data directory.
+            library::remember_app_data(&data_dir);
+            let location = library::resolve(&data_dir);
+            let paths = AppPaths::create_with_cache(&location.root, location.cache_root.as_deref())?;
 
             init_logging(&paths);
-            tracing::info!(version = env!("CARGO_PKG_VERSION"), data = %paths.root.display(), "starting");
+            tracing::info!(
+                version = env!("CARGO_PKG_VERSION"),
+                data = %paths.root.display(),
+                source = ?location.source,
+                network_share = location.network_share,
+                "starting"
+            );
             if migration != paths::LegacyMigration::NotNeeded {
                 tracing::info!(?migration, "migrated the pre-SKWAD application library");
             }
 
-            let db = Database::open(paths.database_file()).map_err(|e| format!("could not open the database: {e}"))?;
+            let storage_mode = if location.network_share {
+                StorageMode::NetworkShare
+            } else {
+                StorageMode::Local
+            };
+            let db = Database::open_with_mode(paths.database_file(), storage_mode)
+                .map_err(|e| format!("could not open the database: {e}"))?;
             let settings = AppSettings::load(&db).unwrap_or_default().sanitised();
 
             let state = Arc::new(AppState::new(db, paths, settings, protocol::url_base()));
             app.manage(Arc::clone(&state));
+
+            // The roster lives in the library folder, so it is prepared once the
+            // library is open and before anyone reaches the sign-in screen.
+            catalogue::ensure_local_auth(&state);
 
             // Lets an external process (the Premiere Pro panel) read Collections
             // over loopback HTTP — see premiere_api.rs for why that's necessary.
@@ -91,6 +115,21 @@ pub fn run() {
             catalogue::catalogue_session_status,
             catalogue::sign_in_skwad,
             catalogue::change_initial_password,
+            catalogue::list_local_users,
+            catalogue::create_local_user,
+            catalogue::update_local_user,
+            catalogue::reset_local_user_password,
+            catalogue::delete_local_user,
+            library::get_library_location,
+            library::set_library_location,
+            library::restart_for_library_change,
+            roster::preview_roster_file,
+            roster::import_roster,
+            roster::roster_summary,
+            roster::list_roster,
+            roster::search_roster,
+            roster::resolve_roster_name,
+            roster::clear_roster,
             catalogue::sign_out_skwad,
             catalogue::clear_authenticated_session,
             catalogue::get_user_profile,
@@ -131,6 +170,7 @@ pub fn run() {
             commands::reference_library_shoot_id,
             commands::create_person,
             commands::enroll_person,
+            commands::enroll_people_from_directory,
             commands::find_person_media,
             commands::rename_person,
             commands::update_person,

@@ -1,4 +1,5 @@
 import { useUi } from '../store'
+import { Icon } from './Icon'
 
 /** A small button that flips <html data-theme>, shared by the Classic sidebar and the Project workspace sidebar. */
 export function ThemeToggle({ className }: { className?: string }) {
@@ -14,7 +15,8 @@ export function ThemeToggle({ className }: { className?: string }) {
       title={`Switch to ${switchingTo} theme`}
       aria-label={`Switch to ${switchingTo} theme`}
     >
-      <span aria-hidden="true">{theme === 'dark' ? '☀️' : '🌙'}</span> {switchingTo === 'dark' ? 'Dark' : 'Light'} mode
+      <Icon name={theme === 'dark' ? 'sun' : 'moon'} />
+      <span>{switchingTo === 'dark' ? 'Dark' : 'Light'} mode</span>
     </button>
   )
 }

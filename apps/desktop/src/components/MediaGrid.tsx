@@ -8,16 +8,15 @@ import { MediaContextMenu } from './MediaContextMenu'
 /**
  * The thumbnail grid used for browsing and for sorting.
  *
- * Two modes, because the two jobs want opposite defaults. Browsing: a click
- * opens the viewer. Sorting (`selectMode`): a click picks the file, because an
- * editor filing a hundred clips clicks far more than they look, and the viewer
- * is a double-click away.
+ * Desktop selection rules throughout: a plain click selects just that tile,
+ * Ctrl/Cmd-click adds or removes one, Shift-click takes the range, and only a
+ * double-click opens the viewer. Nothing opens on a single click — an editor
+ * filing a hundred clips clicks far more often than they look.
  */
 export function MediaGrid(props: {
   media: Media[]
   selected?: Set<number>
-  /** A plain click selects instead of opening the viewer. */
-  selectMode?: boolean
+  /** `additive` is Ctrl/Cmd-click: add or remove rather than replace. */
   onToggleSelect?: (mediaId: number, additive: boolean) => void
   /** Shift-click: select everything between the last click and this tile. */
   onSelectRange?: (mediaId: number) => void
@@ -35,6 +34,10 @@ export function MediaGrid(props: {
     pickState?: MediaPickState
   }) => void
   editorialBusy?: boolean
+  /** Cut/Copy for pasting onto a collection; omitted where that makes no sense. */
+  onClipboard?: (mode: 'cut' | 'copy', media: Media[]) => void
+  /** Whether the current browsing context has a group to cut files out of. */
+  canCut?: boolean
   emptyTitle?: string
   emptyHint?: string
   /** Open videos on analysed sample frames, avoiding a heavy original video stream. */
@@ -44,6 +47,11 @@ export function MediaGrid(props: {
   const openMedia = (item: Media) => openViewer(item.id, Boolean(props.preferVideoFaces && item.mediaType === 'video'))
   const [menu, setMenu] = useState<{ mediaId: number; x: number; y: number } | null>(null)
   const menuItem = props.media.find((item) => item.id === menu?.mediaId)
+  /** Right-clicking inside the selection acts on all of it; outside it, on just that tile. */
+  const clipboardTargets = (item: Media) =>
+    props.selected?.has(item.id) && props.selected.size > 1
+      ? props.media.filter((candidate) => props.selected!.has(candidate.id))
+      : [item]
   if (props.media.length === 0) {
     return (
       <div className="empty-state">
@@ -74,25 +82,28 @@ export function MediaGrid(props: {
               e.dataTransfer.effectAllowed = 'copy'
             }}
             onClick={(e) => {
-              const additive = e.ctrlKey || e.metaKey
               if (e.shiftKey && props.onSelectRange) {
                 props.onSelectRange(item.id)
-              } else if (props.onToggleSelect && (props.selectMode || additive)) {
-                props.onToggleSelect(item.id, props.selectMode ? true : additive)
-              } else {
-                openMedia(item)
+                return
               }
+              props.onToggleSelect?.(item.id, e.ctrlKey || e.metaKey)
             }}
-            onDoubleClick={() => props.selectMode && openMedia(item)}
+            onDoubleClick={() => openMedia(item)}
             onContextMenu={(e: MouseEvent<HTMLDivElement>) => {
               e.preventDefault()
               setMenu({ mediaId: item.id, x: e.clientX, y: e.clientY })
             }}
             onKeyDown={(event) => {
-              if (event.key === 'Enter' || event.key === ' ') {
+              // Space mirrors Ctrl-click (toggle), Enter mirrors a double
+              // click (open) — the keyboard equivalents of the mouse rules.
+              if (event.key === ' ') {
                 event.preventDefault()
-                if (props.selectMode && props.onToggleSelect) props.onToggleSelect(item.id, true)
-                else openMedia(item)
+                props.onToggleSelect?.(item.id, true)
+                return
+              }
+              if (event.key === 'Enter') {
+                event.preventDefault()
+                openMedia(item)
                 return
               }
               if (!props.onEditorial || props.editorialBusy) return
@@ -181,6 +192,9 @@ export function MediaGrid(props: {
         onOpen={() => openMedia(menuItem)}
         onShowFolder={() => void api.revealInFolder(menuItem.path)}
         onEditorial={props.onEditorial ? (args) => props.onEditorial!({ mediaIds: [menuItem.id], ...args }) : undefined}
+        onClipboard={props.onClipboard ? (mode) => props.onClipboard!(mode, clipboardTargets(menuItem)) : undefined}
+        canCut={props.canCut}
+        clipboardCount={clipboardTargets(menuItem).length}
         onSendToPremiere={() => {
           const isMenuItemSelected = props.selected?.has(menuItem.id) ?? false
           const mediaIds = isMenuItemSelected && props.selected?.size ? [...props.selected] : [menuItem.id]

@@ -70,7 +70,10 @@ pub fn resolve_collection_files(
     let conn = db.conn()?;
     let mut files = Vec::new();
     for source in sources {
-        files.extend(collect_files(&conn, &groups_repo::media_ids(&conn, source.group_id, None)?)?);
+        files.extend(collect_files(
+            &conn,
+            &groups_repo::media_ids(&conn, source.group_id, None)?,
+        )?);
     }
     Ok(files)
 }
@@ -281,13 +284,18 @@ fn run(
         },
     );
 
+    let copying = options.delivery == skwad_export_engine::ExportDelivery::Copy;
+    let noun = if copying { "Copy export" } else { "Shortcut export" };
     match error {
-        Some(message) => events::notice(&app, "error", format!("Shortcut export failed: {message}")),
-        None if status == ExportStatus::Cancelled => events::notice(&app, "warn", "Shortcut export cancelled."),
+        Some(message) => events::notice(&app, "error", format!("{noun} failed: {message}")),
+        None if status == ExportStatus::Cancelled => events::notice(&app, "warn", format!("{noun} cancelled.")),
         None => events::notice(
             &app,
             "success",
-            format!("Created {done} native shortcut(s) in {}", destination.display()),
+            match copying {
+                true => format!("Copied {done} file(s) into {}", destination.display()),
+                false => format!("Created {done} native shortcut(s) in {}", destination.display()),
+            },
         ),
     }
 }

@@ -1,11 +1,13 @@
 import { useEffect, useState, type MouseEvent, type ReactNode } from 'react'
-import { useQueries, useQuery } from '@tanstack/react-query'
+import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { Group } from '@skwad/shared-types'
 import * as api from '../api'
 import { thumbUrl } from '../media'
 import { useUi } from '../store'
-import { ExportScreen } from '../screens/ExportScreen'
+import { addMediaToCollection, removeMediaFromGroup } from './collectionOps'
+import { ExportCollectionDialog } from './exportCollection'
 import { WorkspaceDialog } from './WorkspaceDialog'
+import { RosterImport } from '../components/RosterImport'
 import { MediaBrowser } from './mediaBrowser'
 import {
   createProjectDraft,
@@ -15,7 +17,6 @@ import {
   type ProjectMember,
   type ProjectVisibility,
 } from './model'
-import { ProjectTemplatePreview } from './ProjectTemplatePreview'
 
 type ProjectView = 'personal' | 'shared' | 'organisation' | 'archived'
 
@@ -40,7 +41,12 @@ export function Collections({ projects, save, replaceMembers, loading, saving, p
   const [folderMenu, setFolderMenu] = useState<{ collectionId: string; x: number; y: number } | null>(null)
   const [projectMenu, setProjectMenu] = useState<{ projectId: string; x: number; y: number } | null>(null)
   const [collectionId, setCollectionId] = useState<string | null>(null)
-  const [exportSource, setExportSource] = useState<{ shootId: number; groupId: number } | null>(null)
+  const [exporting, setExporting] = useState<ProjectCollection | null>(null)
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  const clipboard = useUi(state => state.clipboard)
+  const setClipboard = useUi(state => state.setClipboard)
+  const client = useQueryClient()
+  const [pasting, setPasting] = useState(false)
   const shoots = useQuery({ queryKey: ['shoots'], queryFn: api.listShoots })
   const groups = useQueries({ queries: (shoots.data ?? []).map(shoot => ({ queryKey: ['groups', shoot.id], queryFn: () => api.listGroups(shoot.id) })) })
   const allGroups = groups.flatMap(query => query.data ?? [])
@@ -85,8 +91,85 @@ export function Collections({ projects, save, replaceMembers, loading, saving, p
   }, [projects, shoots.data, groups])
 
   const resolve = (item: ProjectCollection) => item.sources.flatMap(source => allGroups.filter(group => group.id === source.groupId && group.shootId === source.shootId))
-  const openProject = (id: string | null) => { setProjectId(id); setCollectionId(null); setSearch(''); setExportSource(null) }
-  const openCollection = (id: string | null) => { setCollectionId(id); setSearch(''); setExportSource(null) }
+  const openProject = (id: string | null) => { setProjectId(id); setCollectionId(null); setSearch(''); setExporting(null); setSelectedIds(new Set()) }
+  const openCollection = (id: string | null) => { setCollectionId(id); setSearch(''); setExporting(null); setSelectedIds(new Set()) }
+  /** What Paste would do right now, or null when the clipboard is empty. */
+  const pasteLabel = !clipboard
+    ? null
+    : clipboard.kind === 'media'
+      ? `Paste ${clipboard.media.length} file${clipboard.media.length === 1 ? '' : 's'}`
+      : `Paste “${clipboard.name}”`
+
+  const setClipboardCollection = (item: ProjectCollection, mode: 'cut' | 'copy') => {
+    setClipboard({ kind: 'collection', mode, projectId: item.projectId, collectionId: item.id, name: item.name })
+    notice({ level: 'info', message: `“${item.name}” ready — right-click another collection and choose Paste.` })
+  }
+
+  const selectCard = (id: string, additive: boolean) => setSelectedIds(current => {
+    if (!additive) return new Set([id])
+    const next = new Set(current)
+    if (next.has(id)) next.delete(id); else next.add(id)
+    return next
+  })
+
+  /**
+   * Pastes onto `target`. Media joins the collection; a collection is either
+   * re-parented under it (Cut) or duplicated into it (Copy), reusing the same
+   * tree helpers the Collection settings dialog uses for a move or duplicate.
+   */
+  const paste = async (target: ProjectCollection) => {
+    if (!clipboard || !project || pasting) return
+    setPasting(true)
+    try {
+      if (clipboard.kind === 'media') {
+        const added = await addMediaToCollection(clipboard.media, project, target, projects, act, client)
+        if (clipboard.mode === 'cut' && clipboard.source) {
+          await removeMediaFromGroup(clipboard.source.groupId, clipboard.media, client)
+        }
+        notice({ level: 'success', message: added > 0 ? `${added} file${added === 1 ? '' : 's'} ${clipboard.mode === 'cut' ? 'moved' : 'added'} to “${target.name}”.` : `Those files were already in “${target.name}”.` })
+        if (clipboard.mode === 'cut') setClipboard(null)
+        return
+      }
+
+      const sourceProject = projects.find(item => item.id === clipboard.projectId)
+      const source = sourceProject?.collections.find(item => item.id === clipboard.collectionId)
+      if (!sourceProject || !source) { notice({ level: 'error', message: 'That collection no longer exists.' }); setClipboard(null); return }
+      if (source.id === target.id || descendantsOf(sourceProject, source.id).some(item => item.id === target.id)) {
+        notice({ level: 'error', message: 'A collection cannot be pasted into itself or its own nested collections.' })
+        return
+      }
+
+      if (clipboard.mode === 'cut') {
+        if (sourceProject.id === project.id) {
+          // Same project: re-parenting the subtree root is enough, its
+          // descendants stay attached to it.
+          act(projects.map(item => item.id === project.id
+            ? { ...item, collections: item.collections.map(child => child.id === source.id ? { ...child, parentId: target.id, updatedAt: new Date().toISOString() } : child) }
+            : item))
+        } else {
+          // Across projects every descendant needs a new projectId too, so
+          // clone the subtree in and drop the originals — the same move the
+          // Collection settings dialog performs.
+          const moved = cloneCollectionTree(sourceProject, source, project, target.id, source.name, source.notes)
+          const removed = new Set([source.id, ...descendantsOf(sourceProject, source.id).map(item => item.id)])
+          act(projects.map(item =>
+            item.id === sourceProject.id ? { ...item, collections: item.collections.filter(child => !removed.has(child.id)) }
+              : item.id === project.id ? { ...item, collections: [...item.collections, ...moved] }
+                : item))
+        }
+        notice({ level: 'success', message: `“${source.name}” moved into “${target.name}”.` })
+        setClipboard(null)
+      } else {
+        const copies = cloneCollectionTree(sourceProject, source, project, target.id, `${source.name} copy`, source.notes)
+        act(projects.map(item => item.id === project.id ? { ...item, collections: [...item.collections, ...copies] } : item))
+        notice({ level: 'success', message: `“${source.name}” copied into “${target.name}”.` })
+      }
+    } catch (error) {
+      notice({ level: 'error', message: String(error) })
+    } finally {
+      setPasting(false)
+    }
+  }
   const rootCount = project ? childrenOf(project, null).length : 0
   const openProjectMenu = (item: Project, event: MouseEvent<HTMLElement>) => {
     event.preventDefault(); event.stopPropagation()
@@ -108,7 +191,7 @@ export function Collections({ projects, save, replaceMembers, loading, saving, p
         {!project && <button className="primary" onClick={() => setCreatingProject(true)}>New project</button>}
         {project && !collection && project.accessRole === 'owner' && <button disabled={saving} onClick={() => setSharingProject(project)}>Share</button>}
         {project && !collection && canEdit && <><button onClick={() => setEditingProject(project)}>Project settings</button><button onClick={() => setCreatingCollection(true)}>New collection</button><button className="primary" onClick={onProcess}>Add media</button></>}
-        {project && collection && !exportSource && canEdit && <><button onClick={() => setLinking(true)}>Add existing</button><button className="primary" onClick={() => setCreatingCollection(true)}>New collection</button></>}
+        {project && collection && canEdit && <><button onClick={() => setLinking(true)}>Add existing</button><button className="primary" onClick={() => setCreatingCollection(true)}>New collection</button></>}
       </div>
     </header>
 
@@ -116,21 +199,21 @@ export function Collections({ projects, save, replaceMembers, loading, saving, p
 
     {!project && <>
       <div className="pw-tabs pw-project-tabs" role="tablist" aria-label="Project views">
-        {([['personal', 'Personal'], ['shared', 'Shared with me'], ['organisation', 'Organisation'], ['archived', 'Archived']] as const).map(([id, label]) => <button key={id} role="tab" aria-selected={view === id} onClick={() => { setView(id); setSearch('') }}>{label}<span>{projects.filter(projectItem => inView(projectItem, id)).length}</span></button>)}
+        {([['organisation', 'Organisation'], ['shared', 'Shared'], ['personal', 'Personal'], ['archived', 'Archived']] as const).map(([id, label]) => <button key={id} role="tab" aria-selected={view === id} onClick={() => { setView(id); setSearch('') }}>{label}<span>{projects.filter(projectItem => inView(projectItem, id)).length}</span></button>)}
       </div>
       <div className="pw-toolbar"><label className="pw-search"><span className="sr-only">Search projects</span><input type="search" placeholder="Search projects…" value={search} onChange={event => setSearch(event.target.value)} /></label><span>{viewProjects.length} project{viewProjects.length === 1 ? '' : 's'}</span></div>
       {loading && <p className="pw-loading" role="status">Loading projects…</p>}
       {!loading && <div className="pw-card-grid">{visibleProjects.map(item => {
         const linked = item.collections.flatMap(resolve)
         const roots = childrenOf(item, null)
-        return <CollectionCard key={item.id} name={item.name} label={item.kind} mediaId={item.coverMediaId ?? linked.find(group => group.coverMediaId !== null)?.coverMediaId} meta={`${item.mediaCount || linked.reduce((sum, group) => sum + group.mediaCount, 0)} media · ${roots.length} main collection${roots.length === 1 ? '' : 's'}`} detail={`${accessLabel(item)} · ${formatUpdated(item.updatedAt)}`} onOpen={() => openProject(item.id)} onActions={event => openProjectMenu(item, event)} onContextMenu={event => openProjectMenu(item, event)} />
+        return <CollectionCard key={item.id} name={item.name} label={item.kind} mediaId={item.coverMediaId ?? linked.find(group => group.coverMediaId !== null)?.coverMediaId} meta={`${item.mediaCount || linked.reduce((sum, group) => sum + group.mediaCount, 0)} media · ${roots.length} main collection${roots.length === 1 ? '' : 's'}`} detail={`${accessLabel(item)} · ${formatUpdated(item.updatedAt)}`} selected={selectedIds.has(item.id)} onSelect={additive => selectCard(item.id, additive)} onOpen={() => openProject(item.id)} onActions={event => openProjectMenu(item, event)} onContextMenu={event => openProjectMenu(item, event)} />
       })}</div>}
       {!loading && viewProjects.length === 0 && <ProjectEmpty view={view} onCreate={() => setCreatingProject(true)} />}
       {viewProjects.length > 0 && visibleProjects.length === 0 && <NoMatches noun="projects" onClear={() => setSearch('')} />}
       <div className="pw-library-callout"><div><strong>Your media is always available</strong><p>Find a person, revisit processed files, or make another collection in Media Processing.</p></div><button onClick={onProcess}>Open media library</button></div>
     </>}
 
-    {project && !exportSource && <>
+    {project && <>
       <div className="pw-project-meta"><span className={`pw-access pw-access-${project.visibility}`}>{accessLabel(project)}</span><span>Owner: {project.ownerEmail}</span><span>{project.members.length} member{project.members.length === 1 ? '' : 's'}</span><span>{project.mediaCount} media</span></div>
       {project.accessRole === 'viewer' && <div className="pw-note"><strong>View-only project</strong><p>You can browse and export this project. Ask the owner for Editor access to organise collections.</p></div>}
       {(currentChildren.length > 0 || search.trim()) && <div className="pw-toolbar"><label className="pw-search"><span className="sr-only">Search collections</span><input type="search" placeholder="Search all project collections…" value={search} onChange={event => setSearch(event.target.value)} /></label><span>{search.trim() ? `${visibleChildren.length} results` : `${currentChildren.length} collections`}</span>{!collection && canEdit && <button onClick={() => setLinking(true)}>Add existing collection</button>}</div>}
@@ -138,18 +221,18 @@ export function Collections({ projects, save, replaceMembers, loading, saving, p
         const linked = resolve(item)
         const childCount = childrenOf(project, item.id).length
         const fileCount = linked.reduce((total, group) => total + group.mediaCount, 0)
-        return <CollectionCard key={item.id} name={item.name} label={childCount > 0 ? 'Collection folder' : 'Collection'} mediaId={linked.find(group => group.coverMediaId !== null)?.coverMediaId} meta={`${fileCount} media`} detail={`${childCount} collection${childCount === 1 ? '' : 's'}`} onOpen={() => openCollection(item.id)} onActions={canEdit ? event => openFolderMenu(item, event) : undefined} onContextMenu={canEdit ? event => openFolderMenu(item, event) : undefined} />
+        return <CollectionCard key={item.id} name={item.name} label={childCount > 0 ? 'Collection folder' : 'Collection'} mediaId={linked.find(group => group.coverMediaId !== null)?.coverMediaId} meta={`${fileCount} media`} detail={`${childCount} collection${childCount === 1 ? '' : 's'}`} selected={selectedIds.has(item.id)} onSelect={additive => selectCard(item.id, additive)} onOpen={() => openCollection(item.id)} onActions={canEdit ? event => openFolderMenu(item, event) : undefined} onContextMenu={canEdit ? event => openFolderMenu(item, event) : undefined} />
       })}</div></section>}
       {search.trim() && visibleChildren.length === 0 && <NoMatches noun="collections" onClear={() => setSearch('')} />}
       {!collection && currentChildren.length === 0 && <div className="pw-empty"><h2>Ready for your first collection</h2><p>Select media or find a person in your library, then add their collection here.</p>{canEdit && <div className="actions"><button onClick={() => setLinking(true)}>Add existing collection</button><button className="primary" onClick={onProcess}>Open media library</button></div>}</div>}
       {collection && collection.notes && <p className="pw-collection-notes">{collection.notes}</p>}
-      {collection && collection.sources.length > 0 && <section className={currentChildren.length > 0 ? 'pw-media-section' : undefined} aria-labelledby="collection-media"><h2 id="collection-media" className="pw-section-heading">Media in this collection</h2><CollectionMedia key={collection.id} collection={collection} onExport={source => { useUi.getState().openShoot(source.shootId, 'export'); setExportSource(source) }} /></section>}
+      {collection && collection.sources.length > 0 && <section className={currentChildren.length > 0 ? 'pw-media-section' : undefined} aria-labelledby="collection-media"><h2 id="collection-media" className="pw-section-heading">Media in this collection</h2><CollectionMedia key={collection.id} collection={collection} onExport={() => setExporting(collection)} /></section>}
       {collection && collection.sources.length === 0 && currentChildren.length === 0 && <div className="pw-empty"><h2>This collection is empty</h2><p>Create a collection here, or add an existing collection from your processed media.</p>{canEdit && <div className="actions"><button onClick={() => setLinking(true)}>Add existing</button><button className="primary" onClick={() => setCreatingCollection(true)}>New collection</button></div>}</div>}
     </>}
 
-    {project && collection && exportSource && <><button onClick={() => setExportSource(null)}>Back to collection</button><div className="pw-existing"><ExportScreen key={`${exportSource.shootId}-${exportSource.groupId}`} initialGroupIds={[exportSource.groupId]} /></div></>}
+    {exporting && <ExportCollectionDialog collection={exporting} onClose={() => setExporting(null)} />}
 
-    {folderMenu && project && menuCollection && <FolderContextMenu x={folderMenu.x} y={folderMenu.y} name={menuCollection.name} onClose={() => setFolderMenu(null)} onOpen={() => openCollection(menuCollection.id)} onEdit={() => setEditingCollection(menuCollection)} onCreate={() => { openCollection(menuCollection.id); setCreatingCollection(true) }} onAddExisting={() => { openCollection(menuCollection.id); setLinking(true) }} onSendToPremiere={() => {
+    {folderMenu && project && menuCollection && <FolderContextMenu x={folderMenu.x} y={folderMenu.y} name={menuCollection.name} pasteLabel={pasteLabel} onClose={() => setFolderMenu(null)} onOpen={() => openCollection(menuCollection.id)} onCut={() => setClipboardCollection(menuCollection, 'cut')} onCopy={() => setClipboardCollection(menuCollection, 'copy')} onPaste={() => void paste(menuCollection)} onEdit={() => setEditingCollection(menuCollection)} onCreate={() => { openCollection(menuCollection.id); setCreatingCollection(true) }} onAddExisting={() => { openCollection(menuCollection.id); setLinking(true) }} onSendToPremiere={() => {
       void api.sendCollectionToPremiere(menuCollection.id)
         .then(() => notice({ level: 'success', message: `Sent "${menuCollection.name}" to Premiere — open the panel there to see it land.` }))
         .catch(error => notice({ level: 'error', message: String(error) }))
@@ -193,8 +276,17 @@ function Breadcrumb({ project, collection, onProjects, onCollection }: { project
   return <nav className="pw-breadcrumb" aria-label="Breadcrumb"><button onClick={onProjects}>Projects</button><span>/</span>{collection ? <><button onClick={() => onCollection(null)}>{project.name}</button>{trail.map((item, index) => <span className="pw-breadcrumb-part" key={item.id}><span>/</span>{index === trail.length - 1 ? <span aria-current="page">{item.name}</span> : <button onClick={() => onCollection(item.id)}>{item.name}</button>}</span>)}</> : <span aria-current="page">{project.name}</span>}</nav>
 }
 
-function CollectionCard(props: { name: string; label: string; mediaId?: number | null; meta: string; detail: string; onOpen: () => void; onActions?: (event: MouseEvent<HTMLButtonElement>) => void; onContextMenu?: (event: MouseEvent<HTMLElement>) => void }) {
-  return <article className="pw-cover-card" onContextMenu={props.onContextMenu}><button className="pw-card-open" onClick={props.onOpen}><Cover mediaId={props.mediaId} label={props.label} /><div className="pw-card-body"><h2>{props.name}</h2><p>{props.meta}<span>{props.detail}</span></p></div></button>{props.onActions && <button className="pw-card-actions" aria-label={`Actions for ${props.name}`} onClick={props.onActions}>Actions</button>}</article>
+/**
+ * Single click selects, double click opens — the same rule as the media
+ * grid, so nothing in the workspace opens from one click.
+ */
+function CollectionCard(props: { name: string; label: string; mediaId?: number | null; meta: string; detail: string; selected?: boolean; onOpen: () => void; onSelect?: (additive: boolean) => void; onActions?: (event: MouseEvent<HTMLButtonElement>) => void; onContextMenu?: (event: MouseEvent<HTMLElement>) => void }) {
+  return <article className={`pw-cover-card${props.selected ? ' selected' : ''}`} onContextMenu={props.onContextMenu}><button
+    className="pw-card-open"
+    onClick={event => props.onSelect?.(event.ctrlKey || event.metaKey)}
+    onDoubleClick={props.onOpen}
+    onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); props.onOpen() } }}
+  ><Cover mediaId={props.mediaId} label={props.label} /><div className="pw-card-body"><h2>{props.name}</h2><p>{props.meta}<span>{props.detail}</span></p></div></button>{props.onActions && <button className="pw-card-actions" aria-label={`Actions for ${props.name}`} onClick={props.onActions}>Actions</button>}</article>
 }
 
 function Cover({ mediaId, label }: { mediaId?: number | null; label: string }) {
@@ -202,19 +294,22 @@ function Cover({ mediaId, label }: { mediaId?: number | null; label: string }) {
   return <div className="pw-cover">{mediaId != null && !failed ? <img src={thumbUrl(mediaId)} alt="" loading="lazy" onError={() => setFailed(true)} /> : <span>{label}</span>}</div>
 }
 
-function CollectionMedia({ collection, onExport }: { collection: ProjectCollection; onExport: (source: ProjectCollection['sources'][number]) => void }) {
+function CollectionMedia({ collection, onExport }: { collection: ProjectCollection; onExport: () => void }) {
   const [index, setIndex] = useState(0)
   const source = collection.sources[index]
   const shoots = useQuery({ queryKey: ['shoots'], queryFn: api.listShoots })
   if (!source) return null
-  return <><div className="pw-toolbar">{collection.sources.length > 1 && <label>Media source <select value={index} onChange={event => setIndex(Number(event.target.value))}>{collection.sources.map((item, sourceIndex) => <option key={`${item.shootId}-${item.groupId}`} value={sourceIndex}>{shoots.data?.find(shoot => shoot.id === item.shootId)?.name ?? `Source ${sourceIndex + 1}`}</option>)}</select></label>}<button className="primary" onClick={() => onExport(source)}>Export {collection.sources.length > 1 ? 'this source' : 'collection'}</button></div><MediaBrowser key={`${source.shootId}-${source.groupId}`} shootId={source.shootId} groupId={source.groupId} /></>
+  // The source picker only chooses what to *browse*; exporting always takes
+  // the whole collection, which is what "export this collection" means to
+  // someone handing the folder on.
+  return <><div className="pw-toolbar">{collection.sources.length > 1 && <label>Media source <select value={index} onChange={event => setIndex(Number(event.target.value))}>{collection.sources.map((item, sourceIndex) => <option key={`${item.shootId}-${item.groupId}`} value={sourceIndex}>{shoots.data?.find(shoot => shoot.id === item.shootId)?.name ?? `Source ${sourceIndex + 1}`}</option>)}</select></label>}<button className="primary" onClick={onExport}>Export collection</button></div><MediaBrowser key={`${source.shootId}-${source.groupId}`} shootId={source.shootId} groupId={source.groupId} /></>
 }
 
 function ProjectDialog({ project, canManageAccess = true, onClose, onSave, onDelete }: { project?: Project; canManageAccess?: boolean; onClose: () => void; onSave: (name: string, kind: string, visibility: ProjectVisibility) => void; onDelete?: () => void }) {
   const [name, setName] = useState(project?.name ?? '')
   const [kind, setKind] = useState(project?.kind ?? 'Esports tournament')
   const [visibility, setVisibility] = useState<ProjectVisibility>(project?.visibility ?? 'private')
-  return <WorkspaceDialog title={project ? 'Project settings' : 'New project'} onClose={onClose}><form onSubmit={event => { event.preventDefault(); onSave(name.trim(), kind, visibility) }}><label className="field">Project name<input autoFocus required maxLength={120} value={name} onChange={event => setName(event.target.value)} placeholder="e.g. BGIS 2026" /></label><label className="field">Project type<select value={kind} onChange={event => setKind(event.target.value)}>{PROJECT_TYPES.map(item => <option key={item}>{item}</option>)}</select></label>{canManageAccess ? <label className="field">Access<select value={visibility} onChange={event => setVisibility(event.target.value as ProjectVisibility)}><option value="private">Private · only you</option><option value="invited">Invited people</option><option value="organisation">Everyone in your organisation</option></select></label> : <p className="pw-help">Only the project owner can change access or delete this project.</p>}{!project && <ProjectTemplatePreview kind={kind} />}{project && <p className="pw-help">Changing the project type keeps its current collections.</p>}<div className="pw-dialog-actions">{onDelete && <button type="button" className="danger pw-delete-project" onClick={onDelete}>Delete project</button>}<button type="button" onClick={onClose}>Cancel</button><button className="primary" disabled={!name.trim()}>{project ? 'Save changes' : 'Create project'}</button></div></form></WorkspaceDialog>
+  return <WorkspaceDialog title={project ? 'Project settings' : 'New project'} onClose={onClose}><form onSubmit={event => { event.preventDefault(); onSave(name.trim(), kind, visibility) }}><label className="field">Project name<input autoFocus required maxLength={120} value={name} onChange={event => setName(event.target.value)} placeholder="e.g. BGIS 2026" /></label><label className="field">Project type<select value={kind} onChange={event => setKind(event.target.value)}>{PROJECT_TYPES.map(item => <option key={item}>{item}</option>)}</select></label>{canManageAccess ? <label className="field">Access<select value={visibility} onChange={event => setVisibility(event.target.value as ProjectVisibility)}><option value="private">Private · only you</option><option value="invited">Invited people</option><option value="organisation">Everyone in your organisation</option></select></label> : <p className="pw-help">Only the project owner can change access or delete this project.</p>}{!project && <><p className="pw-help">The project starts empty. Add collections as you go, or publish processed media straight into it.</p><details className="pw-autoteam"><summary>Auto team-up &mdash; optional</summary><RosterImport compact /></details></>}<div className="pw-dialog-actions">{onDelete && <button type="button" className="danger pw-delete-project" onClick={onDelete}>Delete project</button>}<button type="button" onClick={onClose}>Cancel</button><button className="primary" disabled={!name.trim()}>{project ? 'Save changes' : 'Create project'}</button></div></form></WorkspaceDialog>
 }
 
 function ShareDialog({ project, busy, onClose, onSave }: { project: Project; busy: boolean; onClose: () => void; onSave: (members: ProjectMember[]) => Promise<void> }) {
@@ -252,10 +347,10 @@ function CollectionSettingsDialog({ project, projects, collection, onClose, onSa
   return <WorkspaceDialog title="Collection settings" onClose={onClose}><form onSubmit={event => { event.preventDefault(); const clean = name.trim(); if (siblings.some(item => item.id !== collection.id && item.name.toLocaleLowerCase() === clean.toLocaleLowerCase())) { setError('A collection with this name already exists in that location.'); return } onSave(clean, notes.trim() || null, targetParent, targetProjectId) }}><label className="field">Name<input autoFocus required maxLength={120} value={name} onChange={event => setName(event.target.value)} /></label><label className="field">Project<select value={targetProjectId} onChange={event => { setTargetProjectId(event.target.value); setParentId('root'); setError('') }}>{editableProjects.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label><label className="field">Location<select value={parentId} onChange={event => setParentId(event.target.value)}><option value="root">Project root</option>{destination.collections.filter(item => !blocked.has(item.id)).map(item => <option key={item.id} value={item.id}>{`${'— '.repeat(collectionTrail(destination, item).length)}${item.name}`}</option>)}</select></label>{targetProjectId !== project.id && <p className="pw-help">Saving moves this collection and everything inside it to {destination.name}.</p>}<label className="field">Notes<textarea maxLength={500} value={notes} onChange={event => setNotes(event.target.value)} placeholder="Purpose, deliverable, sponsor, or editing notes" /></label>{error && <p role="alert" className="pw-error">{error}</p>}<div className="pw-dialog-actions"><button type="button" className="danger pw-delete-project" onClick={onRemove}>Remove collection</button><button type="button" onClick={onDuplicate}>Duplicate</button><button type="button" onClick={onClose}>Cancel</button><button className="primary" disabled={!name.trim()}>Save changes</button></div></form></WorkspaceDialog>
 }
 
-function FolderContextMenu(props: { x: number; y: number; name: string; onClose: () => void; onOpen: () => void; onEdit: () => void; onCreate: () => void; onAddExisting: () => void; onSendToPremiere: () => void; onRemove: () => void }) {
+function FolderContextMenu(props: { x: number; y: number; name: string; pasteLabel: string | null; onClose: () => void; onOpen: () => void; onEdit: () => void; onCreate: () => void; onAddExisting: () => void; onCut: () => void; onCopy: () => void; onPaste: () => void; onSendToPremiere: () => void; onRemove: () => void }) {
   useCloseMenu(props.onClose)
   const run = (action: () => void) => { props.onClose(); action() }
-  return <MenuLayer x={props.x} y={props.y} label={`${props.name} collection actions`} onClose={props.onClose}><strong>Collection actions</strong><button autoFocus role="menuitem" onClick={() => run(props.onOpen)}>Open</button><button role="menuitem" onClick={() => run(props.onEdit)}>Settings</button><button role="menuitem" onClick={() => run(props.onCreate)}>New collection inside</button><button role="menuitem" onClick={() => run(props.onAddExisting)}>Add existing inside</button><button role="menuitem" onClick={() => run(props.onSendToPremiere)}>Send to Premiere</button><button role="menuitem" className="danger" onClick={() => run(props.onRemove)}>Remove from project</button></MenuLayer>
+  return <MenuLayer x={props.x} y={props.y} label={`${props.name} collection actions`} onClose={props.onClose}><strong>Collection actions</strong><button autoFocus role="menuitem" onClick={() => run(props.onOpen)}>Open</button><button role="menuitem" onClick={() => run(props.onCut)}>Cut</button><button role="menuitem" onClick={() => run(props.onCopy)}>Copy</button><button role="menuitem" disabled={!props.pasteLabel} onClick={() => run(props.onPaste)}>{props.pasteLabel ?? 'Paste'}</button><button role="menuitem" onClick={() => run(props.onEdit)}>Settings</button><button role="menuitem" onClick={() => run(props.onCreate)}>New collection inside</button><button role="menuitem" onClick={() => run(props.onAddExisting)}>Add existing inside</button><button role="menuitem" onClick={() => run(props.onSendToPremiere)}>Send to Premiere</button><button role="menuitem" className="danger" onClick={() => run(props.onRemove)}>Remove from project</button></MenuLayer>
 }
 
 function ProjectContextMenu(props: { x: number; y: number; project: Project; onClose: () => void; onOpen: () => void; onEdit: () => void; onShare: () => void; onArchive: () => void; onDelete: () => void }) {

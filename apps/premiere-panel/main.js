@@ -6,49 +6,81 @@
  */
 
 const BRIDGE_PORT = 51823; // must match premiere_api.rs's BRIDGE_PORT and manifest.json
-const SETTINGS_KEY = "skwad-premiere-panel-settings";
+// Fixed shared secret, not a per-install one — see the rationale in
+// premiere_api.rs's module doc comment. Must match BRIDGE_TOKEN there exactly.
+const BRIDGE_TOKEN = "skwad-premiere-bridge-v1";
 
 const els = {
-  setup: document.getElementById("setup"),
   toolbar: document.getElementById("toolbar"),
+  signedInAs: document.getElementById("signedInAs"),
   status: document.getElementById("status"),
+  tabs: document.getElementById("tabs"),
+  breadcrumb: document.getElementById("breadcrumb"),
   list: document.getElementById("list"),
-  token: document.getElementById("token"),
-  connect: document.getElementById("connect"),
   refresh: document.getElementById("refresh"),
-  reconfigure: document.getElementById("reconfigure"),
 };
 
-let bridgeToken = null;
 let pendingPollTimer = null;
 const PENDING_POLL_MS = 3000;
 
-function loadSavedSettings() {
-  try {
-    const raw = localStorage.getItem(SETTINGS_KEY);
-    return raw ? JSON.parse(raw) : null;
-  } catch {
-    return null;
-  }
-}
+// Project/Collection navigation state — mirrors the app's own Collections
+// screen (apps/desktop/src/projectWorkspace/nestedCollections.tsx) so
+// browsing here feels the same as browsing there.
+const VIEWS = [
+  ["organisation", "Organisation"],
+  ["shared", "Shared"],
+  ["personal", "Personal"],
+  ["archived", "Archived"],
+];
+let allProjects = [];
+let currentView = "personal";
+let currentProjectId = null;
+let currentCollectionId = null; // null = the project's root level
 
-function saveSettings(settings) {
-  try {
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
-  } catch {
-    // Per-viewer convenience only; a failure here just means re-entering
-    // the folder/token next time the panel opens.
+// --- ported 1:1 from nestedCollections.tsx so the panel sorts projects into
+// the same tabs and labels them the same way the app does ---
+function inView(project, view) {
+  if (view === "archived") return project.status === "archived" && project.accessRole === "owner";
+  if (project.status === "archived") return false;
+  if (project.visibility === "organisation") return view === "organisation";
+  if (view === "personal") return project.accessRole === "owner";
+  if (view === "shared") return project.accessRole !== "owner";
+  return false;
+}
+function accessLabel(project) {
+  if (project.visibility === "organisation") return "Organisation";
+  if (project.accessRole !== "owner") return `Shared · ${project.accessRole}`;
+  if (project.visibility === "invited") return "Invited people";
+  return "Private";
+}
+function childrenOf(project, parentId) {
+  return project.collections
+    .filter((c) => c.parentId === parentId)
+    .sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name));
+}
+function collectionTrail(project, collectionId) {
+  const trail = [];
+  const seen = new Set();
+  let current = project.collections.find((c) => c.id === collectionId);
+  while (current && !seen.has(current.id)) {
+    seen.add(current.id);
+    trail.unshift(current);
+    current = current.parentId ? project.collections.find((c) => c.id === current.parentId) : undefined;
   }
+  return trail;
 }
 
 async function bridgeFetch(pathname) {
   // UXP's network sandbox rejects literal IP addresses — "localhost" is
   // required even though it resolves to the same loopback address.
   const response = await fetch(`http://localhost:${BRIDGE_PORT}${pathname}`, {
-    headers: { Authorization: `Bearer ${bridgeToken}` },
+    headers: { Authorization: `Bearer ${BRIDGE_TOKEN}` },
   });
   if (!response.ok) {
-    throw new Error(`SKWAD bridge returned ${response.status} for ${pathname}`);
+    const body = await response.text().catch(() => "");
+    const error = new Error(body || `SKWAD bridge returned ${response.status} for ${pathname}`);
+    error.status = response.status;
+    throw error;
   }
   return response.json();
 }
@@ -57,27 +89,11 @@ function setStatus(message) {
   els.status.textContent = message;
 }
 
-function showSetup() {
-  stopPendingPoll();
-  els.setup.hidden = false;
-  els.toolbar.hidden = true;
-  els.list.innerHTML = "";
-  const saved = loadSavedSettings();
-  els.token.value = (saved && saved.token) || "";
-}
-
-async function connect() {
-  const token = els.token.value.trim();
-  if (!token) {
-    setStatus("Paste the bridge token first — see premiere-bridge.json in SKWAD Media Organiser's app data folder.");
-    return;
-  }
-  bridgeToken = token;
-
-  saveSettings({ token });
-  els.setup.hidden = true;
+async function start() {
   els.toolbar.hidden = false;
-  await loadCollections();
+  currentProjectId = null;
+  currentCollectionId = null;
+  await loadProjects();
   startPendingPoll();
 }
 
@@ -122,44 +138,214 @@ async function checkPendingJobs() {
   }
 }
 
-async function loadCollections() {
-  setStatus("Loading collections…");
+async function loadProjects() {
+  setStatus("Loading projects…");
   els.list.innerHTML = "";
   try {
-    const collections = await bridgeFetch("/collections");
-    if (collections.length === 0) {
-      setStatus("No collections found. Create one in SKWAD Media Organiser first.");
-      return;
-    }
+    const response = await bridgeFetch("/projects");
+    allProjects = response.projects;
+    els.signedInAs.textContent = `Signed in as ${response.email}`;
     setStatus("");
-    for (const collection of collections) {
-      els.list.appendChild(renderCollection(collection));
-    }
+    render();
   } catch (error) {
-    setStatus(`Could not reach SKWAD Media Organiser: ${error.message}. Is it running?`);
+    els.signedInAs.textContent = "";
+    setStatus(
+      error.status
+        ? `SKWAD Media Organiser: ${error.message}`
+        : `Could not reach SKWAD Media Organiser: ${error.message}. Is it running?`,
+    );
   }
 }
 
-function renderCollection(collection) {
+function render() {
+  if (currentProjectId === null) {
+    els.tabs.hidden = false;
+    els.breadcrumb.hidden = true;
+    renderTabs();
+    renderProjectsList();
+    return;
+  }
+  const project = allProjects.find((p) => p.id === currentProjectId);
+  if (!project) {
+    // The project disappeared (e.g. access revoked) since it was opened.
+    currentProjectId = null;
+    currentCollectionId = null;
+    render();
+    return;
+  }
+  els.tabs.hidden = true;
+  els.breadcrumb.hidden = false;
+  renderBreadcrumb(project);
+  renderCollectionsList(project);
+}
+
+function renderTabs() {
+  els.tabs.innerHTML = "";
+  for (const [id, label] of VIEWS) {
+    const count = allProjects.filter((p) => inView(p, id)).length;
+    const button = document.createElement("button");
+    button.setAttribute("role", "tab");
+    button.setAttribute("aria-selected", String(id === currentView));
+    button.innerHTML = `${label}<span>${count}</span>`;
+    button.addEventListener("click", () => {
+      currentView = id;
+      render();
+    });
+    els.tabs.appendChild(button);
+  }
+}
+
+function renderProjectsList() {
+  els.list.innerHTML = "";
+  const visible = allProjects.filter((p) => inView(p, currentView));
+  if (visible.length === 0) {
+    setStatus("No projects here. Create one in SKWAD Media Organiser first.");
+    return;
+  }
+  setStatus("");
+  for (const project of visible) {
+    const roots = childrenOf(project, null);
+    els.list.appendChild(
+      renderNode({
+        name: project.name,
+        detail: `${accessLabel(project)} · ${project.ownerEmail}`,
+        meta: `${roots.length} main collection${roots.length === 1 ? "" : "s"}`,
+        onOpen: () => {
+          currentProjectId = project.id;
+          currentCollectionId = null;
+          render();
+        },
+      }),
+    );
+  }
+}
+
+function renderBreadcrumb(project) {
+  els.breadcrumb.innerHTML = "";
+  const crumb = (label, onClick) => {
+    if (onClick) {
+      const button = document.createElement("button");
+      button.textContent = label;
+      button.addEventListener("click", onClick);
+      els.breadcrumb.appendChild(button);
+    } else {
+      const span = document.createElement("span");
+      span.textContent = label;
+      els.breadcrumb.appendChild(span);
+    }
+  };
+  const sep = () => {
+    const span = document.createElement("span");
+    span.textContent = "/";
+    els.breadcrumb.appendChild(span);
+  };
+
+  crumb("Projects", () => {
+    currentProjectId = null;
+    currentCollectionId = null;
+    render();
+  });
+  sep();
+  if (currentCollectionId === null) {
+    crumb(project.name, null);
+    return;
+  }
+  crumb(project.name, () => {
+    currentCollectionId = null;
+    render();
+  });
+  const trail = collectionTrail(project, currentCollectionId);
+  trail.forEach((node, index) => {
+    sep();
+    const isLast = index === trail.length - 1;
+    crumb(
+      node.name,
+      isLast
+        ? null
+        : () => {
+            currentCollectionId = node.id;
+            render();
+          },
+    );
+  });
+}
+
+function renderCollectionsList(project) {
+  els.list.innerHTML = "";
+  const current = currentCollectionId === null ? null : project.collections.find((c) => c.id === currentCollectionId);
+
+  if (current && current.mediaCount > 0) {
+    const row = document.createElement("div");
+    row.className = "node";
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    meta.innerHTML = `<div class="name">Media in this collection</div><div class="detail">${current.mediaCount} file${current.mediaCount === 1 ? "" : "s"}</div>`;
+    const actions = document.createElement("div");
+    actions.className = "actions";
+    const button = document.createElement("button");
+    button.className = "primary";
+    button.textContent = "Import";
+    button.addEventListener("click", () => importCollection(current, button));
+    actions.appendChild(button);
+    row.append(meta, actions);
+    els.list.appendChild(row);
+  }
+
+  const children = childrenOf(project, currentCollectionId);
+  if (children.length === 0 && !(current && current.mediaCount > 0)) {
+    setStatus("This collection is empty.");
+  } else {
+    setStatus("");
+  }
+  for (const collection of children) {
+    const subCount = childrenOf(project, collection.id).length;
+    const detail = subCount > 0 ? `${subCount} collection${subCount === 1 ? "" : "s"}` : `${collection.mediaCount} file${collection.mediaCount === 1 ? "" : "s"}`;
+    const node = renderNode({
+      name: collection.name,
+      detail,
+      onOpen: () => {
+        currentCollectionId = collection.id;
+        render();
+      },
+    });
+    if (collection.mediaCount > 0) {
+      const button = document.createElement("button");
+      button.className = "primary";
+      button.textContent = "Import";
+      button.addEventListener("click", () => importCollection(collection, button));
+      node.querySelector(".actions").appendChild(button);
+    }
+    els.list.appendChild(node);
+  }
+}
+
+/** A clickable name/detail row with an empty `.actions` slot callers can add buttons into. */
+function renderNode({ name, detail, meta, onOpen }) {
   const row = document.createElement("div");
-  row.className = "collection";
+  row.className = "node";
 
-  const meta = document.createElement("div");
-  meta.className = "meta";
-  const name = document.createElement("div");
-  name.className = "name";
-  name.textContent = collection.name;
-  const project = document.createElement("div");
-  project.className = "project";
-  project.textContent = `${collection.projectName} · ${collection.mediaCount} file${collection.mediaCount === 1 ? "" : "s"}`;
-  meta.append(name, project);
+  const metaEl = document.createElement("div");
+  metaEl.className = "meta";
+  metaEl.addEventListener("click", onOpen);
+  const nameEl = document.createElement("div");
+  nameEl.className = "name";
+  nameEl.textContent = name;
+  metaEl.appendChild(nameEl);
+  if (detail) {
+    const detailEl = document.createElement("div");
+    detailEl.className = "detail";
+    detailEl.textContent = meta ? `${detail} · ${meta}` : detail;
+    metaEl.appendChild(detailEl);
+  }
 
-  const button = document.createElement("button");
-  button.textContent = "Import";
-  button.disabled = collection.mediaCount === 0;
-  button.addEventListener("click", () => importCollection(collection, button));
+  const actions = document.createElement("div");
+  actions.className = "actions";
+  const open = document.createElement("button");
+  open.textContent = "Open";
+  open.addEventListener("click", onOpen);
+  actions.appendChild(open);
 
-  row.append(meta, button);
+  row.append(metaEl, actions);
   return row;
 }
 
@@ -213,12 +399,6 @@ async function importIntoPremiere(binName, filePaths) {
   return ok ? filePaths.length : 0;
 }
 
-els.connect.addEventListener("click", connect);
-els.refresh.addEventListener("click", loadCollections);
-els.reconfigure.addEventListener("click", showSetup);
+els.refresh.addEventListener("click", loadProjects);
 
-showSetup();
-const saved = loadSavedSettings();
-if (saved && saved.token) {
-  connect();
-}
+start();
