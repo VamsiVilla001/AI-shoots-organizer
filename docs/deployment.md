@@ -36,14 +36,18 @@ cross-compile shortcut.
   is a client of a private server it starts on loopback, so the installer ships
   both binaries; without the sidecar the app opens, says the local server did not
   start, and can do nothing else. `npm run package:win` builds and stages it.
-- **The face models** (~280 MB) — only when the build machine has fetched them
-  and the build passes `--config src-tauri/tauri.models.conf.json`. They are
-  gitignored, so this is opt-in: a glob matching nothing is a hard build error,
-  which is why it lives in a separate config file rather than the default one.
-  With them bundled, the first launch installs them into the app data folder
-  (`models::seed_from_bundle`) and face recognition works out of the box.
-  Without them, the app still runs — sorting into groups and exporting need no
-  models at all — and Settings explains what to fetch.
+- **The face models** (~191 MB) — **not currently, on any build path.**
+  `tauri.conf.json` lists only the Premiere panel under `bundle.resources`, and
+  there is no `tauri.models.conf.json` overlay and no `models::seed_from_bundle`
+  to copy them out of a bundle on first launch. An earlier revision of this
+  document described all three; none of them exist in the tree.
+  In practice the models are fetched once per machine (`scripts/fetch-models.ps1`
+  / `.sh`) and live in `<library folder>/models/`, which is where
+  `ModelRegistry` looks. Without them the app still runs — indexing, sorting
+  into groups and exporting need no models at all — and Settings explains what
+  to fetch. Making a self-contained installer means adding the resource entry
+  *and* the seeding code; the `with_models` input on the release workflow
+  fetches them into the build, which is only half of it.
 - **FFmpeg** — never bundled (size, and its licence terms). Needed for videos,
   HEIC and camera raw; JPEG/PNG shoots work without it. `brew install ffmpeg`
   on macOS, `winget install Gyan.FFmpeg` on Windows, or point
