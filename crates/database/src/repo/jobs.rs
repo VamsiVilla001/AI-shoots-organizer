@@ -1,20 +1,33 @@
 //! The resumable job queue behind §18.
 //!
-//! Jobs live in SQLite rather than memory so that closing the application mid
-//! import leaves the work recoverable: on the next launch anything stuck in
+//! Jobs live in the database rather than memory so that closing the application
+//! mid import leaves the work recoverable: on the next launch anything stuck in
 //! `running` is returned to `queued` and picked up again.
+//!
+//! ## `FOR UPDATE SKIP LOCKED`
+//!
+//! Every claim below ends in `FOR UPDATE SKIP LOCKED`, which the SQLite version
+//! had no need for and no way to express. SQLite serialised writers behind one
+//! lock, so `UPDATE … WHERE id = (SELECT … LIMIT 1) RETURNING *` was atomic by
+//! construction. Postgres runs the workers genuinely concurrently: without the
+//! locking clause two workers evaluate the same sub-select, both pick the same
+//! row, and the second silently re-claims a job the first is already running —
+//! which is exactly the double-analysis the `busy.media_id` guards exist to
+//! prevent. `SKIP LOCKED` makes the loser move to the next candidate instead of
+//! blocking, so the lanes keep their throughput.
 
-use rusqlite::{params, Connection, OptionalExtension, Row};
+use postgres::Row;
 
 use super::get;
+use crate::client::Db;
 use crate::models::{ActiveJob, Job, JobKind, JobState, ProcessingProgress, StageProgress};
-use crate::{now, Result};
+use crate::{now, params, Result};
 
 /// A job is abandoned after this many failed attempts, so one corrupt file
 /// cannot spin the workers forever.
 pub const MAX_ATTEMPTS: i64 = 3;
 
-fn map(row: &Row<'_>) -> rusqlite::Result<Job> {
+fn map(row: &Row) -> Result<Job> {
     Ok(Job {
         id: get(row, "id")?,
         shoot_id: get(row, "shoot_id")?,
@@ -31,41 +44,43 @@ fn map(row: &Row<'_>) -> rusqlite::Result<Job> {
     })
 }
 
+fn map_opt(row: Option<Row>) -> Result<Option<Job>> {
+    row.as_ref().map(map).transpose()
+}
+
 pub fn enqueue(
-    conn: &Connection,
+    conn: &mut dyn Db,
     shoot_id: i64,
     kind: JobKind,
     media_id: Option<i64>,
     priority: i64,
     payload: Option<&str>,
 ) -> Result<i64> {
-    conn.execute(
+    let row = conn.row_one(
         "INSERT INTO jobs (shoot_id, media_id, kind, priority, payload, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![shoot_id, media_id, kind, priority, payload, now()],
+         VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING id",
+        params![shoot_id, media_id, kind.as_str(), priority, payload, now()],
     )?;
-    Ok(conn.last_insert_rowid())
+    get(&row, "id")
 }
 
 /// Enqueues only if an equivalent job is not already waiting or running, so
 /// re-triggering processing does not pile up duplicates.
 pub fn enqueue_unique(
-    conn: &Connection,
+    conn: &mut dyn Db,
     shoot_id: i64,
     kind: JobKind,
     media_id: Option<i64>,
     priority: i64,
 ) -> Result<Option<i64>> {
-    let existing: Option<i64> = conn
-        .query_row(
-            "SELECT id FROM jobs
-              WHERE shoot_id = ?1 AND kind = ?2 AND state IN ('queued','running')
-                AND ((media_id IS NULL AND ?3 IS NULL) OR media_id = ?3)
-              LIMIT 1",
-            params![shoot_id, kind, media_id],
-            |r| r.get(0),
-        )
-        .optional()?;
+    let existing = conn.row_opt(
+        "SELECT id FROM jobs
+          WHERE shoot_id = $1 AND kind = $2 AND state IN ('queued','running')
+            AND ((media_id IS NULL AND $3::bigint IS NULL) OR media_id = $3::bigint)
+          LIMIT 1",
+        params![shoot_id, kind.as_str(), media_id],
+    )?;
     if existing.is_some() {
         return Ok(None);
     }
@@ -74,61 +89,52 @@ pub fn enqueue_unique(
 
 /// Atomically claims the next queued job. Returns `None` when the queue for
 /// this shoot (or all shoots, when `shoot_id` is `None`) is empty.
-///
-/// The claim is a single `UPDATE ... RETURNING` so two workers racing on the
-/// same row cannot both win it.
-pub fn claim_next(conn: &Connection, shoot_id: Option<i64>) -> Result<Option<Job>> {
-    let job = conn
-        .prepare(
-            "UPDATE jobs SET state = 'running', started_at = ?1, attempts = attempts + 1
-              WHERE id = (
-                  SELECT id FROM jobs
-                   WHERE state = 'queued' AND (?2 IS NULL OR shoot_id = ?2)
-                   ORDER BY priority ASC, id ASC LIMIT 1
-              )
-          RETURNING *",
-        )?
-        .query_row(params![now(), shoot_id], map)
-        .optional()?;
-    Ok(job)
+pub fn claim_next(conn: &mut dyn Db, shoot_id: Option<i64>) -> Result<Option<Job>> {
+    map_opt(conn.row_opt(
+        "UPDATE jobs SET state = 'running', started_at = $1, attempts = attempts + 1
+          WHERE id = (
+              SELECT id FROM jobs
+               WHERE state = 'queued' AND ($2::bigint IS NULL OR shoot_id = $2::bigint)
+               ORDER BY priority ASC, id ASC LIMIT 1
+               FOR UPDATE SKIP LOCKED
+          )
+      RETURNING *",
+        params![now(), shoot_id],
+    )?)
 }
 
 /// Claims only work that does not construct or run an AI engine. Additional
 /// workers use this lane so scanning and thumbnails retain I/O concurrency
 /// while a single worker owns the memory-hungry GPU sessions.
-pub fn claim_next_io(conn: &Connection) -> Result<Option<Job>> {
-    let job = conn
-        .prepare(
-            "UPDATE jobs SET state = 'running', started_at = ?1, attempts = attempts + 1
-              WHERE id = (
-                  SELECT id FROM jobs
-                   WHERE state = 'queued' AND kind IN ('scan', 'thumbnail', 'proxy')
-                   ORDER BY priority ASC, id ASC LIMIT 1
-              )
-          RETURNING *",
-        )?
-        .query_row(params![now()], map)
-        .optional()?;
-    Ok(job)
+pub fn claim_next_io(conn: &mut dyn Db) -> Result<Option<Job>> {
+    map_opt(conn.row_opt(
+        "UPDATE jobs SET state = 'running', started_at = $1, attempts = attempts + 1
+          WHERE id = (
+              SELECT id FROM jobs
+               WHERE state = 'queued' AND kind IN ('scan', 'thumbnail', 'proxy')
+               ORDER BY priority ASC, id ASC LIMIT 1
+               FOR UPDATE SKIP LOCKED
+          )
+      RETURNING *",
+        params![now()],
+    )?)
 }
 
 /// Claims AI and shoot-wide processing while leaving scans, thumbnails and proxies to
 /// the I/O worker. Keeping the lanes independent lets GPU inference overlap
 /// image indexing instead of waiting behind the entire thumbnail queue.
-pub fn claim_next_compute(conn: &Connection) -> Result<Option<Job>> {
-    let job = conn
-        .prepare(
-            "UPDATE jobs SET state = 'running', started_at = ?1, attempts = attempts + 1
-              WHERE id = (
-                  SELECT id FROM jobs
-                   WHERE state = 'queued' AND kind NOT IN ('scan', 'thumbnail', 'proxy')
-                   ORDER BY priority ASC, id ASC LIMIT 1
-              )
-          RETURNING *",
-        )?
-        .query_row(params![now()], map)
-        .optional()?;
-    Ok(job)
+pub fn claim_next_compute(conn: &mut dyn Db) -> Result<Option<Job>> {
+    map_opt(conn.row_opt(
+        "UPDATE jobs SET state = 'running', started_at = $1, attempts = attempts + 1
+          WHERE id = (
+              SELECT id FROM jobs
+               WHERE state = 'queued' AND kind NOT IN ('scan', 'thumbnail', 'proxy')
+               ORDER BY priority ASC, id ASC LIMIT 1
+               FOR UPDATE SKIP LOCKED
+          )
+      RETURNING *",
+        params![now()],
+    )?)
 }
 
 /// Each lane rotates independently across shoots. Multiple compute workers
@@ -143,14 +149,14 @@ pub enum WorkerLane {
 /// Atomically claim the next ready shoot's head job after `last_shoot`.
 /// Priority and FIFO still apply within each shoot. A pending dependency does
 /// not consume attempts or block ready work belonging to another shoot.
-pub fn claim_next_fair(conn: &Connection, lane: WorkerLane, last_shoot: Option<i64>) -> Result<Option<Job>> {
+pub fn claim_next_fair(conn: &mut dyn Db, lane: WorkerLane, last_shoot: Option<i64>) -> Result<Option<Job>> {
     claim_next_parallel(conn, lane, last_shoot, &[])
 }
 
 /// Multiple compute workers may analyse distinct media in the same shoot.
 /// Finishing stages are exclusive within a shoot and must wait for all media.
 pub fn claim_next_parallel(
-    conn: &Connection,
+    conn: &mut dyn Db,
     lane: WorkerLane,
     last_shoot: Option<i64>,
     paused_shoots: &[i64],
@@ -161,6 +167,10 @@ pub fn claim_next_parallel(
         WorkerLane::Compute => "kind NOT IN ('scan', 'thumbnail', 'proxy')",
     };
     // Both interpolations are application constants, never user-supplied SQL.
+    //
+    // `s.id <> ALL($3)` replaces `s.id NOT IN (SELECT value FROM json_each(?3))`:
+    // the paused list no longer has to be marshalled through JSON because a
+    // Postgres parameter can simply be an array of bigints.
     let sql = format!(
         "WITH heads AS (
             SELECT (
@@ -180,13 +190,13 @@ pub fn claim_next_parallel(
                  ORDER BY candidate.priority, candidate.id LIMIT 1
             ) AS job_id
             FROM shoots s
-            WHERE s.id NOT IN (SELECT value FROM json_each(?3)) AND NOT EXISTS (
+            WHERE s.id <> ALL($3) AND NOT EXISTS (
                 SELECT 1 FROM jobs
                  WHERE shoot_id = s.id AND state = 'running'
                    AND kind IN ('recognise', 'cluster', 'albums')
             )
         )
-        UPDATE jobs SET state = 'running', started_at = ?1, attempts = attempts + 1
+        UPDATE jobs SET state = 'running', started_at = $1, attempts = attempts + 1
         WHERE id = (
             SELECT j.id FROM heads h JOIN jobs j ON j.id = h.job_id
             WHERE (
@@ -217,20 +227,18 @@ pub fn claim_next_parallel(
             ORDER BY (SELECT COUNT(*) FROM jobs running
                        WHERE running.shoot_id = j.shoot_id AND running.state = 'running'
                          AND running.kind IN ('analysePhoto', 'analyseVideo')),
-                     CASE WHEN ?2 IS NULL OR j.shoot_id > ?2 THEN 0 ELSE 1 END,
+                     CASE WHEN $2::bigint IS NULL OR j.shoot_id > $2::bigint THEN 0 ELSE 1 END,
                      j.shoot_id
             LIMIT 1
+            FOR UPDATE OF j SKIP LOCKED
         ) RETURNING *"
     );
-    Ok(conn
-        .prepare(&sql)?
-        .query_row(params![now(), last_shoot, serde_json::to_string(paused_shoots)?], map)
-        .optional()?)
+    map_opt(conn.row_opt(&sql, params![now(), last_shoot, paused_shoots])?)
 }
 
-pub fn complete(conn: &Connection, id: i64) -> Result<()> {
-    conn.execute(
-        "UPDATE jobs SET state = 'done', finished_at = ?2, error = NULL WHERE id = ?1",
+pub fn complete(conn: &mut dyn Db, id: i64) -> Result<()> {
+    conn.exec(
+        "UPDATE jobs SET state = 'done', finished_at = $2, error = NULL WHERE id = $1",
         params![id, now()],
     )?;
     Ok(())
@@ -238,68 +246,79 @@ pub fn complete(conn: &Connection, id: i64) -> Result<()> {
 
 /// Records a failure. Below [`MAX_ATTEMPTS`] the job goes back to `queued` for
 /// another try; past it, it stays failed and surfaces in the UI.
-pub fn fail(conn: &Connection, id: i64, error: &str) -> Result<JobState> {
-    let attempts: i64 = conn.query_row("SELECT attempts FROM jobs WHERE id = ?1", params![id], |r| r.get(0))?;
-    let state = if attempts < MAX_ATTEMPTS {
-        JobState::Queued
-    } else {
-        JobState::Failed
-    };
-    conn.execute(
-        "UPDATE jobs SET state = ?2, error = ?3, finished_at = ?4 WHERE id = ?1",
-        params![id, state, error, now()],
+pub fn fail(conn: &mut dyn Db, id: i64, error: &str) -> Result<JobState> {
+    // One statement rather than a read of `attempts` followed by a write: with
+    // concurrent workers the two could interleave and a job could be retried
+    // past its budget.
+    let row = conn.row_one(
+        "UPDATE jobs
+            SET state = CASE WHEN attempts < $2 THEN 'queued' ELSE 'failed' END,
+                error = $3,
+                finished_at = $4
+          WHERE id = $1
+      RETURNING state",
+        params![id, MAX_ATTEMPTS, error, now()],
     )?;
-    Ok(state)
+    let state: String = get(&row, "state")?;
+    JobState::parse(&state).ok_or_else(|| crate::DbError::other(format!("unknown job state `{state}`")))
 }
 
 /// Returns jobs abandoned by a previous run to the queue. Called once at
 /// startup — this is what makes processing resumable across restarts.
-pub fn requeue_stale(conn: &Connection) -> Result<usize> {
-    Ok(conn.execute(
+pub fn requeue_stale(conn: &mut dyn Db) -> Result<usize> {
+    let n = conn.exec(
         "UPDATE jobs SET state = 'queued', started_at = NULL
-          WHERE state = 'running' AND attempts < ?1",
+          WHERE state = 'running' AND attempts < $1",
         params![MAX_ATTEMPTS],
-    )?)
+    )?;
+    Ok(n as usize)
 }
 
 /// Retries everything that gave up, for the "Resume Processing" action.
-pub fn retry_failed(conn: &Connection, shoot_id: i64) -> Result<usize> {
-    Ok(conn.execute(
+pub fn retry_failed(conn: &mut dyn Db, shoot_id: i64) -> Result<usize> {
+    let n = conn.exec(
         "UPDATE jobs SET state = 'queued', attempts = 0, error = NULL, started_at = NULL, finished_at = NULL
-          WHERE shoot_id = ?1 AND state = 'failed'",
+          WHERE shoot_id = $1 AND state = 'failed'",
         params![shoot_id],
-    )?)
+    )?;
+    Ok(n as usize)
 }
 
-pub fn cancel_for_shoot(conn: &Connection, shoot_id: i64) -> Result<usize> {
-    Ok(conn.execute(
-        "UPDATE jobs SET state = 'cancelled', finished_at = ?2 WHERE shoot_id = ?1 AND state IN ('queued','running')",
+pub fn cancel_for_shoot(conn: &mut dyn Db, shoot_id: i64) -> Result<usize> {
+    let n = conn.exec(
+        "UPDATE jobs SET state = 'cancelled', finished_at = $2 WHERE shoot_id = $1 AND state IN ('queued','running')",
         params![shoot_id, now()],
-    )?)
+    )?;
+    Ok(n as usize)
 }
 
-pub fn clear_finished(conn: &Connection, shoot_id: i64) -> Result<usize> {
-    Ok(conn.execute(
-        "DELETE FROM jobs WHERE shoot_id = ?1 AND state IN ('done','cancelled')",
+pub fn clear_finished(conn: &mut dyn Db, shoot_id: i64) -> Result<usize> {
+    let n = conn.exec(
+        "DELETE FROM jobs WHERE shoot_id = $1 AND state IN ('done','cancelled')",
         params![shoot_id],
-    )?)
+    )?;
+    Ok(n as usize)
 }
 
-pub fn pending_count(conn: &Connection, shoot_id: Option<i64>) -> Result<i64> {
-    Ok(conn.query_row(
-        "SELECT COUNT(*) FROM jobs WHERE state IN ('queued','running') AND (?1 IS NULL OR shoot_id = ?1)",
-        params![shoot_id],
-        |r| r.get(0),
-    )?)
+pub fn pending_count(conn: &mut dyn Db, shoot_id: Option<i64>) -> Result<i64> {
+    super::at(
+        &conn.row_one(
+            "SELECT COUNT(*) FROM jobs
+              WHERE state IN ('queued','running') AND ($1::bigint IS NULL OR shoot_id = $1::bigint)",
+            params![shoot_id],
+        )?,
+        0,
+    )
 }
 
-pub fn list_failed(conn: &Connection, shoot_id: i64, limit: i64) -> Result<Vec<Job>> {
-    let mut stmt =
-        conn.prepare("SELECT * FROM jobs WHERE shoot_id = ?1 AND state = 'failed' ORDER BY finished_at DESC LIMIT ?2")?;
-    let rows = stmt
-        .query_map(params![shoot_id, limit], map)?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
+pub fn list_failed(conn: &mut dyn Db, shoot_id: i64, limit: i64) -> Result<Vec<Job>> {
+    conn.rows(
+        "SELECT * FROM jobs WHERE shoot_id = $1 AND state = 'failed' ORDER BY finished_at DESC LIMIT $2",
+        params![shoot_id, limit],
+    )?
+    .iter()
+    .map(map)
+    .collect()
 }
 
 /// How many running jobs the progress panel names. The pool is a handful of
@@ -325,26 +344,28 @@ const STAGE_ORDER: [JobKind; 8] = [
 /// Only kinds that have at least one job are returned: a photo-only shoot
 /// should not show an empty "video analysis" step. Cancelled jobs are left out
 /// — they are neither done nor outstanding.
-pub fn stage_breakdown(conn: &Connection, shoot_id: i64) -> Result<Vec<StageProgress>> {
-    let mut stmt = conn.prepare(
-        "SELECT kind,
-                SUM(CASE WHEN state = 'queued'  THEN 1 ELSE 0 END),
-                SUM(CASE WHEN state = 'running' THEN 1 ELSE 0 END),
-                SUM(CASE WHEN state = 'done'    THEN 1 ELSE 0 END),
-                SUM(CASE WHEN state = 'failed'  THEN 1 ELSE 0 END)
-           FROM jobs WHERE shoot_id = ?1 GROUP BY kind",
-    )?;
-    let counted = stmt
-        .query_map(params![shoot_id], |r| {
+pub fn stage_breakdown(conn: &mut dyn Db, shoot_id: i64) -> Result<Vec<StageProgress>> {
+    let counted = conn
+        .rows(
+            "SELECT kind,
+                    SUM(CASE WHEN state = 'queued'  THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN state = 'running' THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN state = 'done'    THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN state = 'failed'  THEN 1 ELSE 0 END)
+               FROM jobs WHERE shoot_id = $1 GROUP BY kind",
+            params![shoot_id],
+        )?
+        .iter()
+        .map(|r| {
             Ok(StageProgress {
-                kind: r.get(0)?,
-                queued: r.get::<_, Option<i64>>(1)?.unwrap_or(0),
-                running: r.get::<_, Option<i64>>(2)?.unwrap_or(0),
-                done: r.get::<_, Option<i64>>(3)?.unwrap_or(0),
-                failed: r.get::<_, Option<i64>>(4)?.unwrap_or(0),
+                kind: super::at(r, 0)?,
+                queued: super::at::<Option<i64>>(r, 1)?.unwrap_or(0),
+                running: super::at::<Option<i64>>(r, 2)?.unwrap_or(0),
+                done: super::at::<Option<i64>>(r, 3)?.unwrap_or(0),
+                failed: super::at::<Option<i64>>(r, 4)?.unwrap_or(0),
             })
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+        })
+        .collect::<Result<Vec<_>>>()?;
 
     let mut ordered: Vec<StageProgress> = STAGE_ORDER
         .iter()
@@ -362,74 +383,65 @@ pub fn stage_breakdown(conn: &Connection, shoot_id: i64) -> Result<Vec<StageProg
 
 /// The jobs currently executing, newest claim last, with the file each one is
 /// working on so the panel can name it.
-pub fn running_jobs(conn: &Connection, shoot_id: i64, limit: i64) -> Result<Vec<ActiveJob>> {
-    let mut stmt = conn.prepare(
+pub fn running_jobs(conn: &mut dyn Db, shoot_id: i64, limit: i64) -> Result<Vec<ActiveJob>> {
+    conn.rows(
         "SELECT j.id, j.kind, m.filename, j.started_at
            FROM jobs j LEFT JOIN media m ON m.id = j.media_id
-          WHERE j.shoot_id = ?1 AND j.state = 'running'
-          ORDER BY j.started_at ASC, j.id ASC LIMIT ?2",
-    )?;
-    let rows = stmt
-        .query_map(params![shoot_id, limit], |r| {
-            Ok(ActiveJob {
-                job_id: r.get(0)?,
-                kind: r.get(1)?,
-                filename: r.get(2)?,
-                started_at: r.get(3)?,
-            })
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
+          WHERE j.shoot_id = $1 AND j.state = 'running'
+          ORDER BY j.started_at ASC, j.id ASC LIMIT $2",
+        params![shoot_id, limit],
+    )?
+    .iter()
+    .map(|r| {
+        Ok(ActiveJob {
+            job_id: super::at(r, 0)?,
+            kind: super::at(r, 1)?,
+            filename: super::at(r, 2)?,
+            started_at: super::at(r, 3)?,
+        })
+    })
+    .collect()
 }
 
 /// The numbers rendered in the progress panel.
-pub fn progress(conn: &Connection, shoot_id: i64) -> Result<ProcessingProgress> {
+pub fn progress(conn: &mut dyn Db, shoot_id: i64) -> Result<ProcessingProgress> {
     let mut p = ProcessingProgress {
         shoot_id,
         ..Default::default()
     };
 
-    conn.query_row(
+    let row = conn.row_one(
         "SELECT COUNT(*),
                 SUM(CASE WHEN processing_status != 'pending' THEN 1 ELSE 0 END),
                 SUM(CASE WHEN processing_status = 'analysed'  THEN 1 ELSE 0 END),
                 SUM(CASE WHEN processing_status = 'failed'    THEN 1 ELSE 0 END)
-           FROM media WHERE shoot_id = ?1",
+           FROM media WHERE shoot_id = $1",
         params![shoot_id],
-        |r| {
-            p.media_total = r.get(0)?;
-            p.media_scanned = r.get::<_, Option<i64>>(1)?.unwrap_or(0);
-            p.media_analysed = r.get::<_, Option<i64>>(2)?.unwrap_or(0);
-            p.media_failed = r.get::<_, Option<i64>>(3)?.unwrap_or(0);
-            Ok(())
-        },
     )?;
+    p.media_total = super::at(&row, 0)?;
+    p.media_scanned = super::at::<Option<i64>>(&row, 1)?.unwrap_or(0);
+    p.media_analysed = super::at::<Option<i64>>(&row, 2)?.unwrap_or(0);
+    p.media_failed = super::at::<Option<i64>>(&row, 3)?.unwrap_or(0);
 
-    conn.query_row(
+    let row = conn.row_one(
         "SELECT SUM(CASE WHEN media_type = 'photo' THEN 1 ELSE 0 END),
                 SUM(CASE WHEN media_type = 'video' THEN 1 ELSE 0 END)
-           FROM media WHERE shoot_id = ?1",
+           FROM media WHERE shoot_id = $1",
         params![shoot_id],
-        |r| {
-            p.photos_total = r.get::<_, Option<i64>>(0)?.unwrap_or(0);
-            p.videos_total = r.get::<_, Option<i64>>(1)?.unwrap_or(0);
-            Ok(())
-        },
     )?;
+    p.photos_total = super::at::<Option<i64>>(&row, 0)?.unwrap_or(0);
+    p.videos_total = super::at::<Option<i64>>(&row, 1)?.unwrap_or(0);
 
-    conn.query_row(
+    let row = conn.row_one(
         "SELECT COUNT(*),
                 SUM(CASE WHEN person_id IS NOT NULL THEN 1 ELSE 0 END),
                 SUM(CASE WHEN person_id IS NULL AND assignment != 'ignored' THEN 1 ELSE 0 END)
-           FROM faces WHERE shoot_id = ?1",
+           FROM faces WHERE shoot_id = $1",
         params![shoot_id],
-        |r| {
-            p.faces_detected = r.get(0)?;
-            p.faces_recognised = r.get::<_, Option<i64>>(1)?.unwrap_or(0);
-            p.faces_unknown = r.get::<_, Option<i64>>(2)?.unwrap_or(0);
-            Ok(())
-        },
     )?;
+    p.faces_detected = super::at(&row, 0)?;
+    p.faces_recognised = super::at::<Option<i64>>(&row, 1)?.unwrap_or(0);
+    p.faces_unknown = super::at::<Option<i64>>(&row, 2)?.unwrap_or(0);
 
     p.stages = stage_breakdown(conn, shoot_id)?;
     for stage in &p.stages {
@@ -472,49 +484,61 @@ mod tests {
     use crate::repo::shoots;
     use crate::Database;
 
+    /// Inserts one media row and returns its id, the shape most of these tests
+    /// need before they can enqueue a per-file job.
+    fn seed_media(conn: &mut dyn Db, shoot_id: i64, filename: &str, status: &str) -> i64 {
+        conn.row_one(
+            "INSERT INTO media (shoot_id, path, filename, media_type, extension, content_key, indexed_at, processing_status)
+             VALUES ($1, $2, $2, 'video', 'mp4', $2, 'now', $3)
+             RETURNING id",
+            params![shoot_id, filename, status],
+        )
+        .unwrap()
+        .get(0)
+    }
+
     #[test]
     fn parallel_videos_in_one_shoot_keep_finishing_exclusive() {
-        let db = Database::open_in_memory().unwrap();
-        let conn = db.conn().unwrap();
-        let shoot = shoots::create(&conn, "Parallel", "P").unwrap();
+        let db = Database::open_test().unwrap();
+        let mut conn = db.conn().unwrap();
+        let shoot = shoots::create(&mut conn, "Parallel", "P").unwrap();
         let mut video_jobs = Vec::new();
         for filename in ["a.mp4", "b.mp4"] {
-            conn.execute("INSERT INTO media (shoot_id,path,filename,media_type,extension,content_key,indexed_at,processing_status) VALUES (?1,?2,?2,'video','mp4',?2,'now','thumbnailed')", params![shoot.id, filename]).unwrap();
-            let media_id = conn.last_insert_rowid();
-            video_jobs.push(enqueue(&conn, shoot.id, JobKind::AnalyseVideo, Some(media_id), 120, None).unwrap());
+            let media_id = seed_media(&mut conn, shoot.id, filename, "thumbnailed");
+            video_jobs.push(enqueue(&mut conn, shoot.id, JobKind::AnalyseVideo, Some(media_id), 120, None).unwrap());
         }
-        let recognise = enqueue(&conn, shoot.id, JobKind::Recognise, None, 300, None).unwrap();
-        let cluster = enqueue(&conn, shoot.id, JobKind::Cluster, None, 400, None).unwrap();
+        let recognise = enqueue(&mut conn, shoot.id, JobKind::Recognise, None, 300, None).unwrap();
+        let cluster = enqueue(&mut conn, shoot.id, JobKind::Cluster, None, 400, None).unwrap();
         for id in &video_jobs {
             assert_eq!(
-                claim_next_parallel(&conn, WorkerLane::Compute, None, &[])
+                claim_next_parallel(&mut conn, WorkerLane::Compute, None, &[])
                     .unwrap()
                     .unwrap()
                     .id,
                 *id
             );
         }
-        assert!(claim_next_parallel(&conn, WorkerLane::Compute, None, &[])
+        assert!(claim_next_parallel(&mut conn, WorkerLane::Compute, None, &[])
             .unwrap()
             .is_none());
-        complete(&conn, video_jobs[0]).unwrap();
-        assert!(claim_next_parallel(&conn, WorkerLane::Compute, None, &[])
+        complete(&mut conn, video_jobs[0]).unwrap();
+        assert!(claim_next_parallel(&mut conn, WorkerLane::Compute, None, &[])
             .unwrap()
             .is_none());
-        complete(&conn, video_jobs[1]).unwrap();
+        complete(&mut conn, video_jobs[1]).unwrap();
         assert_eq!(
-            claim_next_parallel(&conn, WorkerLane::Compute, None, &[])
+            claim_next_parallel(&mut conn, WorkerLane::Compute, None, &[])
                 .unwrap()
                 .unwrap()
                 .id,
             recognise
         );
-        assert!(claim_next_parallel(&conn, WorkerLane::Compute, None, &[])
+        assert!(claim_next_parallel(&mut conn, WorkerLane::Compute, None, &[])
             .unwrap()
             .is_none());
-        complete(&conn, recognise).unwrap();
+        complete(&mut conn, recognise).unwrap();
         assert_eq!(
-            claim_next_parallel(&conn, WorkerLane::Compute, None, &[])
+            claim_next_parallel(&mut conn, WorkerLane::Compute, None, &[])
                 .unwrap()
                 .unwrap()
                 .id,
@@ -524,46 +548,80 @@ mod tests {
 
     #[test]
     fn duplicate_media_jobs_never_run_together() {
-        let db = Database::open_in_memory().unwrap();
-        let conn = db.conn().unwrap();
-        let shoot = shoots::create(&conn, "S", "S").unwrap();
-        conn.execute("INSERT INTO media (shoot_id,path,filename,media_type,extension,content_key,indexed_at,processing_status) VALUES (?1,'a','a','video','mp4','a','now','thumbnailed')", [shoot.id]).unwrap();
-        let media_id = conn.last_insert_rowid();
-        let first = enqueue(&conn, shoot.id, JobKind::AnalyseVideo, Some(media_id), 120, None).unwrap();
-        enqueue(&conn, shoot.id, JobKind::AnalyseVideo, Some(media_id), 120, None).unwrap();
+        let db = Database::open_test().unwrap();
+        let mut conn = db.conn().unwrap();
+        let shoot = shoots::create(&mut conn, "S", "S").unwrap();
+        let media_id = seed_media(&mut conn, shoot.id, "a", "thumbnailed");
+        let first = enqueue(&mut conn, shoot.id, JobKind::AnalyseVideo, Some(media_id), 120, None).unwrap();
+        enqueue(&mut conn, shoot.id, JobKind::AnalyseVideo, Some(media_id), 120, None).unwrap();
         assert_eq!(
-            claim_next_parallel(&conn, WorkerLane::Compute, None, &[])
+            claim_next_parallel(&mut conn, WorkerLane::Compute, None, &[])
                 .unwrap()
                 .unwrap()
                 .id,
             first
         );
-        assert!(claim_next_parallel(&conn, WorkerLane::Compute, None, &[])
+        assert!(claim_next_parallel(&mut conn, WorkerLane::Compute, None, &[])
             .unwrap()
             .is_none());
     }
 
+    /// The paused list used to be marshalled through `json_each`; it is now a
+    /// bigint array parameter. An empty list must still match every shoot.
     #[test]
-    fn proxy_waits_for_analysis_in_its_shoot() {
-        let db = Database::open_in_memory().unwrap();
-        let conn = db.conn().unwrap();
-        let shoot = shoots::create(&conn, "Proxy", "P").unwrap();
-        conn.execute("INSERT INTO media (shoot_id,path,filename,media_type,extension,content_key,indexed_at,processing_status) VALUES (?1,'a.mp4','a.mp4','video','mp4','a','now','thumbnailed')", [shoot.id]).unwrap();
-        let media_id = conn.last_insert_rowid();
-        let analyse = enqueue(&conn, shoot.id, JobKind::AnalyseVideo, Some(media_id), 120, None).unwrap();
-        let proxy = enqueue(&conn, shoot.id, JobKind::Proxy, Some(media_id), 200, None).unwrap();
+    fn paused_shoots_are_skipped_and_an_empty_list_pauses_nothing() {
+        let db = Database::open_test().unwrap();
+        let mut conn = db.conn().unwrap();
+        let paused = shoots::create(&mut conn, "Paused", "P").unwrap();
+        let running = shoots::create(&mut conn, "Running", "R").unwrap();
+        let held = enqueue(&mut conn, paused.id, JobKind::AnalyseVideo, None, 120, None).unwrap();
+        let ready = enqueue(&mut conn, running.id, JobKind::AnalyseVideo, None, 120, None).unwrap();
 
         assert_eq!(
-            claim_next_parallel(&conn, WorkerLane::Compute, None, &[])
+            claim_next_parallel(&mut conn, WorkerLane::Compute, None, &[paused.id])
+                .unwrap()
+                .unwrap()
+                .id,
+            ready
+        );
+        assert!(
+            claim_next_parallel(&mut conn, WorkerLane::Compute, Some(running.id), &[paused.id])
+                .unwrap()
+                .is_none(),
+            "the paused shoot's job stays put"
+        );
+        assert_eq!(
+            claim_next_parallel(&mut conn, WorkerLane::Compute, Some(running.id), &[])
+                .unwrap()
+                .unwrap()
+                .id,
+            held,
+            "an empty paused list pauses nothing"
+        );
+    }
+
+    #[test]
+    fn proxy_waits_for_analysis_in_its_shoot() {
+        let db = Database::open_test().unwrap();
+        let mut conn = db.conn().unwrap();
+        let shoot = shoots::create(&mut conn, "Proxy", "P").unwrap();
+        let media_id = seed_media(&mut conn, shoot.id, "a.mp4", "thumbnailed");
+        let analyse = enqueue(&mut conn, shoot.id, JobKind::AnalyseVideo, Some(media_id), 120, None).unwrap();
+        let proxy = enqueue(&mut conn, shoot.id, JobKind::Proxy, Some(media_id), 200, None).unwrap();
+
+        assert_eq!(
+            claim_next_parallel(&mut conn, WorkerLane::Compute, None, &[])
                 .unwrap()
                 .unwrap()
                 .id,
             analyse
         );
-        assert!(claim_next_parallel(&conn, WorkerLane::Io, None, &[]).unwrap().is_none());
-        complete(&conn, analyse).unwrap();
+        assert!(claim_next_parallel(&mut conn, WorkerLane::Io, None, &[])
+            .unwrap()
+            .is_none());
+        complete(&mut conn, analyse).unwrap();
         assert_eq!(
-            claim_next_parallel(&conn, WorkerLane::Io, None, &[])
+            claim_next_parallel(&mut conn, WorkerLane::Io, None, &[])
                 .unwrap()
                 .unwrap()
                 .id,
@@ -573,23 +631,23 @@ mod tests {
 
     #[test]
     fn fair_compute_admits_new_shoot_before_old_backlog_finishes() {
-        let db = Database::open_in_memory().unwrap();
-        let conn = db.conn().unwrap();
-        let old = shoots::create(&conn, "Quarter Finals", "C:/old").unwrap();
-        let first = enqueue(&conn, old.id, JobKind::AnalyseVideo, None, 120, None).unwrap();
-        let second = enqueue(&conn, old.id, JobKind::AnalyseVideo, None, 120, None).unwrap();
-        let started = claim_next_fair(&conn, WorkerLane::Compute, None).unwrap().unwrap();
+        let db = Database::open_test().unwrap();
+        let mut conn = db.conn().unwrap();
+        let old = shoots::create(&mut conn, "Quarter Finals", "C:/old").unwrap();
+        let first = enqueue(&mut conn, old.id, JobKind::AnalyseVideo, None, 120, None).unwrap();
+        let second = enqueue(&mut conn, old.id, JobKind::AnalyseVideo, None, 120, None).unwrap();
+        let started = claim_next_fair(&mut conn, WorkerLane::Compute, None).unwrap().unwrap();
         assert_eq!(started.id, first);
-        let new = shoots::create(&conn, "GDR", "C:/new").unwrap();
-        let gdr = enqueue(&conn, new.id, JobKind::AnalyseVideo, None, 120, None).unwrap();
-        complete(&conn, first).unwrap();
-        let next = claim_next_fair(&conn, WorkerLane::Compute, Some(old.id))
+        let new = shoots::create(&mut conn, "GDR", "C:/new").unwrap();
+        let gdr = enqueue(&mut conn, new.id, JobKind::AnalyseVideo, None, 120, None).unwrap();
+        complete(&mut conn, first).unwrap();
+        let next = claim_next_fair(&mut conn, WorkerLane::Compute, Some(old.id))
             .unwrap()
             .unwrap();
         assert_eq!(next.id, gdr);
-        complete(&conn, gdr).unwrap();
+        complete(&mut conn, gdr).unwrap();
         assert_eq!(
-            claim_next_fair(&conn, WorkerLane::Compute, Some(new.id))
+            claim_next_fair(&mut conn, WorkerLane::Compute, Some(new.id))
                 .unwrap()
                 .unwrap()
                 .id,
@@ -600,8 +658,8 @@ mod tests {
     #[test]
     fn fair_lanes_rotate_three_shoots_preserving_local_priority_and_fifo() {
         for lane in [WorkerLane::Io, WorkerLane::Compute, WorkerLane::All] {
-            let db = Database::open_in_memory().unwrap();
-            let conn = db.conn().unwrap();
+            let db = Database::open_test().unwrap();
+            let mut conn = db.conn().unwrap();
             let kind = if matches!(lane, WorkerLane::Io) {
                 JobKind::Thumbnail
             } else {
@@ -610,58 +668,59 @@ mod tests {
             let mut ids = Vec::new();
             let mut expected = Vec::new();
             for name in ["A", "B", "C"] {
-                let s = shoots::create(&conn, name, name).unwrap();
+                let s = shoots::create(&mut conn, name, name).unwrap();
                 ids.push(s.id);
-                let later = enqueue(&conn, s.id, kind, None, 120, None).unwrap();
-                let first = enqueue(&conn, s.id, kind, None, 100, None).unwrap();
-                let last = enqueue(&conn, s.id, kind, None, 120, None).unwrap();
+                let later = enqueue(&mut conn, s.id, kind, None, 120, None).unwrap();
+                let first = enqueue(&mut conn, s.id, kind, None, 100, None).unwrap();
+                let last = enqueue(&mut conn, s.id, kind, None, 120, None).unwrap();
                 expected.push([first, later, last]);
             }
             let mut cursor = None;
             for turn in 0..3 {
                 for (i, shoot) in ids.iter().enumerate() {
-                    let job = claim_next_fair(&conn, lane, cursor).unwrap().unwrap();
+                    let job = claim_next_fair(&mut conn, lane, cursor).unwrap().unwrap();
                     assert_eq!(job.shoot_id, *shoot);
                     assert_eq!(job.id, expected[i][turn]);
                     assert_eq!(job.attempts, 1);
-                    complete(&conn, job.id).unwrap();
+                    complete(&mut conn, job.id).unwrap();
                     cursor = Some(job.shoot_id);
                 }
             }
-            assert!(claim_next_fair(&conn, lane, cursor).unwrap().is_none());
+            assert!(claim_next_fair(&mut conn, lane, cursor).unwrap().is_none());
         }
     }
 
     #[test]
     fn fair_claim_skips_unindexed_shoot_without_charging_retries() {
-        let db = Database::open_in_memory().unwrap();
-        let conn = db.conn().unwrap();
-        let waiting = shoots::create(&conn, "Waiting", "C:/waiting").unwrap();
-        conn.execute("INSERT INTO media (shoot_id, path, filename, media_type, extension, content_key, indexed_at) VALUES (?1, 'a.mp4', 'a.mp4', 'video', 'mp4', 'key', 'now')", [waiting.id]).unwrap();
-        let media_id = conn.last_insert_rowid();
-        let blocked = enqueue(&conn, waiting.id, JobKind::AnalyseVideo, Some(media_id), 120, None).unwrap();
-        let ready = shoots::create(&conn, "Ready", "C:/ready").unwrap();
-        let runnable = enqueue(&conn, ready.id, JobKind::AnalyseVideo, None, 120, None).unwrap();
+        let db = Database::open_test().unwrap();
+        let mut conn = db.conn().unwrap();
+        let waiting = shoots::create(&mut conn, "Waiting", "C:/waiting").unwrap();
+        let media_id = seed_media(&mut conn, waiting.id, "a.mp4", "pending");
+        let blocked = enqueue(&mut conn, waiting.id, JobKind::AnalyseVideo, Some(media_id), 120, None).unwrap();
+        let ready = shoots::create(&mut conn, "Ready", "C:/ready").unwrap();
+        let runnable = enqueue(&mut conn, ready.id, JobKind::AnalyseVideo, None, 120, None).unwrap();
         assert_eq!(
-            claim_next_fair(&conn, WorkerLane::Compute, None).unwrap().unwrap().id,
+            claim_next_fair(&mut conn, WorkerLane::Compute, None)
+                .unwrap()
+                .unwrap()
+                .id,
             runnable
         );
-        assert!(claim_next_fair(&conn, WorkerLane::Compute, Some(ready.id))
+        assert!(claim_next_fair(&mut conn, WorkerLane::Compute, Some(ready.id))
             .unwrap()
             .is_none());
-        assert_eq!(
-            conn.query_row("SELECT attempts FROM jobs WHERE id = ?1", [blocked], |r| r
-                .get::<_, i64>(0))
-                .unwrap(),
-            0
-        );
-        conn.execute(
-            "UPDATE media SET processing_status = 'thumbnailed' WHERE id = ?1",
-            [media_id],
+        let attempts: i64 = conn
+            .row_one("SELECT attempts FROM jobs WHERE id = $1", params![blocked])
+            .unwrap()
+            .get(0);
+        assert_eq!(attempts, 0);
+        conn.exec(
+            "UPDATE media SET processing_status = 'thumbnailed' WHERE id = $1",
+            params![media_id],
         )
         .unwrap();
         assert_eq!(
-            claim_next_fair(&conn, WorkerLane::Compute, Some(ready.id))
+            claim_next_fair(&mut conn, WorkerLane::Compute, Some(ready.id))
                 .unwrap()
                 .unwrap()
                 .id,
@@ -671,32 +730,38 @@ mod tests {
 
     #[test]
     fn fair_finishing_waits_only_for_its_own_shoot() {
-        let db = Database::open_in_memory().unwrap();
-        let conn = db.conn().unwrap();
-        let a = shoots::create(&conn, "A", "A").unwrap();
-        let b = shoots::create(&conn, "B", "B").unwrap();
-        let thumb = enqueue(&conn, a.id, JobKind::Thumbnail, None, 50, None).unwrap();
-        let recognise_a = enqueue(&conn, a.id, JobKind::Recognise, None, 300, None).unwrap();
-        let recognise_b = enqueue(&conn, b.id, JobKind::Recognise, None, 300, None).unwrap();
-        let cluster_b = enqueue(&conn, b.id, JobKind::Cluster, None, 400, None).unwrap();
+        let db = Database::open_test().unwrap();
+        let mut conn = db.conn().unwrap();
+        let a = shoots::create(&mut conn, "A", "A").unwrap();
+        let b = shoots::create(&mut conn, "B", "B").unwrap();
+        let thumb = enqueue(&mut conn, a.id, JobKind::Thumbnail, None, 50, None).unwrap();
+        let recognise_a = enqueue(&mut conn, a.id, JobKind::Recognise, None, 300, None).unwrap();
+        let recognise_b = enqueue(&mut conn, b.id, JobKind::Recognise, None, 300, None).unwrap();
+        let cluster_b = enqueue(&mut conn, b.id, JobKind::Cluster, None, 400, None).unwrap();
         assert_eq!(
-            claim_next_fair(&conn, WorkerLane::Compute, None).unwrap().unwrap().id,
+            claim_next_fair(&mut conn, WorkerLane::Compute, None)
+                .unwrap()
+                .unwrap()
+                .id,
             recognise_b
         );
         // Cannot run clustering concurrently with recognition in the same shoot.
-        assert!(claim_next_fair(&conn, WorkerLane::Compute, None).unwrap().is_none());
-        assert_eq!(claim_next_fair(&conn, WorkerLane::Io, None).unwrap().unwrap().id, thumb);
-        complete(&conn, thumb).unwrap();
+        assert!(claim_next_fair(&mut conn, WorkerLane::Compute, None).unwrap().is_none());
         assert_eq!(
-            claim_next_fair(&conn, WorkerLane::Compute, Some(b.id))
+            claim_next_fair(&mut conn, WorkerLane::Io, None).unwrap().unwrap().id,
+            thumb
+        );
+        complete(&mut conn, thumb).unwrap();
+        assert_eq!(
+            claim_next_fair(&mut conn, WorkerLane::Compute, Some(b.id))
                 .unwrap()
                 .unwrap()
                 .id,
             recognise_a
         );
-        complete(&conn, recognise_b).unwrap();
+        complete(&mut conn, recognise_b).unwrap();
         assert_eq!(
-            claim_next_fair(&conn, WorkerLane::Compute, Some(a.id))
+            claim_next_fair(&mut conn, WorkerLane::Compute, Some(a.id))
                 .unwrap()
                 .unwrap()
                 .id,
@@ -706,33 +771,36 @@ mod tests {
 
     #[test]
     fn fair_cancel_retry_and_deleted_cursor_do_not_hold_other_shoots() {
-        let db = Database::open_in_memory().unwrap();
-        let conn = db.conn().unwrap();
-        let a = shoots::create(&conn, "A", "A").unwrap();
-        let b = shoots::create(&conn, "B", "B").unwrap();
-        let first = enqueue(&conn, a.id, JobKind::AnalyseVideo, None, 120, None).unwrap();
-        let second = enqueue(&conn, b.id, JobKind::AnalyseVideo, None, 120, None).unwrap();
+        let db = Database::open_test().unwrap();
+        let mut conn = db.conn().unwrap();
+        let a = shoots::create(&mut conn, "A", "A").unwrap();
+        let b = shoots::create(&mut conn, "B", "B").unwrap();
+        let first = enqueue(&mut conn, a.id, JobKind::AnalyseVideo, None, 120, None).unwrap();
+        let second = enqueue(&mut conn, b.id, JobKind::AnalyseVideo, None, 120, None).unwrap();
         assert_eq!(
-            claim_next_fair(&conn, WorkerLane::Compute, None).unwrap().unwrap().id,
+            claim_next_fair(&mut conn, WorkerLane::Compute, None)
+                .unwrap()
+                .unwrap()
+                .id,
             first
         );
-        fail(&conn, first, "temporary failure").unwrap();
+        fail(&mut conn, first, "temporary failure").unwrap();
         assert_eq!(
-            claim_next_fair(&conn, WorkerLane::Compute, Some(a.id))
+            claim_next_fair(&mut conn, WorkerLane::Compute, Some(a.id))
                 .unwrap()
                 .unwrap()
                 .id,
             second
         );
-        complete(&conn, second).unwrap();
-        cancel_for_shoot(&conn, a.id).unwrap();
-        assert!(claim_next_fair(&conn, WorkerLane::Compute, Some(b.id))
+        complete(&mut conn, second).unwrap();
+        cancel_for_shoot(&mut conn, a.id).unwrap();
+        assert!(claim_next_fair(&mut conn, WorkerLane::Compute, Some(b.id))
             .unwrap()
             .is_none());
-        conn.execute("DELETE FROM shoots WHERE id = ?1", [b.id]).unwrap();
-        let later = enqueue(&conn, a.id, JobKind::AnalyseVideo, None, 120, None).unwrap();
+        conn.exec("DELETE FROM shoots WHERE id = $1", params![b.id]).unwrap();
+        let later = enqueue(&mut conn, a.id, JobKind::AnalyseVideo, None, 120, None).unwrap();
         assert_eq!(
-            claim_next_fair(&conn, WorkerLane::Compute, Some(b.id))
+            claim_next_fair(&mut conn, WorkerLane::Compute, Some(b.id))
                 .unwrap()
                 .unwrap()
                 .id,
@@ -742,118 +810,118 @@ mod tests {
 
     #[test]
     fn claim_is_exclusive_and_ordered_by_priority() {
-        let db = Database::open_in_memory().unwrap();
-        let conn = db.conn().unwrap();
-        let shoot = shoots::create(&conn, "S", "C:\\s").unwrap();
+        let db = Database::open_test().unwrap();
+        let mut conn = db.conn().unwrap();
+        let shoot = shoots::create(&mut conn, "S", "C:\\s").unwrap();
 
-        enqueue(&conn, shoot.id, JobKind::Thumbnail, None, 200, None).unwrap();
-        let urgent = enqueue(&conn, shoot.id, JobKind::Scan, None, 10, None).unwrap();
+        enqueue(&mut conn, shoot.id, JobKind::Thumbnail, None, 200, None).unwrap();
+        let urgent = enqueue(&mut conn, shoot.id, JobKind::Scan, None, 10, None).unwrap();
 
-        let first = claim_next(&conn, None).unwrap().unwrap();
+        let first = claim_next(&mut conn, None).unwrap().unwrap();
         assert_eq!(first.id, urgent, "lower priority number runs first");
         assert_eq!(first.state, "running");
         assert_eq!(first.attempts, 1);
 
-        let second = claim_next(&conn, None).unwrap().unwrap();
+        let second = claim_next(&mut conn, None).unwrap().unwrap();
         assert_ne!(second.id, first.id, "a running job cannot be claimed twice");
-        assert!(claim_next(&conn, None).unwrap().is_none());
+        assert!(claim_next(&mut conn, None).unwrap().is_none());
     }
 
     #[test]
     fn io_claims_leave_ai_jobs_for_the_engine_worker() {
-        let db = Database::open_in_memory().unwrap();
-        let conn = db.conn().unwrap();
-        let shoot = shoots::create(&conn, "S", "C:\\s").unwrap();
+        let db = Database::open_test().unwrap();
+        let mut conn = db.conn().unwrap();
+        let shoot = shoots::create(&mut conn, "S", "C:\\s").unwrap();
 
-        let analyse = enqueue(&conn, shoot.id, JobKind::AnalysePhoto, None, 10, None).unwrap();
-        let thumbnail = enqueue(&conn, shoot.id, JobKind::Thumbnail, None, 50, None).unwrap();
+        let analyse = enqueue(&mut conn, shoot.id, JobKind::AnalysePhoto, None, 10, None).unwrap();
+        let thumbnail = enqueue(&mut conn, shoot.id, JobKind::Thumbnail, None, 50, None).unwrap();
 
-        assert_eq!(claim_next_io(&conn).unwrap().unwrap().id, thumbnail);
-        assert_eq!(claim_next(&conn, None).unwrap().unwrap().id, analyse);
+        assert_eq!(claim_next_io(&mut conn).unwrap().unwrap().id, thumbnail);
+        assert_eq!(claim_next(&mut conn, None).unwrap().unwrap().id, analyse);
     }
 
     #[test]
     fn compute_claims_leave_io_jobs_for_the_helper_worker() {
-        let db = Database::open_in_memory().unwrap();
-        let conn = db.conn().unwrap();
-        let shoot = shoots::create(&conn, "S", "C:\\s").unwrap();
+        let db = Database::open_test().unwrap();
+        let mut conn = db.conn().unwrap();
+        let shoot = shoots::create(&mut conn, "S", "C:\\s").unwrap();
 
-        let thumbnail = enqueue(&conn, shoot.id, JobKind::Thumbnail, None, 10, None).unwrap();
-        let analyse = enqueue(&conn, shoot.id, JobKind::AnalysePhoto, None, 50, None).unwrap();
+        let thumbnail = enqueue(&mut conn, shoot.id, JobKind::Thumbnail, None, 10, None).unwrap();
+        let analyse = enqueue(&mut conn, shoot.id, JobKind::AnalysePhoto, None, 50, None).unwrap();
 
-        assert_eq!(claim_next_compute(&conn).unwrap().unwrap().id, analyse);
-        assert_eq!(claim_next(&conn, None).unwrap().unwrap().id, thumbnail);
+        assert_eq!(claim_next_compute(&mut conn).unwrap().unwrap().id, analyse);
+        assert_eq!(claim_next(&mut conn, None).unwrap().unwrap().id, thumbnail);
     }
 
     #[test]
     fn failures_retry_then_give_up() {
-        let db = Database::open_in_memory().unwrap();
-        let conn = db.conn().unwrap();
-        let shoot = shoots::create(&conn, "S", "C:\\s").unwrap();
-        let id = enqueue(&conn, shoot.id, JobKind::AnalysePhoto, None, 100, None).unwrap();
+        let db = Database::open_test().unwrap();
+        let mut conn = db.conn().unwrap();
+        let shoot = shoots::create(&mut conn, "S", "C:\\s").unwrap();
+        let id = enqueue(&mut conn, shoot.id, JobKind::AnalysePhoto, None, 100, None).unwrap();
 
         for _ in 0..(MAX_ATTEMPTS - 1) {
-            claim_next(&conn, None).unwrap().unwrap();
-            assert_eq!(fail(&conn, id, "boom").unwrap(), JobState::Queued);
+            claim_next(&mut conn, None).unwrap().unwrap();
+            assert_eq!(fail(&mut conn, id, "boom").unwrap(), JobState::Queued);
         }
-        claim_next(&conn, None).unwrap().unwrap();
-        assert_eq!(fail(&conn, id, "boom").unwrap(), JobState::Failed);
-        assert!(claim_next(&conn, None).unwrap().is_none());
+        claim_next(&mut conn, None).unwrap().unwrap();
+        assert_eq!(fail(&mut conn, id, "boom").unwrap(), JobState::Failed);
+        assert!(claim_next(&mut conn, None).unwrap().is_none());
 
-        assert_eq!(retry_failed(&conn, shoot.id).unwrap(), 1);
-        assert!(claim_next(&conn, None).unwrap().is_some());
+        assert_eq!(retry_failed(&mut conn, shoot.id).unwrap(), 1);
+        assert!(claim_next(&mut conn, None).unwrap().is_some());
     }
 
     #[test]
     fn stale_running_jobs_are_recovered_at_startup() {
-        let db = Database::open_in_memory().unwrap();
-        let conn = db.conn().unwrap();
-        let shoot = shoots::create(&conn, "S", "C:\\s").unwrap();
-        enqueue(&conn, shoot.id, JobKind::AnalysePhoto, None, 100, None).unwrap();
-        claim_next(&conn, None).unwrap().unwrap(); // simulates a crash mid-job
+        let db = Database::open_test().unwrap();
+        let mut conn = db.conn().unwrap();
+        let shoot = shoots::create(&mut conn, "S", "C:\\s").unwrap();
+        enqueue(&mut conn, shoot.id, JobKind::AnalysePhoto, None, 100, None).unwrap();
+        claim_next(&mut conn, None).unwrap().unwrap(); // simulates a crash mid-job
 
-        assert!(claim_next(&conn, None).unwrap().is_none());
-        assert_eq!(requeue_stale(&conn).unwrap(), 1);
-        assert!(claim_next(&conn, None).unwrap().is_some());
+        assert!(claim_next(&mut conn, None).unwrap().is_none());
+        assert_eq!(requeue_stale(&mut conn).unwrap(), 1);
+        assert!(claim_next(&mut conn, None).unwrap().is_some());
     }
 
     #[test]
     fn enqueue_unique_suppresses_duplicates() {
-        let db = Database::open_in_memory().unwrap();
-        let conn = db.conn().unwrap();
-        let shoot = shoots::create(&conn, "S", "C:\\s").unwrap();
+        let db = Database::open_test().unwrap();
+        let mut conn = db.conn().unwrap();
+        let shoot = shoots::create(&mut conn, "S", "C:\\s").unwrap();
 
-        assert!(enqueue_unique(&conn, shoot.id, JobKind::Cluster, None, 400)
+        assert!(enqueue_unique(&mut conn, shoot.id, JobKind::Cluster, None, 400)
             .unwrap()
             .is_some());
-        assert!(enqueue_unique(&conn, shoot.id, JobKind::Cluster, None, 400)
+        assert!(enqueue_unique(&mut conn, shoot.id, JobKind::Cluster, None, 400)
             .unwrap()
             .is_none());
 
-        let job = claim_next(&conn, None).unwrap().unwrap();
-        complete(&conn, job.id).unwrap();
-        assert!(enqueue_unique(&conn, shoot.id, JobKind::Cluster, None, 400)
+        let job = claim_next(&mut conn, None).unwrap().unwrap();
+        complete(&mut conn, job.id).unwrap();
+        assert!(enqueue_unique(&mut conn, shoot.id, JobKind::Cluster, None, 400)
             .unwrap()
             .is_some());
     }
 
     #[test]
     fn the_breakdown_separates_finished_running_and_waiting_work() {
-        let db = Database::open_in_memory().unwrap();
-        let conn = db.conn().unwrap();
-        let shoot = shoots::create(&conn, "S", "C:\\s").unwrap();
+        let db = Database::open_test().unwrap();
+        let mut conn = db.conn().unwrap();
+        let shoot = shoots::create(&mut conn, "S", "C:\\s").unwrap();
 
         // Queued out of pipeline order to prove the breakdown re-orders them.
-        enqueue(&conn, shoot.id, JobKind::Albums, None, 500, None).unwrap();
-        let scan = enqueue(&conn, shoot.id, JobKind::Scan, None, 10, None).unwrap();
+        enqueue(&mut conn, shoot.id, JobKind::Albums, None, 500, None).unwrap();
+        let scan = enqueue(&mut conn, shoot.id, JobKind::Scan, None, 10, None).unwrap();
         for _ in 0..3 {
-            enqueue(&conn, shoot.id, JobKind::AnalysePhoto, None, 100, None).unwrap();
+            enqueue(&mut conn, shoot.id, JobKind::AnalysePhoto, None, 100, None).unwrap();
         }
-        complete(&conn, scan).unwrap();
-        let running = claim_next_compute(&conn).unwrap().unwrap();
+        complete(&mut conn, scan).unwrap();
+        let running = claim_next_compute(&mut conn).unwrap().unwrap();
         assert_eq!(running.kind, JobKind::AnalysePhoto.as_str());
 
-        let stages = stage_breakdown(&conn, shoot.id).unwrap();
+        let stages = stage_breakdown(&mut conn, shoot.id).unwrap();
         let kinds: Vec<&str> = stages.iter().map(|s| s.kind.as_str()).collect();
         assert_eq!(kinds, vec!["scan", "analysePhoto", "albums"], "pipeline order");
 
@@ -862,12 +930,12 @@ mod tests {
         assert_eq!(stages[2].queued, 1);
 
         // The panel names the file each running job is working on.
-        let active = running_jobs(&conn, shoot.id, 8).unwrap();
+        let active = running_jobs(&mut conn, shoot.id, 8).unwrap();
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].job_id, running.id);
         assert_eq!(active[0].filename, None, "shoot-wide jobs have no file");
 
-        let progress = progress(&conn, shoot.id).unwrap();
+        let progress = progress(&mut conn, shoot.id).unwrap();
         assert_eq!(progress.jobs_done, 1);
         assert_eq!(progress.jobs_running, 1);
         assert_eq!(progress.jobs_queued, 3);
@@ -875,14 +943,14 @@ mod tests {
 
     #[test]
     fn a_cancelled_shoot_leaves_no_outstanding_steps() {
-        let db = Database::open_in_memory().unwrap();
-        let conn = db.conn().unwrap();
-        let shoot = shoots::create(&conn, "S", "C:\\s").unwrap();
-        enqueue(&conn, shoot.id, JobKind::AnalysePhoto, None, 100, None).unwrap();
-        cancel_for_shoot(&conn, shoot.id).unwrap();
+        let db = Database::open_test().unwrap();
+        let mut conn = db.conn().unwrap();
+        let shoot = shoots::create(&mut conn, "S", "C:\\s").unwrap();
+        enqueue(&mut conn, shoot.id, JobKind::AnalysePhoto, None, 100, None).unwrap();
+        cancel_for_shoot(&mut conn, shoot.id).unwrap();
 
         // Cancelled work is neither done nor pending, so it drops out entirely
         // rather than sitting in the panel as a step that never finishes.
-        assert!(stage_breakdown(&conn, shoot.id).unwrap().is_empty());
+        assert!(stage_breakdown(&mut conn, shoot.id).unwrap().is_empty());
     }
 }

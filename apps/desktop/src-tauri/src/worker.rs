@@ -4,6 +4,7 @@
 //! quit: anything left `running` is returned to `queued` at startup and picked
 //! up again. Nothing here blocks the UI thread.
 
+use skwad_database::Db;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -41,7 +42,7 @@ impl WorkerPool {
     /// loading models, allowing concurrency changes without restarting the app.
     pub fn start(app: AppHandle, state: Arc<AppState>) -> Self {
         // Recover anything a previous run left mid-flight.
-        match state.db.conn().and_then(|conn| jobs::requeue_stale(&conn)) {
+        match state.db.conn().and_then(|mut conn| jobs::requeue_stale(&mut conn)) {
             Ok(n) if n > 0 => tracing::info!(jobs = n, "recovered interrupted jobs from the previous session"),
             Ok(_) => {}
             Err(e) => tracing::error!(error = %e, "could not recover interrupted jobs"),
@@ -112,7 +113,7 @@ fn worker_loop(index: usize, app: AppHandle, state: Arc<AppState>) {
 
         // Each AI worker owns its model pair. A shared scheduler distributes
         // distinct media fairly and holds finishing stages behind all analyses.
-        let claimed = match state.db.conn().and_then(|conn| state.claim_job(&conn, lane)) {
+        let claimed = match state.db.conn().and_then(|mut conn| state.claim_job(&mut conn, lane)) {
             Ok(job) => job,
             Err(e) => {
                 tracing::error!(worker = index, error = %e, "could not claim a job");
@@ -133,16 +134,16 @@ fn worker_loop(index: usize, app: AppHandle, state: Arc<AppState>) {
         // A pause can arrive just after an atomic claim. Give the job back
         // without consuming an attempt; already executing files finish safely.
         if state.is_shoot_paused(job.shoot_id) {
-            if let Ok(conn) = state.db.conn() {
-                requeue_without_attempt(&conn, job.id);
+            if let Ok(mut conn) = state.db.conn() {
+                requeue_without_attempt(&mut conn, job.id);
             }
             continue;
         }
 
         // A cancelled shoot's remaining jobs are dropped rather than run.
         if state.is_cancelled(job.shoot_id) {
-            if let Ok(conn) = state.db.conn() {
-                let _ = jobs::cancel_for_shoot(&conn, job.shoot_id);
+            if let Ok(mut conn) = state.db.conn() {
+                let _ = jobs::cancel_for_shoot(&mut conn, job.shoot_id);
             }
             continue;
         }
@@ -159,8 +160,8 @@ fn worker_loop(index: usize, app: AppHandle, state: Arc<AppState>) {
             tools_version = state.settings_version();
         }
 
-        if let Ok(conn) = state.db.conn() {
-            if let Err(error) = telemetry::mark_stage_started(&conn, job.shoot_id, &job.kind) {
+        if let Ok(mut conn) = state.db.conn() {
+            if let Err(error) = telemetry::mark_stage_started(&mut conn, job.shoot_id, &job.kind) {
                 tracing::warn!(shoot = job.shoot_id, error = %error, "could not start processing telemetry");
             }
         }
@@ -317,7 +318,11 @@ fn load_media(state: &Arc<AppState>, job: &Job) -> std::result::Result<skwad_dat
     let Some(media_id) = job.media_id else {
         return Err(JobOutcome::Failed("job has no media id".into()));
     };
-    match state.db.conn().and_then(|conn| media_repo::get_by_id(&conn, media_id)) {
+    match state
+        .db
+        .conn()
+        .and_then(|mut conn| media_repo::get_by_id(&mut conn, media_id))
+    {
         Ok(Some(item)) => Ok(item),
         Ok(None) => Err(JobOutcome::Failed(format!("media {media_id} no longer indexed"))),
         Err(e) => Err(JobOutcome::Failed(e.to_string())),
@@ -389,35 +394,35 @@ fn indexing_incomplete(item: &skwad_database::models::Media) -> bool {
 
 /// True while any per-file job for the shoot is still queued or running.
 fn analysis_outstanding(state: &Arc<AppState>, shoot_id: i64) -> bool {
-    let Ok(conn) = state.db.conn() else { return false };
+    let Ok(mut conn) = state.db.conn() else { return false };
     let outstanding: i64 = conn
-        .query_row(
+        .row_one(
             "SELECT COUNT(*) FROM jobs
-              WHERE shoot_id = ?1 AND state IN ('queued','running')
+              WHERE shoot_id = $1 AND state IN ('queued','running')
                 AND kind IN ('scan','thumbnail','analysePhoto','analyseVideo')",
-            skwad_database::rusqlite::params![shoot_id],
-            |r| r.get(0),
+            skwad_database::params![shoot_id],
         )
+        .map(|row| row.get(0))
         .unwrap_or(0);
     outstanding > 0
 }
 
 fn finish_job(app: &AppHandle, state: &Arc<AppState>, job: &Job, outcome: JobOutcome) {
-    let Ok(conn) = state.db.conn() else { return };
+    let Ok(mut conn) = state.db.conn() else { return };
 
     let mut settled = false;
     let mut succeeded = false;
 
     match outcome {
         JobOutcome::Done => {
-            settled = jobs::complete(&conn, job.id).is_ok();
+            settled = jobs::complete(&mut conn, job.id).is_ok();
             succeeded = settled;
         }
         JobOutcome::Deferred => {
             // Give the remaining analysis a moment rather than spinning on the
             // same row, and do not let waiting count against the retry budget.
             std::thread::sleep(IDLE_POLL);
-            requeue_without_attempt(&conn, job.id);
+            requeue_without_attempt(&mut conn, job.id);
         }
         JobOutcome::Blocked(reason) => {
             // The job goes back untouched. As soon as the missing piece is in
@@ -430,24 +435,24 @@ fn finish_job(app: &AppHandle, state: &Arc<AppState>, job: &Job, outcome: JobOut
                 events::notice(app, "warn", format!("Processing paused: {reason}"));
             }
             std::thread::sleep(BLOCKED_BACKOFF);
-            requeue_without_attempt(&conn, job.id);
+            requeue_without_attempt(&mut conn, job.id);
         }
         JobOutcome::Failed(error) => {
             tracing::warn!(job = job.id, kind = %job.kind, error = %error, "job failed");
 
-            let state_after = jobs::fail(&conn, job.id, &error).unwrap_or(JobState::Failed);
+            let state_after = jobs::fail(&mut conn, job.id, &error).unwrap_or(JobState::Failed);
             if state_after == JobState::Failed {
                 settled = true;
                 if let Some(media_id) = job.media_id {
-                    let _ = media_repo::set_status(&conn, media_id, ProcessingStatus::Failed, Some(&error));
+                    let _ = media_repo::set_status(&mut conn, media_id, ProcessingStatus::Failed, Some(&error));
                 }
                 let file = job
                     .media_id
-                    .and_then(|id| media_repo::get_by_id(&conn, id).ok().flatten())
+                    .and_then(|id| media_repo::get_by_id(&mut conn, id).ok().flatten())
                     .map(|m| m.filename);
 
                 logs::record_quiet(
-                    &conn,
+                    &mut conn,
                     logs::EVENT_PROCESSING_ERROR,
                     Some(job.shoot_id),
                     job.media_id,
@@ -469,20 +474,20 @@ fn finish_job(app: &AppHandle, state: &Arc<AppState>, job: &Job, outcome: JobOut
     }
 
     if settled {
-        if let Err(error) = telemetry::mark_stage_settled(&conn, job.shoot_id, &job.kind, succeeded) {
+        if let Err(error) = telemetry::mark_stage_settled(&mut conn, job.shoot_id, &job.kind, succeeded) {
             tracing::warn!(shoot = job.shoot_id, error = %error, "could not finish stage telemetry");
         }
-        if let Err(error) = telemetry::finalize_if_settled(&conn, job.shoot_id) {
+        if let Err(error) = telemetry::finalize_if_settled(&mut conn, job.shoot_id) {
             tracing::warn!(shoot = job.shoot_id, error = %error, "could not finish processing telemetry");
         }
     }
 }
 
 /// Returns a job to the queue without charging it an attempt.
-fn requeue_without_attempt(conn: &skwad_database::rusqlite::Connection, job_id: i64) {
-    let _ = conn.execute(
-        "UPDATE jobs SET state = 'queued', started_at = NULL, attempts = MAX(attempts - 1, 0) WHERE id = ?1",
-        skwad_database::rusqlite::params![job_id],
+fn requeue_without_attempt(conn: &mut dyn skwad_database::Db, job_id: i64) {
+    let _ = conn.exec(
+        "UPDATE jobs SET state = 'queued', started_at = NULL, attempts = GREATEST(attempts - 1, 0) WHERE id = $1",
+        skwad_database::params![job_id],
     );
 }
 
@@ -502,15 +507,13 @@ fn monitor_loop(app: AppHandle, state: Arc<AppState>) {
         }
         last_emit = Instant::now();
 
-        let Ok(conn) = state.db.conn() else { continue };
+        let Ok(mut conn) = state.db.conn() else { continue };
         let active: Vec<i64> = conn
-            .prepare("SELECT DISTINCT shoot_id FROM jobs WHERE state IN ('queued','running')")
-            .and_then(|mut stmt| {
-                let rows = stmt
-                    .query_map([], |r| r.get::<_, i64>(0))?
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(rows)
-            })
+            .rows(
+                "SELECT DISTINCT shoot_id FROM jobs WHERE state IN ('queued','running')",
+                skwad_database::params![],
+            )
+            .map(|rows| rows.iter().map(|r| r.get::<_, i64>(0)).collect())
             .unwrap_or_default();
 
         let mut to_report = active.clone();
@@ -538,14 +541,14 @@ fn monitor_loop(app: AppHandle, state: Arc<AppState>) {
             let concurrent = active.len().max(1) as i64;
             for shoot_id in &active {
                 let workers: i64 = conn
-                    .query_row(
-                        "SELECT COUNT(*) FROM jobs WHERE shoot_id = ?1 AND state = 'running'",
-                        skwad_database::rusqlite::params![shoot_id],
-                        |row| row.get(0),
+                    .row_one(
+                        "SELECT COUNT(*) FROM jobs WHERE shoot_id = $1 AND state = 'running'",
+                        skwad_database::params![shoot_id],
                     )
+                    .map(|row| row.get(0))
                     .unwrap_or(0);
                 if let Err(error) = telemetry::record_sample(
-                    &conn,
+                    &mut conn,
                     *shoot_id,
                     usage.cpu_percent,
                     usage.gpu_percent,
@@ -558,7 +561,7 @@ fn monitor_loop(app: AppHandle, state: Arc<AppState>) {
             }
             for shoot_id in &just_finished {
                 if let Err(error) = telemetry::record_sample(
-                    &conn,
+                    &mut conn,
                     *shoot_id,
                     usage.cpu_percent,
                     usage.gpu_percent,
@@ -573,7 +576,7 @@ fn monitor_loop(app: AppHandle, state: Arc<AppState>) {
         }
 
         for shoot_id in to_report {
-            if let Ok(mut progress) = jobs::progress(&conn, shoot_id) {
+            if let Ok(mut progress) = jobs::progress(&mut conn, shoot_id) {
                 if let Some(blockage) = state.blockage(shoot_id) {
                     progress.blocked_kind = Some(blockage.kind);
                     progress.blocked_reason = Some(blockage.reason);
@@ -602,12 +605,12 @@ mod tests {
 
     #[test]
     fn analysis_jobs_block_the_finishing_stages() {
-        let db = Database::open_in_memory().unwrap();
-        let conn = db.conn().unwrap();
-        let shoot = shoots::create(&conn, "S", "C:\\s").unwrap();
+        let db = Database::open_test().unwrap();
+        let mut conn = db.conn().unwrap();
+        let shoot = shoots::create(&mut conn, "S", "C:\\s").unwrap();
 
         let media_id = media_repo::upsert(
-            &conn,
+            &mut conn,
             &skwad_database::models::NewMedia {
                 shoot_id: shoot.id,
                 path: "C:\\s\\a.jpg".into(),
@@ -622,7 +625,7 @@ mod tests {
         .unwrap();
 
         let analyse = jobs::enqueue(
-            &conn,
+            &mut conn,
             shoot.id,
             JobKind::AnalysePhoto,
             Some(media_id),
@@ -630,60 +633,68 @@ mod tests {
             None,
         )
         .unwrap();
-        jobs::enqueue(&conn, shoot.id, JobKind::Albums, None, stages::priority::ALBUMS, None).unwrap();
+        jobs::enqueue(
+            &mut conn,
+            shoot.id,
+            JobKind::Albums,
+            None,
+            stages::priority::ALBUMS,
+            None,
+        )
+        .unwrap();
 
         let outstanding: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM jobs WHERE shoot_id = ?1 AND state IN ('queued','running')
+            .row_one(
+                "SELECT COUNT(*) FROM jobs WHERE shoot_id = $1 AND state IN ('queued','running')
                    AND kind IN ('scan','thumbnail','analysePhoto','analyseVideo')",
-                skwad_database::rusqlite::params![shoot.id],
-                |r| r.get(0),
+                skwad_database::params![shoot.id],
             )
-            .unwrap();
+            .unwrap()
+            .get(0);
         assert_eq!(outstanding, 1, "the album stage must wait for this");
 
-        jobs::claim_next(&conn, None).unwrap();
-        jobs::complete(&conn, analyse).unwrap();
+        jobs::claim_next(&mut conn, None).unwrap();
+        jobs::complete(&mut conn, analyse).unwrap();
 
         let outstanding_after: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM jobs WHERE shoot_id = ?1 AND state IN ('queued','running')
+            .row_one(
+                "SELECT COUNT(*) FROM jobs WHERE shoot_id = $1 AND state IN ('queued','running')
                    AND kind IN ('scan','thumbnail','analysePhoto','analyseVideo')",
-                skwad_database::rusqlite::params![shoot.id],
-                |r| r.get(0),
+                skwad_database::params![shoot.id],
             )
-            .unwrap();
+            .unwrap()
+            .get(0);
         assert_eq!(outstanding_after, 0);
     }
 
     #[test]
     fn deferring_does_not_consume_the_retry_budget() {
-        let db = Database::open_in_memory().unwrap();
-        let conn = db.conn().unwrap();
-        let shoot = shoots::create(&conn, "S", "C:\\s").unwrap();
-        let id = jobs::enqueue(&conn, shoot.id, JobKind::Albums, None, 500, None).unwrap();
+        let db = Database::open_test().unwrap();
+        let mut conn = db.conn().unwrap();
+        let shoot = shoots::create(&mut conn, "S", "C:\\s").unwrap();
+        let id = jobs::enqueue(&mut conn, shoot.id, JobKind::Albums, None, 500, None).unwrap();
 
         for _ in 0..10 {
-            let job = jobs::claim_next(&conn, None).unwrap().unwrap();
+            let job = jobs::claim_next(&mut conn, None).unwrap().unwrap();
             assert_eq!(job.id, id);
-            conn.execute(
-        "UPDATE jobs SET state = 'queued', started_at = NULL, attempts = MAX(attempts - 1, 0) WHERE id = ?1 AND state = 'running'",
-                skwad_database::rusqlite::params![id],
+            conn.exec(
+        "UPDATE jobs SET state = 'queued', started_at = NULL, attempts = GREATEST(attempts - 1, 0) WHERE id = $1 AND state = 'running'",
+                skwad_database::params![id],
             )
             .unwrap();
         }
 
         // Still runnable after ten deferrals — far more than MAX_ATTEMPTS.
-        assert!(jobs::claim_next(&conn, None).unwrap().is_some());
+        assert!(jobs::claim_next(&mut conn, None).unwrap().is_some());
     }
 
     #[test]
     fn analysis_waits_while_its_indexing_job_is_running() {
-        let db = Database::open_in_memory().unwrap();
-        let conn = db.conn().unwrap();
-        let shoot = shoots::create(&conn, "S", "C:\\s").unwrap();
+        let db = Database::open_test().unwrap();
+        let mut conn = db.conn().unwrap();
+        let shoot = shoots::create(&mut conn, "S", "C:\\s").unwrap();
         let media_id = media_repo::upsert(
-            &conn,
+            &mut conn,
             &skwad_database::models::NewMedia {
                 shoot_id: shoot.id,
                 path: "C:\\s\\rotated.jpg".into(),
@@ -697,7 +708,7 @@ mod tests {
         )
         .unwrap();
         jobs::enqueue(
-            &conn,
+            &mut conn,
             shoot.id,
             JobKind::Thumbnail,
             Some(media_id),
@@ -706,7 +717,7 @@ mod tests {
         )
         .unwrap();
         jobs::enqueue(
-            &conn,
+            &mut conn,
             shoot.id,
             JobKind::AnalysePhoto,
             Some(media_id),
@@ -718,15 +729,15 @@ mod tests {
         // Recreate the production race: one lane has claimed indexing while
         // the compute lane has independently claimed analysis for the same
         // row. The row must still make analysis wait.
-        let indexing = jobs::claim_next_io(&conn).unwrap().unwrap();
-        let analysis = jobs::claim_next_compute(&conn).unwrap().unwrap();
+        let indexing = jobs::claim_next_io(&mut conn).unwrap().unwrap();
+        let analysis = jobs::claim_next_compute(&mut conn).unwrap().unwrap();
         assert_eq!(indexing.kind, JobKind::Thumbnail.as_str());
         assert_eq!(analysis.kind, JobKind::AnalysePhoto.as_str());
-        let before = media_repo::get_by_id(&conn, media_id).unwrap().unwrap();
+        let before = media_repo::get_by_id(&mut conn, media_id).unwrap().unwrap();
         assert!(indexing_incomplete(&before));
 
-        media_repo::set_status(&conn, media_id, ProcessingStatus::Thumbnailed, None).unwrap();
-        let after = media_repo::get_by_id(&conn, media_id).unwrap().unwrap();
+        media_repo::set_status(&mut conn, media_id, ProcessingStatus::Thumbnailed, None).unwrap();
+        let after = media_repo::get_by_id(&mut conn, media_id).unwrap().unwrap();
         assert!(!indexing_incomplete(&after));
     }
 }

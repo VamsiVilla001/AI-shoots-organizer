@@ -311,6 +311,23 @@ export const sendMediaToPremiere = (mediaIds: number[], label?: string) =>
 export const sendCollectionToPremiere = (collectionId: string) =>
   call<void>('send_collection_to_premiere', { collectionId })
 
+/**
+ * Whether the Premiere panel is installed on this machine. The app installs it
+ * on launch (src-tauri/src/premiere_plugin.rs); this is how Settings reports
+ * that, and offers a retry when it could not.
+ */
+export interface PremierePanelStatus {
+  /** The panel version this build ships, or null if it was not packaged. */
+  bundledVersion: string | null
+  /** The version installed for this user, or null if the panel is not installed. */
+  installedVersion: string | null
+  /** Whether Creative Cloud's plugin installer could be found. */
+  installerAvailable: boolean
+}
+
+export const premierePanelStatus = () => call<PremierePanelStatus>('premiere_panel_status')
+export const installPremierePanel = () => call<PremierePanelStatus>('install_premiere_panel')
+
 // --- logs and privacy ------------------------------------------------------
 
 export const recentLogs = (shootId: number | null, limit = 200) =>

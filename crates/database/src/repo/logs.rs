@@ -4,11 +4,12 @@
 //! renames, merges, exports. It deliberately never stores embeddings, crops or
 //! any other biometric payload; the identifiers are enough to audit a decision.
 
-use rusqlite::{params, Connection, Row};
+use postgres::Row;
 
 use super::get;
+use crate::client::Db;
 use crate::models::LogEntry;
-use crate::{now, Result};
+use crate::{now, params, Result};
 
 pub const EVENT_SHOOT_IMPORTED: &str = "shoot_imported";
 pub const EVENT_SHOOT_DELETED: &str = "shoot_index_deleted";
@@ -29,7 +30,7 @@ pub const EVENT_GROUP_ASSIGNMENT: &str = "group_assignment";
 pub const EVENT_EXPORT: &str = "export";
 pub const EVENT_RECOGNITION_DATA_CLEARED: &str = "recognition_data_cleared";
 
-fn map(row: &Row<'_>) -> rusqlite::Result<LogEntry> {
+fn map(row: &Row) -> Result<LogEntry> {
     Ok(LogEntry {
         id: get(row, "id")?,
         timestamp: get(row, "timestamp")?,
@@ -42,16 +43,16 @@ fn map(row: &Row<'_>) -> rusqlite::Result<LogEntry> {
 }
 
 pub fn record(
-    conn: &Connection,
+    conn: &mut dyn Db,
     event: &str,
     shoot_id: Option<i64>,
     media_id: Option<i64>,
     person_id: Option<i64>,
     detail: Option<&str>,
 ) -> Result<()> {
-    conn.execute(
+    conn.exec(
         "INSERT INTO app_log (timestamp, event, shoot_id, media_id, person_id, detail)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+         VALUES ($1, $2, $3, $4, $5, $6)",
         params![now(), event, shoot_id, media_id, person_id, detail],
     )?;
     Ok(())
@@ -59,7 +60,7 @@ pub fn record(
 
 /// Logging must never take down the operation it is describing.
 pub fn record_quiet(
-    conn: &Connection,
+    conn: &mut dyn Db,
     event: &str,
     shoot_id: Option<i64>,
     media_id: Option<i64>,
@@ -71,24 +72,29 @@ pub fn record_quiet(
     }
 }
 
-pub fn recent(conn: &Connection, shoot_id: Option<i64>, limit: i64) -> Result<Vec<LogEntry>> {
-    let mut stmt =
-        conn.prepare("SELECT * FROM app_log WHERE (?1 IS NULL OR shoot_id = ?1) ORDER BY id DESC LIMIT ?2")?;
-    let rows = stmt
-        .query_map(params![shoot_id, limit.clamp(1, 2_000)], map)?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
+pub fn recent(conn: &mut dyn Db, shoot_id: Option<i64>, limit: i64) -> Result<Vec<LogEntry>> {
+    // The `::bigint` casts are load-bearing: Postgres cannot infer a parameter's
+    // type from `$1 IS NULL` alone and rejects the statement without them.
+    conn.rows(
+        "SELECT * FROM app_log
+          WHERE ($1::bigint IS NULL OR shoot_id = $1::bigint)
+          ORDER BY id DESC LIMIT $2",
+        params![shoot_id, limit.clamp(1, 2_000)],
+    )?
+    .iter()
+    .map(map)
+    .collect()
 }
 
 /// Keeps the log from growing without bound; called after each import.
-pub fn trim(conn: &Connection, keep: i64) -> Result<usize> {
-    Ok(conn.execute(
-        "DELETE FROM app_log WHERE id NOT IN (SELECT id FROM app_log ORDER BY id DESC LIMIT ?1)",
+pub fn trim(conn: &mut dyn Db, keep: i64) -> Result<u64> {
+    conn.exec(
+        "DELETE FROM app_log WHERE id NOT IN (SELECT id FROM app_log ORDER BY id DESC LIMIT $1)",
         params![keep.max(100)],
-    )?)
+    )
 }
 
-pub fn clear(conn: &Connection) -> Result<()> {
-    conn.execute("DELETE FROM app_log", [])?;
+pub fn clear(conn: &mut dyn Db) -> Result<()> {
+    conn.exec("DELETE FROM app_log", params![])?;
     Ok(())
 }

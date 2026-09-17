@@ -125,47 +125,47 @@ pub fn import_roster(
     if entries.len() > MAX_ENTRIES {
         return Err(command_error("that roster has more rows than SKWAD will import"));
     }
-    let conn = state.db.conn().map_err(command_error)?;
-    roster::replace_source(&conn, &source, &entries).map_err(command_error)?;
-    summary(&conn)
+    let mut conn = state.db.conn().map_err(command_error)?;
+    roster::replace_source(&mut conn, &source, &entries).map_err(command_error)?;
+    summary(&mut conn)
 }
 
 #[tauri::command]
 pub fn roster_summary(state: State<'_, Arc<AppState>>) -> Result<RosterSummary> {
-    let conn = state.db.conn().map_err(command_error)?;
-    summary(&conn)
+    let mut conn = state.db.conn().map_err(command_error)?;
+    summary(&mut conn)
 }
 
 #[tauri::command]
 pub fn list_roster(state: State<'_, Arc<AppState>>) -> Result<Vec<RosterEntry>> {
-    let conn = state.db.conn().map_err(command_error)?;
-    roster::list(&conn).map_err(command_error)
+    let mut conn = state.db.conn().map_err(command_error)?;
+    roster::list(&mut conn).map_err(command_error)
 }
 
 /// Suggestions for a half-typed name. This is what turns "naresh" into
 /// "iQOOS8ULNaresh · iQOO Soul" in the naming field.
 #[tauri::command]
 pub fn search_roster(state: State<'_, Arc<AppState>>, query: String, limit: Option<usize>) -> Result<Vec<RosterEntry>> {
-    let conn = state.db.conn().map_err(command_error)?;
-    roster::search(&conn, &query, limit.unwrap_or(8).clamp(1, 50)).map_err(command_error)
+    let mut conn = state.db.conn().map_err(command_error)?;
+    roster::search(&mut conn, &query, limit.unwrap_or(8).clamp(1, 50)).map_err(command_error)
 }
 
 /// The team a typed name belongs to, or nothing when the roster cannot say for
 /// certain. Callers treat `None` as "leave the team alone".
 #[tauri::command]
 pub fn resolve_roster_name(state: State<'_, Arc<AppState>>, name: String) -> Result<Option<RosterEntry>> {
-    let conn = state.db.conn().map_err(command_error)?;
-    roster::resolve(&conn, &name).map_err(command_error)
+    let mut conn = state.db.conn().map_err(command_error)?;
+    roster::resolve(&mut conn, &name).map_err(command_error)
 }
 
 #[tauri::command]
 pub fn clear_roster(state: State<'_, Arc<AppState>>, source: Option<String>) -> Result<RosterSummary> {
-    let conn = state.db.conn().map_err(command_error)?;
-    roster::clear(&conn, source.as_deref()).map_err(command_error)?;
-    summary(&conn)
+    let mut conn = state.db.conn().map_err(command_error)?;
+    roster::clear(&mut conn, source.as_deref()).map_err(command_error)?;
+    summary(&mut conn)
 }
 
-fn summary(conn: &skwad_database::rusqlite::Connection) -> Result<RosterSummary> {
+fn summary(conn: &mut dyn skwad_database::Db) -> Result<RosterSummary> {
     let entries = roster::list(conn).map_err(command_error)?;
     let mut teams: Vec<String> = entries.iter().map(|entry| entry.team.clone()).collect();
     teams.sort_by_key(|team| team.to_lowercase());

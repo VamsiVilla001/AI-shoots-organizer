@@ -30,10 +30,15 @@ macro_rules! string_enum {
             }
         }
 
-        impl rusqlite::ToSql for $name {
-            fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
-                Ok(rusqlite::types::ToSqlOutput::from(self.as_str()))
-            }
+        // These enums are stored as the `TEXT` their `as_str()` produces.
+        // Under rusqlite a `ToSql` impl let them be passed to `params!`
+        // directly; rust-postgres resolves a parameter's type from the
+        // statement, and a custom impl would have to accept the `TEXT` OID
+        // explicitly for no gain — so call sites pass `.as_str()` instead,
+        // which is what the impl did anyway.
+        impl $name {
+            /// Every variant, in declaration order.
+            pub const ALL: &'static [Self] = &[$(Self::$variant),+];
         }
     };
 }

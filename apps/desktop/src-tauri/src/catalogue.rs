@@ -3,6 +3,7 @@
 //! Device secrets and cached sessions live in the operating-system credential
 //! store. Decrypted catalogue databases live only in this process's memory.
 
+use skwad_database::Db;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -21,7 +22,6 @@ use skwad_catalogue::{
     CatalogueManifest, CatalogueMedia, CatalogueSummary, DeviceKeyPair, OpenCredential, PackageLimits, PublishOptions,
     Recipient,
 };
-use skwad_database::rusqlite::params;
 use tauri::{AppHandle, State};
 use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
@@ -678,18 +678,20 @@ pub async fn publish_skwad(
     let signing_key_id = keys.signing_key_id;
     let unsigned =
         tauri::async_runtime::spawn_blocking(move || -> Result<(Vec<u8>, u64, i64, String, String, String)> {
-            let conn = db.conn().map_err(command_error)?;
+            let mut conn = db.conn().map_err(command_error)?;
             let revision_number: i64 = conn
-                .query_row(
-                    "SELECT coalesce(max(revision_number),0)+1 FROM catalogue_revisions WHERE shoot_id=?1",
-                    [shoot_id],
-                    |row| row.get(0),
+                .row_one(
+                    "SELECT coalesce(max(revision_number),0)+1 FROM catalogue_revisions WHERE shoot_id=$1",
+                    skwad_database::params![shoot_id],
                 )
-                .map_err(command_error)?;
-            let portable = build_portable_catalogue(&conn, shoot_id, revision_number as u64).map_err(command_error)?;
+                .map_err(command_error)?
+                .get(0);
+            let portable =
+                build_portable_catalogue(&mut conn, shoot_id, revision_number as u64).map_err(command_error)?;
             let shoot_name: String = conn
-                .query_row("SELECT name FROM shoots WHERE id=?1", [shoot_id], |row| row.get(0))
-                .map_err(command_error)?;
+                .row_one("SELECT name FROM shoots WHERE id=$1", skwad_database::params![shoot_id])
+                .map_err(command_error)?
+                .get(0);
             let library_id = portable.library_id.clone();
             let stable_shoot_id = portable.shoot_id.clone();
             let payload = Zeroizing::new(
@@ -753,8 +755,8 @@ pub async fn publish_skwad(
         std::fs::create_dir_all(parent).map_err(command_error)?;
     }
     std::fs::write(&destination, &package).map_err(command_error)?;
-    let conn = state.db.conn().map_err(command_error)?;
-    conn.execute("INSERT INTO catalogue_revisions(revision_id,package_id,shoot_id,revision_number,state,manifest_hash,created_at,published_at) VALUES(?1,?2,?3,?4,'published',?5,?6,?6)", params![revision_id.to_string(), package_id.to_string(), shoot_id, unsigned.2, blake3::hash(&package).to_hex().to_string(), chrono::Utc::now().to_rfc3339()]).map_err(command_error)?;
+    let mut conn = state.db.conn().map_err(command_error)?;
+    conn.exec("INSERT INTO catalogue_revisions(revision_id,package_id,shoot_id,revision_number,state,manifest_hash,created_at,published_at) VALUES($1,$2,$3,$4,'published',$5,$6,$6)", skwad_database::params![revision_id.to_string(), package_id.to_string(), shoot_id, unsigned.2, blake3::hash(&package).to_hex().to_string(), chrono::Utc::now().to_rfc3339()]).map_err(command_error)?;
     Ok(PublishResult {
         package_id: package_id.to_string(),
         revision_id: revision_id.to_string(),
@@ -807,7 +809,7 @@ pub async fn load_skwad(
         Err(error) => return Err(command_error(error)),
     };
     let summary = catalogue_summary(&decoded.catalogue).map_err(command_error)?;
-    state.db.conn().map_err(command_error)?.execute("INSERT INTO imported_catalogues(package_id,revision_id,library_id,shoot_id,catalogue_hash,imported_at) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(package_id,revision_id) DO UPDATE SET imported_at=excluded.imported_at", params![header.authenticated.package_id.to_string(), header.authenticated.revision_id.to_string(), summary.library_id, summary.shoot_id, blake3::hash(&package).to_hex().to_string(), chrono::Utc::now().to_rfc3339()]).map_err(command_error)?;
+    state.db.conn().map_err(command_error)?.exec("INSERT INTO imported_catalogues(package_id,revision_id,library_id,shoot_id,catalogue_hash,imported_at) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(package_id,revision_id) DO UPDATE SET imported_at=excluded.imported_at", skwad_database::params![header.authenticated.package_id.to_string(), header.authenticated.revision_id.to_string(), summary.library_id, summary.shoot_id, blake3::hash(&package).to_hex().to_string(), chrono::Utc::now().to_rfc3339()]).map_err(command_error)?;
     let key = catalogue_key(
         &header.authenticated.package_id.to_string(),
         &header.authenticated.revision_id.to_string(),
@@ -846,7 +848,7 @@ pub fn approve_catalogue_library(
         .get(&key)
         .ok_or_else(|| command_error("load the catalogue before mapping its library"))?;
     let now = chrono::Utc::now().to_rfc3339();
-    state.db.conn().map_err(command_error)?.execute("INSERT INTO library_mappings(library_id,label,local_root,approved_at,updated_at) VALUES(?1,?2,?3,?4,?4) ON CONFLICT(library_id) DO UPDATE SET local_root=excluded.local_root,updated_at=excluded.updated_at", params![catalogue.summary.library_id, catalogue.summary.shoot_name, path.to_string_lossy(), now]).map_err(command_error)?;
+    state.db.conn().map_err(command_error)?.exec("INSERT INTO library_mappings(library_id,label,local_root,approved_at,updated_at) VALUES($1,$2,$3,$4,$4) ON CONFLICT(library_id) DO UPDATE SET local_root=excluded.local_root,updated_at=excluded.updated_at", skwad_database::params![catalogue.summary.library_id, catalogue.summary.shoot_name, path.to_string_lossy(), now]).map_err(command_error)?;
     loaded_info(&state, &package_id, &revision_id, catalogue.summary.clone())
 }
 
@@ -916,12 +918,14 @@ pub fn open_catalogue_media(
         .db
         .conn()
         .map_err(command_error)?
-        .query_row(
-            "SELECT local_root FROM library_mappings WHERE library_id=?1",
-            [&catalogue.summary.library_id],
-            |row| row.get(0),
+        .row_opt(
+            "SELECT local_root FROM library_mappings WHERE library_id=$1",
+            skwad_database::params![catalogue.summary.library_id],
         )
-        .map_err(|_| command_error("map this catalogue to an approved NAS root first"))?;
+        .ok()
+        .flatten()
+        .map(|row| row.get(0))
+        .ok_or_else(|| command_error("map this catalogue to an approved NAS root first"))?;
     let target = resolve_beneath_root(Path::new(&root), &media.relative_path).map_err(command_error)?;
     let canonical_root = std::fs::canonicalize(&root).map_err(command_error)?;
     let canonical_target = std::fs::canonicalize(&target).map_err(command_error)?;
@@ -939,16 +943,17 @@ fn loaded_info(
     revision_id: &str,
     summary: CatalogueSummary,
 ) -> Result<LoadedCatalogueInfo> {
-    let mapped_root = state
+    let mapped_root: Option<String> = state
         .db
         .conn()
         .map_err(command_error)?
-        .query_row(
-            "SELECT local_root FROM library_mappings WHERE library_id=?1",
-            [&summary.library_id],
-            |row| row.get::<_, String>(0),
+        .row_opt(
+            "SELECT local_root FROM library_mappings WHERE library_id=$1",
+            skwad_database::params![summary.library_id],
         )
-        .ok();
+        .ok()
+        .flatten()
+        .map(|row| row.get(0));
     Ok(LoadedCatalogueInfo {
         package_id: package_id.into(),
         revision_id: revision_id.into(),
@@ -1133,9 +1138,9 @@ fn profile_key(account_id: &str) -> String {
 }
 
 fn ensure_local_profile(state: &AppState, account_id: &str, email: &str, display_name: &str) -> Result<()> {
-    let conn = state.db.conn().map_err(command_error)?;
+    let mut conn = state.db.conn().map_err(command_error)?;
     let key = profile_key(account_id);
-    if skwad_database::repo::settings::get_raw(&conn, &key)
+    if skwad_database::repo::settings::get_raw(&mut conn, &key)
         .map_err(command_error)?
         .is_some()
     {
@@ -1154,7 +1159,7 @@ fn ensure_local_profile(state: &AppState, account_id: &str, email: &str, display
         created_at: now.clone(),
         updated_at: now,
     };
-    skwad_database::repo::settings::set(&conn, &key, &profile).map_err(command_error)
+    skwad_database::repo::settings::set(&mut conn, &key, &profile).map_err(command_error)
 }
 
 fn load_local_profile(state: &AppState, identity: &StoredIdentity) -> Result<UserProfile> {
@@ -1168,16 +1173,16 @@ fn load_local_profile(state: &AppState, identity: &StoredIdentity) -> Result<Use
             &identity.display_name
         },
     )?;
-    let conn = state.db.conn().map_err(command_error)?;
-    skwad_database::repo::settings::get_raw(&conn, &profile_key(&identity.account_id))
+    let mut conn = state.db.conn().map_err(command_error)?;
+    skwad_database::repo::settings::get_raw(&mut conn, &profile_key(&identity.account_id))
         .map_err(command_error)?
         .ok_or_else(|| command_error("the local profile was not found"))
         .and_then(|value| serde_json::from_str(&value).map_err(command_error))
 }
 
 fn save_local_profile(state: &AppState, profile: &UserProfile) -> Result<()> {
-    let conn = state.db.conn().map_err(command_error)?;
-    skwad_database::repo::settings::set(&conn, &profile_key(&profile.user_id), profile).map_err(command_error)
+    let mut conn = state.db.conn().map_err(command_error)?;
+    skwad_database::repo::settings::set(&mut conn, &profile_key(&profile.user_id), profile).map_err(command_error)
 }
 
 fn default_enabled() -> bool {
@@ -1346,7 +1351,7 @@ mod tests {
         )
         .unwrap();
         let state = Arc::new(AppState::new(
-            Database::open_in_memory().unwrap(),
+            Database::open_test().unwrap(),
             paths,
             AppSettings::default(),
             "skwadmedia://".into(),
@@ -1365,7 +1370,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let paths = AppPaths::create(temp.path()).unwrap();
         let state = Arc::new(AppState::new(
-            Database::open_in_memory().unwrap(),
+            Database::open_test().unwrap(),
             paths,
             AppSettings::default(),
             "skwadmedia://".into(),
@@ -1418,7 +1423,7 @@ mod tests {
         )
         .unwrap();
         let state = Arc::new(AppState::new(
-            Database::open_in_memory().unwrap(),
+            Database::open_test().unwrap(),
             paths,
             AppSettings::default(),
             "skwadmedia://".into(),

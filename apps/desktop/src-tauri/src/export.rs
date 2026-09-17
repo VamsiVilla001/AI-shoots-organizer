@@ -38,7 +38,7 @@ pub fn build_groups(db: &skwad_database::Database, shoot_id: i64, options: &Expo
 /// Reads a group's membership into the files the export will reference. Files that
 /// have gone missing from the source folder since the scan are skipped with a
 /// log line rather than failing the run.
-fn collect_files(conn: &skwad_database::rusqlite::Connection, media_ids: &[i64]) -> Result<Vec<SourceFile>> {
+fn collect_files(conn: &mut dyn skwad_database::Db, media_ids: &[i64]) -> Result<Vec<SourceFile>> {
     let mut files = Vec::with_capacity(media_ids.len());
     for media_id in media_ids {
         let Some(item) = media_repo::get_by_id(conn, *media_id)? else {
@@ -67,13 +67,15 @@ pub fn resolve_collection_files(
     db: &skwad_database::Database,
     sources: &[ProjectCollectionSource],
 ) -> Result<Vec<SourceFile>> {
-    let conn = db.conn()?;
+    let mut conn = db.conn()?;
     let mut files = Vec::new();
     for source in sources {
-        files.extend(collect_files(
-            &conn,
-            &groups_repo::media_ids(&conn, source.group_id, None)?,
-        )?);
+        // Two statements, not one expression: running a Postgres statement
+        // takes `&mut`, so the inner lookup and the outer call cannot both
+        // borrow the connection at once the way they could under rusqlite's
+        // shared `&Connection`.
+        let ids = groups_repo::media_ids(&mut conn, source.group_id, None)?;
+        files.extend(collect_files(&mut conn, &ids)?);
     }
     Ok(files)
 }
@@ -85,16 +87,17 @@ fn build_from_manual_groups(
     shoot_id: i64,
     options: &ExportOptions,
 ) -> Result<Vec<ExportGroup>> {
-    let conn = db.conn()?;
+    let mut conn = db.conn()?;
     let mut out = Vec::new();
 
-    for group in groups_repo::list(&conn, shoot_id)? {
+    for group in groups_repo::list(&mut conn, shoot_id)? {
         if let Some(selected) = &options.group_ids {
             if !selected.contains(&group.id) {
                 continue;
             }
         }
-        let files = collect_files(&conn, &groups_repo::media_ids(&conn, group.id, None)?)?;
+        let ids = groups_repo::media_ids(&mut conn, group.id, None)?;
+        let files = collect_files(&mut conn, &ids)?;
         if !files.is_empty() {
             out.push(ExportGroup {
                 name: group.export_name().to_string(),
@@ -111,8 +114,8 @@ fn build_from_albums(
     shoot_id: i64,
     options: &ExportOptions,
 ) -> Result<Vec<ExportGroup>> {
-    let conn = db.conn()?;
-    let all = albums::list(&conn, shoot_id)?;
+    let mut conn = db.conn()?;
+    let all = albums::list(&mut conn, shoot_id)?;
     let mut groups = Vec::new();
 
     for album in all {
@@ -134,7 +137,8 @@ fn build_from_albums(
             continue;
         }
 
-        let files = collect_files(&conn, &albums::media_ids(&conn, album.id, None)?)?;
+        let ids = albums::media_ids(&mut conn, album.id, None)?;
+        let files = collect_files(&mut conn, &ids)?;
         if !files.is_empty() {
             groups.push(ExportGroup {
                 name: album.name,
@@ -154,8 +158,8 @@ pub fn preview(
     options: &ExportOptions,
 ) -> Result<ExportPlan> {
     let source_root = {
-        let conn = db.conn()?;
-        shoots::get_by_id(&conn, shoot_id)?
+        let mut conn = db.conn()?;
+        shoots::get_by_id(&mut conn, shoot_id)?
             .map(|s| PathBuf::from(s.source_path))
             .ok_or_else(|| ExportRunError::Other(format!("shoot {shoot_id} not found")))?
     };
@@ -185,14 +189,14 @@ pub fn start(
     }
 
     let export_id = {
-        let conn = state.db.conn()?;
+        let mut conn = state.db.conn()?;
         let id = exports::create(
-            &conn,
+            &mut conn,
             shoot_id,
             &destination.display().to_string(),
             &serde_json::to_string(&options).unwrap_or_default(),
         )?;
-        exports::set_total(&conn, id, plan.len() as i64)?;
+        exports::set_total(&mut conn, id, plan.len() as i64)?;
         id
     };
 
@@ -227,8 +231,13 @@ fn run(
         &options,
         || !cancel.load(std::sync::atomic::Ordering::Relaxed),
         move |progress| {
-            if let Ok(conn) = progress_state.db.conn() {
-                let _ = exports::set_progress(&conn, export_id, progress.files_done as i64, progress.bytes_done as i64);
+            if let Ok(mut conn) = progress_state.db.conn() {
+                let _ = exports::set_progress(
+                    &mut conn,
+                    export_id,
+                    progress.files_done as i64,
+                    progress.bytes_done as i64,
+                );
             }
             events::emit(
                 &progress_app,
@@ -253,10 +262,10 @@ fn run(
         Err(e) => (ExportStatus::Failed, Some(e.to_string())),
     };
 
-    if let Ok(conn) = state.db.conn() {
-        let _ = exports::finish(&conn, export_id, status, error.as_deref());
+    if let Ok(mut conn) = state.db.conn() {
+        let _ = exports::finish(&mut conn, export_id, status, error.as_deref());
         logs::record_quiet(
-            &conn,
+            &mut conn,
             logs::EVENT_EXPORT,
             Some(shoot_id),
             None,
@@ -309,12 +318,12 @@ mod tests {
 
     /// A shoot with two players and real files on disk.
     fn seed(dir: &Path) -> (Database, i64) {
-        let db = Database::open_in_memory().unwrap();
-        let conn = db.conn().unwrap();
-        let shoot = shoots::create(&conn, "Shoot", &dir.display().to_string()).unwrap();
+        let db = Database::open_test().unwrap();
+        let mut conn = db.conn().unwrap();
+        let shoot = shoots::create(&mut conn, "Shoot", &dir.display().to_string()).unwrap();
 
-        let jonathan = people::get_or_create(&conn, "Jonathan", None).unwrap();
-        let mavi = people::get_or_create(&conn, "Mavi", None).unwrap();
+        let jonathan = people::get_or_create(&mut conn, "Jonathan", None).unwrap();
+        let mavi = people::get_or_create(&mut conn, "Mavi", None).unwrap();
 
         for (name, person, is_video) in [
             ("IMG_0001.jpg", jonathan.id, false),
@@ -325,7 +334,7 @@ mod tests {
             std::fs::write(&path, b"contents").unwrap();
 
             let media_id = media_repo::upsert(
-                &conn,
+                &mut conn,
                 &NewMedia {
                     shoot_id: shoot.id,
                     path: path.display().to_string(),
@@ -340,7 +349,7 @@ mod tests {
             .unwrap();
 
             let face_id = faces::insert(
-                &conn,
+                &mut conn,
                 &NewFace {
                     media_id,
                     shoot_id: shoot.id,
@@ -359,10 +368,10 @@ mod tests {
                 },
             )
             .unwrap();
-            faces::assign(&conn, face_id, person, Some(0.99)).unwrap();
+            faces::assign(&mut conn, face_id, person, Some(0.99)).unwrap();
         }
 
-        albums::regenerate(&conn, shoot.id).unwrap();
+        albums::regenerate(&mut conn, shoot.id).unwrap();
         (db, shoot.id)
     }
 
@@ -412,8 +421,8 @@ mod tests {
         let (db, shoot_id) = seed(scratch.path());
 
         let jonathan_id = {
-            let conn = db.conn().unwrap();
-            people::find_by_name(&conn, "Jonathan").unwrap().unwrap().id
+            let mut conn = db.conn().unwrap();
+            people::find_by_name(&mut conn, "Jonathan").unwrap().unwrap().id
         };
         let options = ExportOptions {
             person_ids: Some(vec![jonathan_id]),
@@ -463,12 +472,12 @@ mod tests {
         let (db, shoot_id) = seed(scratch.path());
 
         let bts = {
-            let conn = db.conn().unwrap();
-            let highlights = groups_repo::get_or_create(&conn, shoot_id, "Jonathan Highlights", None).unwrap();
-            let bts = groups_repo::get_or_create(&conn, shoot_id, "BTS", None).unwrap();
+            let mut conn = db.conn().unwrap();
+            let highlights = groups_repo::get_or_create(&mut conn, shoot_id, "Jonathan Highlights", None).unwrap();
+            let bts = groups_repo::get_or_create(&mut conn, shoot_id, "BTS", None).unwrap();
 
             let all: Vec<i64> = media_repo::query(
-                &conn,
+                &mut conn,
                 &skwad_database::models::MediaQuery {
                     shoot_id: Some(shoot_id),
                     ..Default::default()
@@ -479,8 +488,8 @@ mod tests {
             .map(|m| m.id)
             .collect();
 
-            groups_repo::add_media(&conn, highlights.id, &all[..2]).unwrap();
-            groups_repo::add_media(&conn, bts.id, &all[2..]).unwrap();
+            groups_repo::add_media(&mut conn, highlights.id, &all[..2]).unwrap();
+            groups_repo::add_media(&mut conn, bts.id, &all[2..]).unwrap();
             bts.id
         };
 
@@ -523,23 +532,33 @@ mod tests {
             .collect();
 
         {
-            let conn = db.conn().unwrap();
-            let all: Vec<i64> = media_repo::query(
-                &conn,
+            let mut conn = db.conn().unwrap();
+            let all = media_repo::query(
+                &mut conn,
                 &skwad_database::models::MediaQuery {
                     shoot_id: Some(shoot_id),
                     ..Default::default()
                 },
             )
-            .unwrap()
-            .into_iter()
-            .map(|m| m.id)
-            .collect();
+            .unwrap();
 
-            let jonathan = groups_repo::get_or_create(&conn, shoot_id, "Jonathan", None).unwrap();
-            let mavi = groups_repo::get_or_create(&conn, shoot_id, "Mavi: Day 2", None).unwrap();
-            groups_repo::add_media(&conn, jonathan.id, &all[..2]).unwrap();
-            groups_repo::add_media(&conn, mavi.id, &all[2..]).unwrap();
+            // Split by media type rather than by position in the result. The
+            // seed's two photos and one video used to land in that order under
+            // SQLite's byte-order sort, which put `IMG_*` before `clip.mp4`;
+            // ordering is case-insensitive now, so `clip.mp4` comes first.
+            // Which files these groups hold was never meant to depend on that.
+            let videos: Vec<i64> = all.iter().filter(|m| m.media_type == "video").map(|m| m.id).collect();
+            let photos: Vec<i64> = all.iter().filter(|m| m.media_type != "video").map(|m| m.id).collect();
+            assert_eq!(
+                (photos.len(), videos.len()),
+                (2, 1),
+                "the seed is two photos and a clip"
+            );
+
+            let jonathan = groups_repo::get_or_create(&mut conn, shoot_id, "Jonathan", None).unwrap();
+            let mavi = groups_repo::get_or_create(&mut conn, shoot_id, "Mavi: Day 2", None).unwrap();
+            groups_repo::add_media(&mut conn, jonathan.id, &photos).unwrap();
+            groups_repo::add_media(&mut conn, mavi.id, &videos).unwrap();
         }
 
         let options = ExportOptions::default();
@@ -579,11 +598,11 @@ mod tests {
         let (db, shoot_id) = seed(scratch.path());
 
         {
-            let conn = db.conn().unwrap();
-            let group = groups_repo::get_or_create(&conn, shoot_id, "Jonathan", None).unwrap();
-            groups_repo::update(&conn, group.id, Some("01_Jonathan"), None).unwrap();
+            let mut conn = db.conn().unwrap();
+            let group = groups_repo::get_or_create(&mut conn, shoot_id, "Jonathan", None).unwrap();
+            groups_repo::update(&mut conn, group.id, Some("01_Jonathan"), None).unwrap();
             let all: Vec<i64> = media_repo::query(
-                &conn,
+                &mut conn,
                 &skwad_database::models::MediaQuery {
                     shoot_id: Some(shoot_id),
                     ..Default::default()
@@ -593,7 +612,7 @@ mod tests {
             .into_iter()
             .map(|m| m.id)
             .collect();
-            groups_repo::add_media(&conn, group.id, &all[..1]).unwrap();
+            groups_repo::add_media(&mut conn, group.id, &all[..1]).unwrap();
         }
 
         let plan = preview(&db, shoot_id, destination.path(), &ExportOptions::default()).unwrap();
@@ -644,11 +663,11 @@ mod tests {
         let (db, shoot_id) = seed(scratch.path());
 
         let (highlights_id, bts_id) = {
-            let conn = db.conn().unwrap();
-            let highlights = groups_repo::get_or_create(&conn, shoot_id, "Highlights", None).unwrap();
-            let bts = groups_repo::get_or_create(&conn, shoot_id, "BTS", None).unwrap();
+            let mut conn = db.conn().unwrap();
+            let highlights = groups_repo::get_or_create(&mut conn, shoot_id, "Highlights", None).unwrap();
+            let bts = groups_repo::get_or_create(&mut conn, shoot_id, "BTS", None).unwrap();
             let all: Vec<i64> = media_repo::query(
-                &conn,
+                &mut conn,
                 &skwad_database::models::MediaQuery {
                     shoot_id: Some(shoot_id),
                     ..Default::default()
@@ -658,8 +677,8 @@ mod tests {
             .into_iter()
             .map(|m| m.id)
             .collect();
-            groups_repo::add_media(&conn, highlights.id, &all[..2]).unwrap();
-            groups_repo::add_media(&conn, bts.id, &all[2..]).unwrap();
+            groups_repo::add_media(&mut conn, highlights.id, &all[..2]).unwrap();
+            groups_repo::add_media(&mut conn, bts.id, &all[2..]).unwrap();
             (highlights.id, bts.id)
         };
 

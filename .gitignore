@@ -35,3 +35,6 @@ supabase/.temp/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Claude Code runtime state (settings.json is tracked; this is per-run)
+.claude/scheduled_tasks.lock

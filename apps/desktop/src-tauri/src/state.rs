@@ -169,7 +169,7 @@ impl AppState {
     /// share one cursor, so separate workers cannot each favour the first shoot.
     pub fn claim_job(
         &self,
-        conn: &skwad_database::rusqlite::Connection,
+        conn: &mut dyn skwad_database::Db,
         lane: skwad_database::repo::jobs::WorkerLane,
     ) -> skwad_database::Result<Option<skwad_database::models::Job>> {
         use skwad_database::repo::jobs::{self, WorkerLane};
@@ -275,12 +275,14 @@ pub struct Blockage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // `row_one` below comes from the `Db` trait.
+    use skwad_database::Db;
 
     fn state() -> AppState {
         let temp = std::env::temp_dir().join(format!("skwad-state-{}", std::process::id()));
         let paths = AppPaths::create(&temp).unwrap();
         AppState::new(
-            Database::open_in_memory().unwrap(),
+            Database::open_test().unwrap(),
             paths,
             AppSettings::default(),
             "skwadmedia://localhost".into(),
@@ -329,28 +331,39 @@ mod tests {
             repo::{jobs, shoots},
         };
         let state = state();
-        let conn = state.db.conn().unwrap();
-        let a = shoots::create(&conn, "A", "A").unwrap();
-        let b = shoots::create(&conn, "B", "B").unwrap();
-        let a_job = jobs::enqueue(&conn, a.id, JobKind::AnalyseVideo, None, 120, None).unwrap();
-        let b_job = jobs::enqueue(&conn, b.id, JobKind::AnalyseVideo, None, 120, None).unwrap();
+        let mut conn = state.db.conn().unwrap();
+        let a = shoots::create(&mut conn, "A", "A").unwrap();
+        let b = shoots::create(&mut conn, "B", "B").unwrap();
+        let a_job = jobs::enqueue(&mut conn, a.id, JobKind::AnalyseVideo, None, 120, None).unwrap();
+        let b_job = jobs::enqueue(&mut conn, b.id, JobKind::AnalyseVideo, None, 120, None).unwrap();
         state.set_shoot_paused(a.id, true);
         assert!(state.is_shoot_paused(a.id));
         assert!(!state.is_shoot_paused(b.id));
         assert!(!state.is_paused());
         assert_eq!(
-            state.claim_job(&conn, jobs::WorkerLane::Compute).unwrap().unwrap().id,
+            state
+                .claim_job(&mut conn, jobs::WorkerLane::Compute)
+                .unwrap()
+                .unwrap()
+                .id,
             b_job
         );
-        assert!(state.claim_job(&conn, jobs::WorkerLane::Compute).unwrap().is_none());
-        assert_eq!(
-            conn.query_row("SELECT attempts FROM jobs WHERE id=?1", [a_job], |r| r.get::<_, i64>(0))
-                .unwrap(),
-            0
-        );
+        assert!(state.claim_job(&mut conn, jobs::WorkerLane::Compute).unwrap().is_none());
+        let attempts: i64 = conn
+            .row_one(
+                "SELECT attempts FROM jobs WHERE id = $1",
+                skwad_database::params![a_job],
+            )
+            .unwrap()
+            .get(0);
+        assert_eq!(attempts, 0);
         state.set_shoot_paused(a.id, false);
         assert_eq!(
-            state.claim_job(&conn, jobs::WorkerLane::Compute).unwrap().unwrap().id,
+            state
+                .claim_job(&mut conn, jobs::WorkerLane::Compute)
+                .unwrap()
+                .unwrap()
+                .id,
             a_job
         );
     }
@@ -363,11 +376,11 @@ mod tests {
         };
         let state = Arc::new(state());
         {
-            let conn = state.db.conn().unwrap();
+            let mut conn = state.db.conn().unwrap();
             for name in ["A", "B"] {
-                let shoot = shoots::create(&conn, name, name).unwrap();
+                let shoot = shoots::create(&mut conn, name, name).unwrap();
                 for _ in 0..4 {
-                    jobs::enqueue(&conn, shoot.id, JobKind::AnalyseVideo, None, 120, None).unwrap();
+                    jobs::enqueue(&mut conn, shoot.id, JobKind::AnalyseVideo, None, 120, None).unwrap();
                 }
             }
         }
@@ -378,8 +391,8 @@ mod tests {
                 let barrier = Arc::clone(&barrier);
                 std::thread::spawn(move || {
                     barrier.wait();
-                    let conn = state.db.conn().unwrap();
-                    state.claim_job(&conn, jobs::WorkerLane::Compute).unwrap().unwrap()
+                    let mut conn = state.db.conn().unwrap();
+                    state.claim_job(&mut conn, jobs::WorkerLane::Compute).unwrap().unwrap()
                 })
             })
             .collect();

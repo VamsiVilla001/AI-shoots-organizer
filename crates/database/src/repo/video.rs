@@ -3,36 +3,45 @@
 //! Sampled frames produce a scatter of hits; [`timelines`] collapses runs of
 //! nearby hits into the ranges the UI turns into clickable timestamps.
 
-use rusqlite::{params, Connection, Row};
+use postgres::Row;
 
 use super::get;
+use crate::client::Db;
 use crate::models::{VideoDetection, VideoTimeline};
-use crate::Result;
+use crate::{now, params, Result};
 
-pub fn insert_sample_frame(conn: &Connection, media_id: i64, timestamp: f64) -> Result<usize> {
-    Ok(conn.execute(
-        "INSERT OR IGNORE INTO video_sample_frames (media_id, timestamp, created_at)
-         VALUES (?1, ?2, datetime('now'))",
-        params![media_id, timestamp],
-    )?)
+pub fn insert_sample_frame(conn: &mut dyn Db, media_id: i64, timestamp: f64) -> Result<usize> {
+    // `INSERT OR IGNORE` became `ON CONFLICT DO NOTHING`, and SQLite's
+    // `datetime('now')` became the same RFC3339 stamp every other `*_at`
+    // column in the schema carries.
+    let inserted = conn.exec(
+        "INSERT INTO video_sample_frames (media_id, timestamp, created_at)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (media_id, timestamp) DO NOTHING",
+        params![media_id, timestamp, now()],
+    )?;
+    Ok(inserted as usize)
 }
 
-pub fn delete_sample_frames(conn: &Connection, media_id: i64) -> Result<usize> {
-    Ok(conn.execute("DELETE FROM video_sample_frames WHERE media_id = ?1", params![media_id])?)
+pub fn delete_sample_frames(conn: &mut dyn Db, media_id: i64) -> Result<usize> {
+    let deleted = conn.exec("DELETE FROM video_sample_frames WHERE media_id = $1", params![media_id])?;
+    Ok(deleted as usize)
 }
 
-pub fn sample_times(conn: &Connection, media_id: i64) -> Result<Vec<f64>> {
-    let mut stmt = conn.prepare("SELECT timestamp FROM video_sample_frames WHERE media_id = ?1 ORDER BY timestamp")?;
-    let rows = stmt
-        .query_map(params![media_id], |row| row.get(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
+pub fn sample_times(conn: &mut dyn Db, media_id: i64) -> Result<Vec<f64>> {
+    conn.rows(
+        "SELECT timestamp FROM video_sample_frames WHERE media_id = $1 ORDER BY timestamp",
+        params![media_id],
+    )?
+    .iter()
+    .map(|row| super::at(row, 0))
+    .collect()
 }
 
 /// Hits closer together than this are treated as one continuous appearance.
 const APPEARANCE_GAP_SECONDS: f64 = 4.0;
 
-fn map(row: &Row<'_>) -> rusqlite::Result<VideoDetection> {
+fn map(row: &Row) -> Result<VideoDetection> {
     Ok(VideoDetection {
         id: get(row, "id")?,
         media_id: get(row, "media_id")?,
@@ -45,74 +54,85 @@ fn map(row: &Row<'_>) -> rusqlite::Result<VideoDetection> {
 }
 
 pub fn insert(
-    conn: &Connection,
+    conn: &mut dyn Db,
     media_id: i64,
     person_id: Option<i64>,
     face_id: Option<i64>,
     timestamp: f64,
     confidence: f64,
 ) -> Result<i64> {
-    conn.execute(
+    let row = conn.row_one(
         "INSERT INTO video_detections (media_id, person_id, face_id, timestamp, confidence)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING id",
         params![media_id, person_id, face_id, timestamp, confidence],
     )?;
-    Ok(conn.last_insert_rowid())
+    get(&row, "id")
 }
 
-pub fn delete_for_media(conn: &Connection, media_id: i64) -> Result<usize> {
-    Ok(conn.execute("DELETE FROM video_detections WHERE media_id = ?1", params![media_id])?)
+pub fn delete_for_media(conn: &mut dyn Db, media_id: i64) -> Result<usize> {
+    let deleted = conn.exec("DELETE FROM video_detections WHERE media_id = $1", params![media_id])?;
+    Ok(deleted as usize)
 }
 
 /// Keeps timeline labels aligned with face review decisions. Video detections
 /// deliberately point at the underlying face row so naming or rejecting that
 /// face can be reflected without analysing the footage again.
-pub fn sync_face_people(conn: &Connection, face_ids: &[i64]) -> Result<usize> {
-    let mut stmt = conn.prepare(
+pub fn sync_face_people(conn: &mut dyn Db, face_ids: &[i64]) -> Result<usize> {
+    if face_ids.is_empty() {
+        return Ok(0);
+    }
+    // `= ANY($1)` replaces the per-id loop over a prepared statement. Under
+    // SQLite that loop was in-process and nearly free; here each execute would
+    // be a network round trip, and review actions pass hundreds of ids at once.
+    let updated = conn.exec(
         "UPDATE video_detections
             SET person_id = (SELECT person_id FROM faces WHERE id = video_detections.face_id)
-          WHERE face_id = ?1",
+          WHERE face_id = ANY($1)",
+        params![face_ids],
     )?;
-    let mut updated = 0usize;
-    for face_id in face_ids {
-        updated += stmt.execute(params![face_id])?;
-    }
-    Ok(updated)
+    Ok(updated as usize)
 }
 
 /// A false face should disappear from the video timeline, not return as an
 /// `Unknown` appearance after the reviewer has explicitly dismissed it.
-pub fn delete_for_faces(conn: &Connection, face_ids: &[i64]) -> Result<usize> {
-    let mut stmt = conn.prepare("DELETE FROM video_detections WHERE face_id = ?1")?;
-    let mut deleted = 0usize;
-    for face_id in face_ids {
-        deleted += stmt.execute(params![face_id])?;
+pub fn delete_for_faces(conn: &mut dyn Db, face_ids: &[i64]) -> Result<usize> {
+    if face_ids.is_empty() {
+        return Ok(0);
     }
-    Ok(deleted)
+    let deleted = conn.exec(
+        "DELETE FROM video_detections WHERE face_id = ANY($1)",
+        params![face_ids],
+    )?;
+    Ok(deleted as usize)
 }
 
-pub fn for_media(conn: &Connection, media_id: i64) -> Result<Vec<VideoDetection>> {
-    let mut stmt = conn.prepare("SELECT * FROM video_detections WHERE media_id = ?1 ORDER BY person_id, timestamp")?;
-    let rows = stmt
-        .query_map(params![media_id], map)?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
+pub fn for_media(conn: &mut dyn Db, media_id: i64) -> Result<Vec<VideoDetection>> {
+    conn.rows(
+        "SELECT * FROM video_detections WHERE media_id = $1 ORDER BY person_id, timestamp",
+        params![media_id],
+    )?
+    .iter()
+    .map(map)
+    .collect()
 }
 
 /// One entry per player appearing in the video, each holding merged time ranges.
-pub fn timelines(conn: &Connection, media_id: i64) -> Result<Vec<VideoTimeline>> {
-    let mut stmt = conn.prepare(
-        "SELECT vd.*, p.name AS person_name FROM video_detections vd
-      LEFT JOIN people p ON p.id = vd.person_id
-          WHERE vd.media_id = ?1
-          ORDER BY vd.person_id IS NULL, p.name COLLATE NOCASE, vd.timestamp",
-    )?;
-
-    let rows = stmt
-        .query_map(params![media_id], |row| {
-            Ok((map(row)?, row.get::<_, Option<String>>("person_name")?))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+pub fn timelines(conn: &mut dyn Db, media_id: i64) -> Result<Vec<VideoTimeline>> {
+    // `person_id IS NULL` sorts unknowns last in both engines — false before
+    // true, as 0 before 1 — and `p.name` picks up the column's `nocase`
+    // collation, which is what `COLLATE NOCASE` did here.
+    let rows = conn
+        .rows(
+            "SELECT vd.*, p.name AS person_name FROM video_detections vd
+          LEFT JOIN people p ON p.id = vd.person_id
+              WHERE vd.media_id = $1
+              ORDER BY (vd.person_id IS NULL), p.name, vd.timestamp",
+            params![media_id],
+        )?
+        .iter()
+        .map(|row| Ok((map(row)?, get::<Option<String>>(row, "person_name")?)))
+        .collect::<Result<Vec<_>>>()?;
 
     let mut out: Vec<VideoTimeline> = Vec::new();
     for (detection, person_name) in rows {
@@ -153,11 +173,11 @@ mod tests {
 
     #[test]
     fn nearby_hits_collapse_into_one_appearance() {
-        let db = Database::open_in_memory().unwrap();
-        let conn = db.conn().unwrap();
-        let shoot = shoots::create(&conn, "S", "C:\\s").unwrap();
+        let db = Database::open_test().unwrap();
+        let mut conn = db.conn().unwrap();
+        let shoot = shoots::create(&mut conn, "S", "C:\\s").unwrap();
         let media_id = media::upsert(
-            &conn,
+            &mut conn,
             &NewMedia {
                 shoot_id: shoot.id,
                 path: "C:\\s\\final.mp4".into(),
@@ -170,14 +190,14 @@ mod tests {
             },
         )
         .unwrap();
-        let person = people::get_or_create(&conn, "Jonathan", None).unwrap();
+        let person = people::get_or_create(&mut conn, "Jonathan", None).unwrap();
 
         // Two clusters of hits: ~74s and ~208s.
         for t in [74.0, 76.0, 78.0, 208.0, 210.0] {
-            insert(&conn, media_id, Some(person.id), None, t, 0.95).unwrap();
+            insert(&mut conn, media_id, Some(person.id), None, t, 0.95).unwrap();
         }
 
-        let timelines = timelines(&conn, media_id).unwrap();
+        let timelines = timelines(&mut conn, media_id).unwrap();
         assert_eq!(timelines.len(), 1);
         let appearances = &timelines[0].appearances;
         assert_eq!(appearances.len(), 2);
@@ -188,11 +208,11 @@ mod tests {
 
     #[test]
     fn review_decisions_update_or_remove_the_linked_timeline_detection() {
-        let db = Database::open_in_memory().unwrap();
-        let conn = db.conn().unwrap();
-        let shoot = shoots::create(&conn, "S", "C:\\s").unwrap();
+        let db = Database::open_test().unwrap();
+        let mut conn = db.conn().unwrap();
+        let shoot = shoots::create(&mut conn, "S", "C:\\s").unwrap();
         let media_id = media::upsert(
-            &conn,
+            &mut conn,
             &NewMedia {
                 shoot_id: shoot.id,
                 path: "C:\\s\\review.mp4".into(),
@@ -206,7 +226,7 @@ mod tests {
         )
         .unwrap();
         let face_id = faces::insert(
-            &conn,
+            &mut conn,
             &NewFace {
                 media_id,
                 shoot_id: shoot.id,
@@ -225,31 +245,31 @@ mod tests {
             },
         )
         .unwrap();
-        insert(&conn, media_id, None, Some(face_id), 5.0, 0.9).unwrap();
+        insert(&mut conn, media_id, None, Some(face_id), 5.0, 0.9).unwrap();
 
-        let person = people::get_or_create(&conn, "Jonathan", None).unwrap();
-        faces::assign(&conn, face_id, person.id, Some(1.0)).unwrap();
-        sync_face_people(&conn, &[face_id]).unwrap();
+        let person = people::get_or_create(&mut conn, "Jonathan", None).unwrap();
+        faces::assign(&mut conn, face_id, person.id, Some(1.0)).unwrap();
+        sync_face_people(&mut conn, &[face_id]).unwrap();
         assert_eq!(
-            timelines(&conn, media_id).unwrap()[0].person_name.as_deref(),
+            timelines(&mut conn, media_id).unwrap()[0].person_name.as_deref(),
             Some("Jonathan")
         );
 
-        faces::reject_many(&conn, &[face_id]).unwrap();
-        sync_face_people(&conn, &[face_id]).unwrap();
-        assert_eq!(timelines(&conn, media_id).unwrap()[0].person_id, None);
+        faces::reject_many(&mut conn, &[face_id]).unwrap();
+        sync_face_people(&mut conn, &[face_id]).unwrap();
+        assert_eq!(timelines(&mut conn, media_id).unwrap()[0].person_id, None);
 
-        delete_for_faces(&conn, &[face_id]).unwrap();
-        assert!(timelines(&conn, media_id).unwrap().is_empty());
+        delete_for_faces(&mut conn, &[face_id]).unwrap();
+        assert!(timelines(&mut conn, media_id).unwrap().is_empty());
     }
 
     #[test]
     fn analysed_samples_are_kept_even_when_they_have_no_faces() {
-        let db = Database::open_in_memory().unwrap();
-        let conn = db.conn().unwrap();
-        let shoot = shoots::create(&conn, "S", "C:\\s").unwrap();
+        let db = Database::open_test().unwrap();
+        let mut conn = db.conn().unwrap();
+        let shoot = shoots::create(&mut conn, "S", "C:\\s").unwrap();
         let media_id = media::upsert(
-            &conn,
+            &mut conn,
             &NewMedia {
                 shoot_id: shoot.id,
                 path: "C:\\s\\empty-frame.mp4".into(),
@@ -263,12 +283,14 @@ mod tests {
         )
         .unwrap();
 
-        insert_sample_frame(&conn, media_id, 0.0).unwrap();
-        insert_sample_frame(&conn, media_id, 5.0).unwrap();
-        insert_sample_frame(&conn, media_id, 5.0).unwrap();
-        assert_eq!(sample_times(&conn, media_id).unwrap(), vec![0.0, 5.0]);
+        insert_sample_frame(&mut conn, media_id, 0.0).unwrap();
+        insert_sample_frame(&mut conn, media_id, 5.0).unwrap();
+        // The repeat must be swallowed by `ON CONFLICT`, not raise a duplicate
+        // key — the analyser re-samples the same timestamp on a re-run.
+        assert_eq!(insert_sample_frame(&mut conn, media_id, 5.0).unwrap(), 0);
+        assert_eq!(sample_times(&mut conn, media_id).unwrap(), vec![0.0, 5.0]);
 
-        delete_sample_frames(&conn, media_id).unwrap();
-        assert!(sample_times(&conn, media_id).unwrap().is_empty());
+        delete_sample_frames(&mut conn, media_id).unwrap();
+        assert!(sample_times(&mut conn, media_id).unwrap().is_empty());
     }
 }

@@ -11,20 +11,63 @@ It talks to a small local HTTP bridge that the desktop app runs on
 [`apps/desktop/src-tauri/src/premiere_api.rs`](../desktop/src-tauri/src/premiere_api.rs))
 — so **SKWAD Media Organiser must be running** for the panel to work.
 
-## Install (development / direct load, no marketplace listing)
+## How it reaches users
+
+Nobody installs this by hand. The desktop app ships the panel inside its own
+installer and installs it on first launch, so an editor installs SKWAD Media
+Organiser, opens Premiere, and finds the panel under **Window → Extensions →
+SKWAD Collections**. No UXP Developer Tool, no developer mode, no Creative
+Cloud Marketplace listing, no Adobe account.
+
+That works because a UXP plugin cannot be installed by copying a folder into
+place — Premiere reads a registry of installed plugins that only Adobe's own
+installer agent writes — and that agent, `UnifiedPluginInstallerAgent`, ships
+with the Creative Cloud desktop app and is therefore already on every machine
+that runs Premiere. See
+[`apps/desktop/src-tauri/src/premiere_plugin.rs`](../desktop/src-tauri/src/premiere_plugin.rs)
+for why the install runs at launch rather than from the installer.
+
+**Settings → Premiere Pro panel** in the desktop app reports whether the panel
+is installed and offers a retry — the first place to look when an editor says
+it isn't there.
+
+### Building the package
+
+```bash
+npm run package:premiere-panel
+```
+
+Writes `apps/desktop/src-tauri/resources/premiere-panel/skwad-collections.ccx`
+(a `.ccx` is an ordinary zip with `manifest.json` at its root) and stages the
+manifest beside it, which is how the app tells whether an installed panel is
+current. `npm run build` runs this first, so a release always ships the panel
+as it stands in this folder.
+
+The package is **unsigned**. If a Creative Cloud version refuses it, sign it
+once with the UXP Developer Tool's **Package** command and stage that instead —
+nothing downstream changes, because both are just a file at the same path:
+
+```bash
+node scripts/package-premiere-panel.mjs --from path/to/signed.ccx
+```
+
+## Developing the panel
+
+To iterate on the panel itself, load it directly rather than rebuilding and
+reinstalling the app each time:
 
 1. Install Adobe's **UXP Developer Tool** (free, from the Creative Cloud
    desktop app or [Adobe's UXP developer site](https://developer.adobe.com/creative-cloud/console/)).
 2. In Premiere Pro: **Edit → Preferences → Plugins → check "Enable developer
-   mode"** (required on recent Premiere versions before it will load
-   unsigned local plugins; restart Premiere if prompted).
-3. Open UXP Developer Tool → **Add Plugin** → select this folder's
-   `manifest.json`.
-4. Click **Load** with Premiere Pro running. The panel appears under
-   Premiere's **Window → Extensions → SKWAD Collections**.
+   mode"** (restart Premiere if prompted).
+3. UXP Developer Tool → **Add Plugin** → select this folder's `manifest.json`.
+4. Click **Load** with Premiere Pro running.
 
-No Adobe account, review, or fee is required for this — it's only needed if
-you later choose to list the panel on the Creative Cloud Marketplace.
+This is a developer-machine workflow only; none of it reaches users. A panel
+loaded this way talks to the same bridge as an installed one, so the two are
+interchangeable for testing — but having both at once is confusing, so remove
+the installed copy first (**Creative Cloud → Stock & Marketplace → Manage
+plugins**) if the wrong one keeps loading.
 
 ## First run
 
@@ -69,10 +112,3 @@ import fails with something bin-related, check the current pattern in
 Adobe's [`uxp-premiere-pro-samples`](https://github.com/AdobeDocs/uxp-premiere-pro-samples)
 repo and adjust the `createBin` function in `main.js` — nothing else in the
 panel needs to change.
-
-## Packaging for distribution to a team
-
-`UXP Developer Tool` → **Package** produces a `.ccx` file you can hand to
-teammates directly (they load it the same way, via **Add Plugin**), or push
-through Adobe's enterprise distribution if you manage Premiere via the Adobe
-Admin Console. No Creative Cloud Marketplace listing is required for either.

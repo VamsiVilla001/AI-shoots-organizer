@@ -129,8 +129,8 @@ impl Default for AppSettings {
 
 impl AppSettings {
     pub fn load(db: &Database) -> DbResult<Self> {
-        let conn = db.conn()?;
-        let mut loaded: Self = settings::get(&conn, KEY, AppSettings::default())?;
+        let mut conn = db.conn()?;
+        let mut loaded: Self = settings::get(&mut conn, KEY, AppSettings::default())?;
         // Upgrade installations that still carry the original permissive
         // pair. Custom values are respected; only the exact legacy defaults
         // are migrated.
@@ -139,14 +139,14 @@ impl AppSettings {
         {
             loaded.recognition_threshold = AppSettings::default().recognition_threshold;
             loaded.recognition_margin = AppSettings::default().recognition_margin;
-            settings::set(&conn, KEY, &loaded)?;
+            settings::set(&mut conn, KEY, &loaded)?;
         }
         Ok(loaded)
     }
 
     pub fn save(&self, db: &Database) -> DbResult<()> {
-        let conn = db.conn()?;
-        settings::set(&conn, KEY, self)
+        let mut conn = db.conn()?;
+        settings::set(&mut conn, KEY, self)
     }
 
     /// Clamps every value into a range the pipeline can actually work with.
@@ -309,7 +309,7 @@ mod tests {
 
     #[test]
     fn settings_round_trip_through_the_database() {
-        let db = Database::open_in_memory().unwrap();
+        let db = Database::open_test().unwrap();
         assert_eq!(
             AppSettings::load(&db).unwrap().recognition_threshold,
             AppSettings::default().recognition_threshold
@@ -329,7 +329,7 @@ mod tests {
 
     #[test]
     fn legacy_permissive_recognition_defaults_are_tightened_on_load() {
-        let db = Database::open_in_memory().unwrap();
+        let db = Database::open_test().unwrap();
         let legacy = AppSettings {
             recognition_threshold: LEGACY_RECOGNITION_THRESHOLD,
             recognition_margin: LEGACY_RECOGNITION_MARGIN,

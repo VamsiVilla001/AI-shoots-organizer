@@ -4,6 +4,7 @@
 //! could take longer than a frame is queued as a job or spawned onto a thread
 //! rather than run here, because a command blocks the caller's promise.
 
+use skwad_database::Db;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -121,14 +122,14 @@ pub fn model_status(state: State<'_, Arc<AppState>>) -> Result<ModelStatus> {
 
 #[tauri::command]
 pub fn list_shoots(state: State<'_, Arc<AppState>>) -> Result<Vec<ShootSummary>> {
-    let conn = state.db.conn()?;
-    Ok(shoots::list_summaries(&conn)?)
+    let mut conn = state.db.conn()?;
+    Ok(shoots::list_summaries(&mut conn)?)
 }
 
 #[tauri::command]
 pub fn get_shoot(state: State<'_, Arc<AppState>>, shoot_id: i64) -> Result<Option<ShootSummary>> {
-    let conn = state.db.conn()?;
-    Ok(shoots::summary(&conn, shoot_id)?)
+    let mut conn = state.db.conn()?;
+    Ok(shoots::summary(&mut conn, shoot_id)?)
 }
 
 /// Creates a shoot and immediately queues the scan.
@@ -149,9 +150,9 @@ pub fn create_shoot(
     }
 
     let shoot = {
-        let conn = state.db.conn()?;
-        let shoot = shoots::create(&conn, &name, &source_path)?;
-        jobs::enqueue(&conn, shoot.id, JobKind::Scan, None, stages::priority::SCAN, None)?;
+        let mut conn = state.db.conn()?;
+        let shoot = shoots::create(&mut conn, &name, &source_path)?;
+        jobs::enqueue(&mut conn, shoot.id, JobKind::Scan, None, stages::priority::SCAN, None)?;
         shoot
     };
 
@@ -166,18 +167,18 @@ pub fn rename_shoot(state: State<'_, Arc<AppState>>, shoot_id: i64, name: String
     if name.is_empty() {
         return Err(err("give the shoot a name"));
     }
-    let conn = state.db.conn()?;
-    Ok(shoots::rename(&conn, shoot_id, name)?)
+    let mut conn = state.db.conn()?;
+    Ok(shoots::rename(&mut conn, shoot_id, name)?)
 }
 
 /// Removes the shoot's index. The user's media is not touched (§21).
 #[tauri::command]
 pub fn delete_shoot_index(app: AppHandle, state: State<'_, Arc<AppState>>, shoot_id: i64) -> Result<()> {
     state.cancel_shoot(shoot_id);
-    let conn = state.db.conn()?;
-    jobs::cancel_for_shoot(&conn, shoot_id)?;
-    shoots::delete_index(&conn, shoot_id)?;
-    logs::record_quiet(&conn, logs::EVENT_SHOOT_DELETED, Some(shoot_id), None, None, None);
+    let mut conn = state.db.conn()?;
+    jobs::cancel_for_shoot(&mut conn, shoot_id)?;
+    shoots::delete_index(&mut conn, shoot_id)?;
+    logs::record_quiet(&mut conn, logs::EVENT_SHOOT_DELETED, Some(shoot_id), None, None, None);
     events::shoot_changed(&app, shoot_id, "deleted");
     Ok(())
 }
@@ -205,19 +206,15 @@ pub fn clear_selected_scanned_data(
     let (removed, mut thumbnail_paths, mut content_keys) = state.db.transaction(|conn| {
         let mut thumbnail_paths = Vec::<PathBuf>::new();
         let mut content_keys = Vec::<String>::new();
-        {
-            let mut statement = conn.prepare("SELECT thumbnail_path, content_key FROM media WHERE shoot_id = ?1")?;
-            for shoot_id in &shoot_ids {
-                let cached = statement
-                    .query_map(skwad_database::rusqlite::params![shoot_id], |row| {
-                        Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?))
-                    })?
-                    .collect::<skwad_database::rusqlite::Result<Vec<_>>>()?;
-                for (thumbnail_path, content_key) in cached {
-                    thumbnail_paths.extend(thumbnail_path.map(PathBuf::from));
-                    content_keys.push(content_key);
-                }
-            }
+        // One statement for the whole selection rather than one per shoot:
+        // `= ANY($1)` takes the id list directly, where the prepared-statement
+        // loop cost a round trip per shoot.
+        for row in conn.rows(
+            "SELECT thumbnail_path, content_key FROM media WHERE shoot_id = ANY($1)",
+            skwad_database::params![shoot_ids],
+        )? {
+            thumbnail_paths.extend(row.get::<_, Option<String>>(0).map(PathBuf::from));
+            content_keys.push(row.get::<_, String>(1));
         }
 
         for shoot_id in &shoot_ids {
@@ -230,14 +227,15 @@ pub fn clear_selected_scanned_data(
     thumbnail_paths.sort_unstable();
     thumbnail_paths.dedup();
     let cache_root = state.thumbnails.root();
-    let conn = state.db.conn()?;
+    let mut conn = state.db.conn()?;
     let mut thumbnails_removed = 0usize;
     for path in thumbnail_paths {
-        let still_referenced: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM media WHERE thumbnail_path = ?1)",
-            skwad_database::rusqlite::params![path.to_string_lossy().as_ref()],
-            |row| row.get(0),
-        )?;
+        let still_referenced: bool = conn
+            .row_one(
+                "SELECT EXISTS(SELECT 1 FROM media WHERE thumbnail_path = $1)",
+                skwad_database::params![path.to_string_lossy().as_ref()],
+            )?
+            .get(0);
         if still_referenced || !path.starts_with(cache_root) || !path.is_file() {
             continue;
         }
@@ -251,11 +249,12 @@ pub fn clear_selected_scanned_data(
     let mut proxies_removed = 0usize;
     let mut review_frames_removed = 0u64;
     for content_key in content_keys {
-        let still_referenced: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM media WHERE content_key = ?1)",
-            skwad_database::rusqlite::params![content_key],
-            |row| row.get(0),
-        )?;
+        let still_referenced: bool = conn
+            .row_one(
+                "SELECT EXISTS(SELECT 1 FROM media WHERE content_key = $1)",
+                skwad_database::params![content_key],
+            )?
+            .get(0);
         if !still_referenced {
             if state.proxies.remove(&content_key)? {
                 proxies_removed += 1;
@@ -288,8 +287,8 @@ pub fn clear_scanned_data(app: AppHandle, state: State<'_, Arc<AppState>>) -> Re
 
     let cleared = (|| {
         let shoot_ids = {
-            let conn = state.db.conn()?;
-            shoots::list(&conn)?
+            let mut conn = state.db.conn()?;
+            shoots::list(&mut conn)?
                 .into_iter()
                 .map(|shoot| shoot.id)
                 .collect::<Vec<_>>()
@@ -325,9 +324,9 @@ pub fn resume_processing(app: AppHandle, state: State<'_, Arc<AppState>>, shoot_
     state.resume_shoot(shoot_id);
     state.set_paused(false);
 
-    let conn = state.db.conn()?;
-    jobs::retry_failed(&conn, shoot_id)?;
-    jobs::enqueue_unique(&conn, shoot_id, JobKind::Scan, None, stages::priority::SCAN)?;
+    let mut conn = state.db.conn()?;
+    jobs::retry_failed(&mut conn, shoot_id)?;
+    jobs::enqueue_unique(&mut conn, shoot_id, JobKind::Scan, None, stages::priority::SCAN)?;
     drop(conn);
 
     let queued = stages::queue_pending_work(&state.db, shoot_id)?;
@@ -344,10 +343,10 @@ pub fn pause_processing(state: State<'_, Arc<AppState>>, shoot_id: i64, paused: 
 #[tauri::command]
 pub fn cancel_processing(app: AppHandle, state: State<'_, Arc<AppState>>, shoot_id: i64) -> Result<usize> {
     state.cancel_shoot(shoot_id);
-    let conn = state.db.conn()?;
-    let cancelled = jobs::cancel_for_shoot(&conn, shoot_id)?;
-    shoots::set_status(&conn, shoot_id, ShootStatus::Paused)?;
-    telemetry::cancel_active(&conn, shoot_id)?;
+    let mut conn = state.db.conn()?;
+    let cancelled = jobs::cancel_for_shoot(&mut conn, shoot_id)?;
+    shoots::set_status(&mut conn, shoot_id, ShootStatus::Paused)?;
+    telemetry::cancel_active(&mut conn, shoot_id)?;
     events::shoot_changed(&app, shoot_id, "cancelled");
     Ok(cancelled)
 }
@@ -357,8 +356,8 @@ pub fn cancel_processing(app: AppHandle, state: State<'_, Arc<AppState>>, shoot_
 #[tauri::command]
 pub fn reanalyse_shoot(app: AppHandle, state: State<'_, Arc<AppState>>, shoot_id: i64) -> Result<usize> {
     {
-        let conn = state.db.conn()?;
-        telemetry::cancel_active(&conn, shoot_id)?;
+        let mut conn = state.db.conn()?;
+        telemetry::cancel_active(&mut conn, shoot_id)?;
     }
     stages::reset_analysis(&state.db, shoot_id)?;
     state.resume_shoot(shoot_id);
@@ -369,8 +368,8 @@ pub fn reanalyse_shoot(app: AppHandle, state: State<'_, Arc<AppState>>, shoot_id
 
 #[tauri::command]
 pub fn get_progress(state: State<'_, Arc<AppState>>, shoot_id: i64) -> Result<ProcessingProgress> {
-    let conn = state.db.conn()?;
-    let mut progress = jobs::progress(&conn, shoot_id)?;
+    let mut conn = state.db.conn()?;
+    let mut progress = jobs::progress(&mut conn, shoot_id)?;
     if let Some(blockage) = state.blockage(shoot_id) {
         progress.blocked_kind = Some(blockage.kind);
         progress.blocked_reason = Some(blockage.reason);
@@ -385,9 +384,9 @@ pub fn get_progress(state: State<'_, Arc<AppState>>, shoot_id: i64) -> Result<Pr
 #[tauri::command]
 pub fn list_projects(state: State<'_, Arc<AppState>>) -> Result<Vec<Project>> {
     let (account_id, email, organisation) = crate::catalogue::current_project_identity(&state)?;
-    let conn = state.db.conn()?;
+    let mut conn = state.db.conn()?;
     Ok(projects::list_accessible(
-        &conn,
+        &mut conn,
         &account_id,
         &email,
         organisation.as_deref(),
@@ -400,16 +399,16 @@ pub fn save_project(state: State<'_, Arc<AppState>>, project: Project) -> Result
     state
         .db
         .transaction(|conn| projects::save(conn, &project, &account_id, &email, organisation.as_deref()))?;
-    let conn = state.db.conn()?;
-    projects::get(&conn, &project.id, &account_id, &email, organisation.as_deref())?
+    let mut conn = state.db.conn()?;
+    projects::get(&mut conn, &project.id, &account_id, &email, organisation.as_deref())?
         .ok_or_else(|| err("the project could not be loaded after saving"))
 }
 
 #[tauri::command]
 pub fn delete_project(state: State<'_, Arc<AppState>>, project_id: String) -> Result<()> {
     let (account_id, _, _) = crate::catalogue::current_project_identity(&state)?;
-    let conn = state.db.conn()?;
-    Ok(projects::delete(&conn, &project_id, &account_id)?)
+    let mut conn = state.db.conn()?;
+    Ok(projects::delete(&mut conn, &project_id, &account_id)?)
 }
 
 #[tauri::command]
@@ -419,26 +418,26 @@ pub fn replace_project_members(
     members: Vec<ProjectMember>,
 ) -> Result<Project> {
     let (account_id, email, organisation) = crate::catalogue::current_project_identity(&state)?;
-    // `replace_members` opens its own transaction, so it takes a plain
-    // connection — wrapping it in `db.transaction` made SQLite reject the
-    // inner BEGIN ("cannot start a transaction within a transaction") and
-    // broke sharing outright.
-    let conn = state.db.conn()?;
-    projects::replace_members(&conn, &project_id, &members, &account_id, &email)?;
-    projects::get(&conn, &project_id, &account_id, &email, organisation.as_deref())?
+    // `replace_members` runs its own transaction, so it takes the `Database`
+    // rather than a connection. Under SQLite it took a plain connection and
+    // opened a transaction on it with `unchecked_transaction`, which meant
+    // wrapping this call in `db.transaction` was rejected as a nested BEGIN.
+    projects::replace_members(&state.db, &project_id, &members, &account_id, &email)?;
+    let mut conn = state.db.conn()?;
+    projects::get(&mut conn, &project_id, &account_id, &email, organisation.as_deref())?
         .ok_or_else(|| err("the project could not be loaded after sharing"))
 }
 
 #[tauri::command]
 pub fn get_shoot_telemetry(state: State<'_, Arc<AppState>>, shoot_id: i64) -> Result<ShootTelemetry> {
-    let conn = state.db.conn()?;
-    Ok(telemetry::latest(&conn, shoot_id)?)
+    let mut conn = state.db.conn()?;
+    Ok(telemetry::latest(&mut conn, shoot_id)?)
 }
 
 #[tauri::command]
 pub fn list_failed_jobs(state: State<'_, Arc<AppState>>, shoot_id: i64) -> Result<Vec<Job>> {
-    let conn = state.db.conn()?;
-    Ok(jobs::list_failed(&conn, shoot_id, 200)?)
+    let mut conn = state.db.conn()?;
+    Ok(jobs::list_failed(&mut conn, shoot_id, 200)?)
 }
 
 // ---------------------------------------------------------------------------
@@ -447,20 +446,20 @@ pub fn list_failed_jobs(state: State<'_, Arc<AppState>>, shoot_id: i64) -> Resul
 
 #[tauri::command]
 pub fn list_media(state: State<'_, Arc<AppState>>, query: MediaQuery) -> Result<Vec<Media>> {
-    let conn = state.db.conn()?;
-    Ok(media_repo::query(&conn, &query)?)
+    let mut conn = state.db.conn()?;
+    Ok(media_repo::query(&mut conn, &query)?)
 }
 
 #[tauri::command]
 pub fn get_media(state: State<'_, Arc<AppState>>, media_id: i64) -> Result<Option<Media>> {
-    let conn = state.db.conn()?;
-    Ok(media_repo::get_by_id(&conn, media_id)?)
+    let mut conn = state.db.conn()?;
+    Ok(media_repo::get_by_id(&mut conn, media_id)?)
 }
 
 #[tauri::command]
 pub fn media_faces(state: State<'_, Arc<AppState>>, media_id: i64) -> Result<Vec<Face>> {
-    let conn = state.db.conn()?;
-    Ok(faces::for_media(&conn, media_id)?)
+    let mut conn = state.db.conn()?;
+    Ok(faces::for_media(&mut conn, media_id)?)
 }
 
 /// Stores editor-owned stars and pick/reject flags. This accepts multiple ids
@@ -477,17 +476,17 @@ pub fn set_media_editorial(
         return Err(err("select at least one file to rate"));
     }
 
-    let conn = state.db.conn()?;
+    let mut conn = state.db.conn()?;
     let mut shoot_ids = Vec::new();
     for media_id in &media_ids {
-        let media = media_repo::get_by_id(&conn, *media_id)?
+        let media = media_repo::get_by_id(&mut conn, *media_id)?
             .ok_or_else(|| err(format!("media {media_id} no longer exists")))?;
         shoot_ids.push(media.shoot_id);
     }
     shoot_ids.sort_unstable();
     shoot_ids.dedup();
 
-    let changed = media_repo::set_editorial_state(&conn, &media_ids, rating, pick_state.as_deref())?;
+    let changed = media_repo::set_editorial_state(&mut conn, &media_ids, rating, pick_state.as_deref())?;
     for shoot_id in shoot_ids {
         events::shoot_changed(&app, shoot_id, "editorial");
     }
@@ -517,8 +516,8 @@ pub fn open_path(app: AppHandle, path: String) -> Result<()> {
 
 #[tauri::command]
 pub fn list_people(state: State<'_, Arc<AppState>>, shoot_id: Option<i64>) -> Result<Vec<PersonSummary>> {
-    let conn = state.db.conn()?;
-    Ok(people::list_summaries(&conn, shoot_id)?)
+    let mut conn = state.db.conn()?;
+    Ok(people::list_summaries(&mut conn, shoot_id)?)
 }
 
 /// The hidden shoot enrollment reference photos/video are parked in, or
@@ -528,8 +527,8 @@ pub fn list_people(state: State<'_, Arc<AppState>>, shoot_id: Option<i64>) -> Re
 /// effect of merely checking.
 #[tauri::command]
 pub fn reference_library_shoot_id(state: State<'_, Arc<AppState>>) -> Result<Option<i64>> {
-    let conn = state.db.conn()?;
-    Ok(shoots::reference_library_id(&conn)?)
+    let mut conn = state.db.conn()?;
+    Ok(shoots::reference_library_id(&mut conn)?)
 }
 
 /// The Pre-Process tab's list: only people enrolled by name + reference
@@ -538,9 +537,9 @@ pub fn reference_library_shoot_id(state: State<'_, Arc<AppState>>) -> Result<Opt
 /// has enrolled yet.
 #[tauri::command]
 pub fn list_enrolled_people(state: State<'_, Arc<AppState>>) -> Result<Vec<PersonSummary>> {
-    let conn = state.db.conn()?;
-    match shoots::reference_library_id(&conn)? {
-        Some(reference_shoot_id) => Ok(people::list_enrolled_summaries(&conn, reference_shoot_id)?),
+    let mut conn = state.db.conn()?;
+    match shoots::reference_library_id(&mut conn)? {
+        Some(reference_shoot_id) => Ok(people::list_enrolled_summaries(&mut conn, reference_shoot_id)?),
         None => Ok(Vec::new()),
     }
 }
@@ -552,10 +551,10 @@ pub fn create_person(
     name: String,
     team: Option<String>,
 ) -> Result<Person> {
-    let conn = state.db.conn()?;
-    let person = people::get_or_create(&conn, &name, team.as_deref())?;
+    let mut conn = state.db.conn()?;
+    let person = people::get_or_create(&mut conn, &name, team.as_deref())?;
     logs::record_quiet(
-        &conn,
+        &mut conn,
         logs::EVENT_PLAYER_CREATED,
         None,
         None,
@@ -625,12 +624,12 @@ pub async fn enroll_person(
         let mut engine = crate::pipeline::Engine::new(&state.paths, &settings)?;
 
         let person = {
-            let conn = state.db.conn()?;
-            people::get_or_create(&conn, &name, team.as_deref())?
+            let mut conn = state.db.conn()?;
+            people::get_or_create(&mut conn, &name, team.as_deref())?
         };
         let reference_shoot = {
-            let conn = state.db.conn()?;
-            shoots::get_or_create_reference_library(&conn)?
+            let mut conn = state.db.conn()?;
+            shoots::get_or_create_reference_library(&mut conn)?
         };
 
         let mut samples: Vec<ReferenceSample> = Vec::new();
@@ -651,9 +650,9 @@ pub async fn enroll_person(
             let path = PathBuf::from(video_path);
 
             let media_id = {
-                let conn = state.db.conn()?;
+                let mut conn = state.db.conn()?;
                 media_repo::upsert(
-                    &conn,
+                    &mut conn,
                     &NewMedia {
                         shoot_id: reference_shoot.id,
                         path: video_path.clone(),
@@ -673,16 +672,16 @@ pub async fn enroll_person(
                 )?
             };
             let mut item = {
-                let conn = state.db.conn()?;
-                media_repo::get_by_id(&conn, media_id)?
+                let mut conn = state.db.conn()?;
+                media_repo::get_by_id(&mut conn, media_id)?
                     .ok_or_else(|| err("the reference video could not be indexed"))?
             };
             // Populates width/height/duration/orientation so the sampler below
             // can plan against real dimensions, exactly like a scanned video.
             crate::pipeline::index_media(&state.db, &state.thumbnails, engine.ffmpeg(), &item)?;
             item = {
-                let conn = state.db.conn()?;
-                media_repo::get_by_id(&conn, media_id)?
+                let mut conn = state.db.conn()?;
+                media_repo::get_by_id(&mut conn, media_id)?
                     .ok_or_else(|| err("the reference video could not be indexed"))?
             };
 
@@ -788,9 +787,9 @@ fn reference_sample_from_photo(
     let quality = face.detection.quality(width, height);
 
     let media_id = {
-        let conn = state.db.conn()?;
+        let mut conn = state.db.conn()?;
         media_repo::upsert(
-            &conn,
+            &mut conn,
             &NewMedia {
                 shoot_id: reference_shoot_id,
                 path: photo_path.to_string(),
@@ -810,8 +809,8 @@ fn reference_sample_from_photo(
         )?
     };
     let item = {
-        let conn = state.db.conn()?;
-        media_repo::get_by_id(&conn, media_id)?.ok_or_else(|| err("the reference photo could not be indexed"))?
+        let mut conn = state.db.conn()?;
+        media_repo::get_by_id(&mut conn, media_id)?.ok_or_else(|| err("the reference photo could not be indexed"))?
     };
     crate::pipeline::index_media(&state.db, &state.thumbnails, engine.ffmpeg(), &item)?;
 
@@ -990,8 +989,8 @@ pub async fn enroll_people_from_directory(
         let settings = state.settings();
         let mut engine = crate::pipeline::Engine::new(&state.paths, &settings)?;
         let reference_shoot = {
-            let conn = state.db.conn()?;
-            shoots::get_or_create_reference_library(&conn)?
+            let mut conn = state.db.conn()?;
+            shoots::get_or_create_reference_library(&mut conn)?
         };
 
         let mut enrolled = Vec::new();
@@ -1012,8 +1011,8 @@ pub async fn enroll_people_from_directory(
             }
 
             let person = {
-                let conn = state.db.conn()?;
-                people::get_or_create(&conn, &entry.name, team.as_deref())?
+                let mut conn = state.db.conn()?;
+                people::get_or_create(&mut conn, &entry.name, team.as_deref())?
             };
             let samples_added = samples.len();
             write_reference_samples(&state, person.id, reference_shoot.id, &samples)?;
@@ -1060,8 +1059,8 @@ pub async fn find_person_media(
             let shoot_ids: Vec<i64> = match shoot_id {
                 Some(id) => vec![id],
                 None => {
-                    let conn = state.db.conn()?;
-                    shoots::list(&conn)?.into_iter().map(|s| s.id).collect()
+                    let mut conn = state.db.conn()?;
+                    shoots::list(&mut conn)?.into_iter().map(|s| s.id).collect()
                 }
             };
 
@@ -1097,10 +1096,10 @@ pub async fn find_person_media(
 
 #[tauri::command]
 pub fn rename_person(app: AppHandle, state: State<'_, Arc<AppState>>, person_id: i64, name: String) -> Result<()> {
-    let conn = state.db.conn()?;
-    people::rename(&conn, person_id, &name)?;
+    let mut conn = state.db.conn()?;
+    people::rename(&mut conn, person_id, &name)?;
     logs::record_quiet(
-        &conn,
+        &mut conn,
         logs::EVENT_PLAYER_RENAMED,
         None,
         None,
@@ -1118,17 +1117,17 @@ pub fn update_person(
     team: Option<String>,
     notes: Option<String>,
 ) -> Result<()> {
-    let conn = state.db.conn()?;
-    Ok(people::update(&conn, person_id, team.as_deref(), notes.as_deref())?)
+    let mut conn = state.db.conn()?;
+    Ok(people::update(&mut conn, person_id, team.as_deref(), notes.as_deref())?)
 }
 
 /// Folds one player into another (§10, "Merge two people").
 #[tauri::command]
 pub fn merge_people(app: AppHandle, state: State<'_, Arc<AppState>>, target_id: i64, source_id: i64) -> Result<i64> {
     let moved = state.db.transaction(|conn| people::merge(conn, target_id, source_id))?;
-    let conn = state.db.conn()?;
+    let mut conn = state.db.conn()?;
     logs::record_quiet(
-        &conn,
+        &mut conn,
         logs::EVENT_PLAYER_MERGED,
         None,
         None,
@@ -1141,9 +1140,9 @@ pub fn merge_people(app: AppHandle, state: State<'_, Arc<AppState>>, target_id: 
 
 #[tauri::command]
 pub fn delete_person(app: AppHandle, state: State<'_, Arc<AppState>>, person_id: i64) -> Result<()> {
-    let conn = state.db.conn()?;
-    people::delete(&conn, person_id)?;
-    logs::record_quiet(&conn, logs::EVENT_PLAYER_DELETED, None, None, Some(person_id), None);
+    let mut conn = state.db.conn()?;
+    people::delete(&mut conn, person_id)?;
+    logs::record_quiet(&mut conn, logs::EVENT_PLAYER_DELETED, None, None, Some(person_id), None);
     events::emit(&app, events::LIBRARY_CHANGED, ());
     Ok(())
 }
@@ -1151,10 +1150,10 @@ pub fn delete_person(app: AppHandle, state: State<'_, Arc<AppState>>, person_id:
 /// Drops a player's biometric data but keeps the profile (§22, §24).
 #[tauri::command]
 pub fn clear_person_recognition(app: AppHandle, state: State<'_, Arc<AppState>>, person_id: i64) -> Result<()> {
-    let conn = state.db.conn()?;
-    people::clear_recognition_data(&conn, person_id)?;
+    let mut conn = state.db.conn()?;
+    people::clear_recognition_data(&mut conn, person_id)?;
     logs::record_quiet(
-        &conn,
+        &mut conn,
         logs::EVENT_RECOGNITION_DATA_CLEARED,
         None,
         None,
@@ -1175,8 +1174,8 @@ pub fn list_clusters(
     shoot_id: i64,
     include_named: bool,
 ) -> Result<Vec<ClusterSummary>> {
-    let conn = state.db.conn()?;
-    Ok(clusters::list_summaries(&conn, shoot_id, include_named)?)
+    let mut conn = state.db.conn()?;
+    Ok(clusters::list_summaries(&mut conn, shoot_id, include_named)?)
 }
 
 /// Names an unknown cluster, promoting it to a player and adding every face in
@@ -1258,8 +1257,8 @@ pub fn split_cluster(
 
 #[tauri::command]
 pub fn ignore_cluster(state: State<'_, Arc<AppState>>, cluster_id: i64) -> Result<()> {
-    let conn = state.db.conn()?;
-    Ok(clusters::set_status(&conn, cluster_id, ClusterStatus::Ignored)?)
+    let mut conn = state.db.conn()?;
+    Ok(clusters::set_status(&mut conn, cluster_id, ClusterStatus::Ignored)?)
 }
 
 // ---------------------------------------------------------------------------
@@ -1268,8 +1267,8 @@ pub fn ignore_cluster(state: State<'_, Arc<AppState>>, cluster_id: i64) -> Resul
 
 #[tauri::command]
 pub fn list_albums(state: State<'_, Arc<AppState>>, shoot_id: i64) -> Result<Vec<Album>> {
-    let conn = state.db.conn()?;
-    Ok(albums::list(&conn, shoot_id)?)
+    let mut conn = state.db.conn()?;
+    Ok(albums::list(&mut conn, shoot_id)?)
 }
 
 #[tauri::command]
@@ -1305,15 +1304,15 @@ pub struct SeedResult {
 
 #[tauri::command]
 pub fn list_groups(state: State<'_, Arc<AppState>>, shoot_id: i64) -> Result<Vec<Group>> {
-    let conn = state.db.conn()?;
-    Ok(groups::list(&conn, shoot_id)?)
+    let mut conn = state.db.conn()?;
+    Ok(groups::list(&mut conn, shoot_id)?)
 }
 
 #[tauri::command]
 pub fn group_stats(state: State<'_, Arc<AppState>>, shoot_id: i64) -> Result<GroupStats> {
-    let conn = state.db.conn()?;
-    let media_total = media_repo::count_for_shoot(&conn, shoot_id)?;
-    let ungrouped = groups::ungrouped_count(&conn, shoot_id)?;
+    let mut conn = state.db.conn()?;
+    let media_total = media_repo::count_for_shoot(&mut conn, shoot_id)?;
+    let ungrouped = groups::ungrouped_count(&mut conn, shoot_id)?;
     Ok(GroupStats {
         media_total,
         grouped: media_total - ungrouped,
@@ -1324,8 +1323,8 @@ pub fn group_stats(state: State<'_, Arc<AppState>>, shoot_id: i64) -> Result<Gro
 /// Which groups hold which files, for the chips drawn on each thumbnail.
 #[tauri::command]
 pub fn group_links(state: State<'_, Arc<AppState>>, shoot_id: i64) -> Result<Vec<MediaGroupLink>> {
-    let conn = state.db.conn()?;
-    Ok(groups::links(&conn, shoot_id)?)
+    let mut conn = state.db.conn()?;
+    Ok(groups::links(&mut conn, shoot_id)?)
 }
 
 /// Creates the group the editor just named. The name is what the export folder
@@ -1333,10 +1332,10 @@ pub fn group_links(state: State<'_, Arc<AppState>>, shoot_id: i64) -> Result<Vec
 /// time — a bad name should fail while the person who typed it is looking.
 #[tauri::command]
 pub fn create_group(app: AppHandle, state: State<'_, Arc<AppState>>, shoot_id: i64, name: String) -> Result<Group> {
-    let conn = state.db.conn()?;
-    let group = groups::get_or_create(&conn, shoot_id, &name, None)?;
+    let mut conn = state.db.conn()?;
+    let group = groups::get_or_create(&mut conn, shoot_id, &name, None)?;
     logs::record_quiet(
-        &conn,
+        &mut conn,
         logs::EVENT_GROUP_CREATED,
         Some(shoot_id),
         None,
@@ -1349,11 +1348,11 @@ pub fn create_group(app: AppHandle, state: State<'_, Arc<AppState>>, shoot_id: i
 
 #[tauri::command]
 pub fn rename_group(app: AppHandle, state: State<'_, Arc<AppState>>, group_id: i64, name: String) -> Result<Group> {
-    let conn = state.db.conn()?;
-    groups::rename(&conn, group_id, &name)?;
-    let group = groups::get_by_id(&conn, group_id)?.ok_or_else(|| err("that group no longer exists"))?;
+    let mut conn = state.db.conn()?;
+    groups::rename(&mut conn, group_id, &name)?;
+    let group = groups::get_by_id(&mut conn, group_id)?.ok_or_else(|| err("that group no longer exists"))?;
     logs::record_quiet(
-        &conn,
+        &mut conn,
         logs::EVENT_GROUP_RENAMED,
         Some(group.shoot_id),
         None,
@@ -1374,9 +1373,9 @@ pub fn update_group(
     folder_name: Option<String>,
     notes: Option<String>,
 ) -> Result<Group> {
-    let conn = state.db.conn()?;
-    groups::update(&conn, group_id, folder_name.as_deref(), notes.as_deref())?;
-    let group = groups::get_by_id(&conn, group_id)?.ok_or_else(|| err("that group no longer exists"))?;
+    let mut conn = state.db.conn()?;
+    groups::update(&mut conn, group_id, folder_name.as_deref(), notes.as_deref())?;
+    let group = groups::get_by_id(&mut conn, group_id)?.ok_or_else(|| err("that group no longer exists"))?;
     events::shoot_changed(&app, group.shoot_id, "groups");
     Ok(group)
 }
@@ -1384,13 +1383,13 @@ pub fn update_group(
 /// Deletes a group. Only the grouping is lost — no file is touched.
 #[tauri::command]
 pub fn delete_group(app: AppHandle, state: State<'_, Arc<AppState>>, group_id: i64) -> Result<()> {
-    let conn = state.db.conn()?;
-    let Some(group) = groups::get_by_id(&conn, group_id)? else {
+    let mut conn = state.db.conn()?;
+    let Some(group) = groups::get_by_id(&mut conn, group_id)? else {
         return Ok(());
     };
-    groups::delete(&conn, group_id)?;
+    groups::delete(&mut conn, group_id)?;
     logs::record_quiet(
-        &conn,
+        &mut conn,
         logs::EVENT_GROUP_DELETED,
         Some(group.shoot_id),
         None,
@@ -1437,9 +1436,9 @@ pub fn add_media_to_group(
         Ok((group, added))
     })?;
 
-    let conn = state.db.conn()?;
+    let mut conn = state.db.conn()?;
     logs::record_quiet(
-        &conn,
+        &mut conn,
         logs::EVENT_GROUP_ASSIGNMENT,
         Some(group.shoot_id),
         None,
@@ -1457,9 +1456,9 @@ pub fn remove_media_from_group(
     group_id: i64,
     media_ids: Vec<i64>,
 ) -> Result<usize> {
-    let conn = state.db.conn()?;
-    let removed = groups::remove_media(&conn, group_id, &media_ids)?;
-    if let Some(group) = groups::get_by_id(&conn, group_id)? {
+    let mut conn = state.db.conn()?;
+    let removed = groups::remove_media(&mut conn, group_id, &media_ids)?;
+    if let Some(group) = groups::get_by_id(&mut conn, group_id)? {
         events::shoot_changed(&app, group.shoot_id, "groups");
     }
     Ok(removed)
@@ -1467,9 +1466,9 @@ pub fn remove_media_from_group(
 
 #[tauri::command]
 pub fn clear_group(app: AppHandle, state: State<'_, Arc<AppState>>, group_id: i64) -> Result<usize> {
-    let conn = state.db.conn()?;
-    let removed = groups::clear(&conn, group_id)?;
-    if let Some(group) = groups::get_by_id(&conn, group_id)? {
+    let mut conn = state.db.conn()?;
+    let removed = groups::clear(&mut conn, group_id)?;
+    if let Some(group) = groups::get_by_id(&mut conn, group_id)? {
         events::shoot_changed(&app, group.shoot_id, "groups");
     }
     Ok(removed)
@@ -1486,9 +1485,9 @@ pub fn groups_from_ai_albums(app: AppHandle, state: State<'_, Arc<AppState>>, sh
         .db
         .transaction(|conn| groups::seed_from_player_albums(conn, shoot_id))?;
 
-    let conn = state.db.conn()?;
+    let mut conn = state.db.conn()?;
     logs::record_quiet(
-        &conn,
+        &mut conn,
         logs::EVENT_GROUP_ASSIGNMENT,
         Some(shoot_id),
         None,
@@ -1522,7 +1521,10 @@ pub fn group_from_album(
             .filter(|s| !s.is_empty())
             .unwrap_or(&album.name);
         let group = groups::get_or_create(conn, album.shoot_id, label, album.person_ids.first().copied())?;
-        groups::add_media(conn, group.id, &albums::media_ids(conn, album_id, None)?)?;
+        {
+            let ids = albums::media_ids(conn, album_id, None)?;
+            groups::add_media(conn, group.id, &ids)?
+        };
         groups::get_by_id(conn, group.id)?.ok_or_else(|| skwad_database::DbError::other("that group no longer exists"))
     })?;
 
@@ -1536,8 +1538,8 @@ pub fn group_from_album(
 
 #[tauri::command]
 pub fn list_faces(state: State<'_, Arc<AppState>>, query: FaceQuery) -> Result<Vec<FaceWithContext>> {
-    let conn = state.db.conn()?;
-    Ok(faces::query(&conn, &query)?)
+    let mut conn = state.db.conn()?;
+    Ok(faces::query(&mut conn, &query)?)
 }
 
 /// Accepts the AI's suggestion for these faces.
@@ -1666,8 +1668,8 @@ pub async fn add_manual_face(
     let state = Arc::clone(&state);
     let result = tauri::async_runtime::spawn_blocking(move || -> Result<ManualFaceResult> {
         let media = {
-            let conn = state.db.conn()?;
-            media_repo::get_by_id(&conn, media_id)?.ok_or_else(|| err("that file is no longer in the library"))?
+            let mut conn = state.db.conn()?;
+            media_repo::get_by_id(&mut conn, media_id)?.ok_or_else(|| err("that file is no longer in the library"))?
         };
         let frame_time = if media.media_type == MediaType::Video.as_str() {
             let timestamp = frame_time
@@ -1687,8 +1689,8 @@ pub async fn add_manual_face(
         let (embedding, quality) = engine.embed_manual_face(&media, bbox, frame_time)?;
 
         let (library, used_people) = {
-            let conn = state.db.conn()?;
-            let used_people: Vec<i64> = faces::for_media(&conn, media.id)?
+            let mut conn = state.db.conn()?;
+            let used_people: Vec<i64> = faces::for_media(&mut conn, media.id)?
                 .into_iter()
                 .filter(|face| face.assignment != FaceAssignment::Ignored.as_str())
                 .filter(|face| match frame_time {
@@ -1697,7 +1699,7 @@ pub async fn add_manual_face(
                 })
                 .filter_map(|face| face.person_id)
                 .collect();
-            (faces::library_vectors(&conn)?, used_people)
+            (faces::library_vectors(&mut conn)?, used_people)
         };
         let matcher = FaceMatcher::build(library.into_iter().filter_map(|sample| {
             sample
@@ -1799,8 +1801,8 @@ pub async fn name_face(
         // reviewer typed is looked up; an unambiguous hit supplies the team, and
         // anything else leaves the caller's own value alone.
         let roster_entry = {
-            let conn = state.db.conn()?;
-            skwad_database::repo::roster::resolve(&conn, &name)?
+            let mut conn = state.db.conn()?;
+            skwad_database::repo::roster::resolve(&mut conn, &name)?
         };
         let team = team.or_else(|| roster_entry.as_ref().map(|entry| entry.team.clone()));
 
@@ -1828,13 +1830,14 @@ pub async fn name_face(
                 Some(person.id),
                 Some(&format!("named from photo; {faces_named} face(s) assigned")),
             );
-            let appearances_before_matching = conn.query_row(
-                "SELECT COUNT(*) FROM faces
-                  WHERE shoot_id = ?1 AND person_id = ?2
-                    AND assignment IN ('suggested','confirmed')",
-                skwad_database::rusqlite::params![face.shoot_id, person.id],
-                |row| row.get::<_, i64>(0),
-            )?;
+            let appearances_before_matching: i64 = conn
+                .row_one(
+                    "SELECT COUNT(*) FROM faces
+                      WHERE shoot_id = $1 AND person_id = $2
+                        AND assignment IN ('suggested','confirmed')",
+                    skwad_database::params![face.shoot_id, person.id],
+                )?
+                .get(0);
             Ok((person, faces_named, face.shoot_id, appearances_before_matching))
         })?;
 
@@ -1847,13 +1850,14 @@ pub async fn name_face(
         state
             .db
             .transaction(|conn| {
-                let appearances_after_matching = conn.query_row(
-                    "SELECT COUNT(*) FROM faces
-                  WHERE shoot_id = ?1 AND person_id = ?2
-                    AND assignment IN ('suggested','confirmed')",
-                    skwad_database::rusqlite::params![shoot_id, person.id],
-                    |row| row.get::<_, i64>(0),
-                )?;
+                let appearances_after_matching: i64 = conn
+                    .row_one(
+                        "SELECT COUNT(*) FROM faces
+                          WHERE shoot_id = $1 AND person_id = $2
+                            AND assignment IN ('suggested','confirmed')",
+                        skwad_database::params![shoot_id, person.id],
+                    )?
+                    .get(0);
                 let matches_found = appearances_after_matching
                     .saturating_sub(appearances_before_matching)
                     .max(0) as usize;
@@ -1864,7 +1868,10 @@ pub async fn name_face(
 
                 let group = groups::get_or_create(conn, shoot_id, &person.name, Some(person.id))?;
                 let files_added = match &player_album {
-                    Some(album) => groups::add_media(conn, group.id, &albums::media_ids(conn, album.id, None)?)?,
+                    Some(album) => {
+                        let ids = albums::media_ids(conn, album.id, None)?;
+                        groups::add_media(conn, group.id, &ids)?
+                    }
                     None => 0,
                 };
                 let group = groups::get_by_id(conn, group.id)?
@@ -1878,7 +1885,10 @@ pub async fn name_face(
                     Some(team) => {
                         let team_group = groups::get_or_create(conn, shoot_id, team.trim(), None)?;
                         if let Some(album) = &player_album {
-                            groups::add_media(conn, team_group.id, &albums::media_ids(conn, album.id, None)?)?;
+                            {
+                                let ids = albums::media_ids(conn, album.id, None)?;
+                                groups::add_media(conn, team_group.id, &ids)?
+                            };
                         }
                         groups::get_by_id(conn, team_group.id)?
                     }
@@ -1916,10 +1926,10 @@ pub fn ignore_faces(state: State<'_, Arc<AppState>>, face_ids: Vec<i64>) -> Resu
     })?;
 
     // Face counts on the affected images are now stale.
-    let conn = state.db.conn()?;
+    let mut conn = state.db.conn()?;
     for face_id in &face_ids {
-        if let Some(face) = faces::get_by_id(&conn, *face_id)? {
-            media_repo::refresh_face_count(&conn, face.media_id)?;
+        if let Some(face) = faces::get_by_id(&mut conn, *face_id)? {
+            media_repo::refresh_face_count(&mut conn, face.media_id)?;
         }
     }
     Ok(updated)
@@ -1931,15 +1941,15 @@ pub fn ignore_faces(state: State<'_, Arc<AppState>>, face_ids: Vec<i64>) -> Resu
 
 #[tauri::command]
 pub fn video_timelines(state: State<'_, Arc<AppState>>, media_id: i64) -> Result<Vec<VideoTimeline>> {
-    let conn = state.db.conn()?;
-    Ok(video::timelines(&conn, media_id)?)
+    let mut conn = state.db.conn()?;
+    Ok(video::timelines(&mut conn, media_id)?)
 }
 
 #[tauri::command]
 pub fn video_sample_frames(state: State<'_, Arc<AppState>>, media_id: i64) -> Result<Vec<f64>> {
-    let conn = state.db.conn()?;
-    let stored = video::sample_times(&conn, media_id)?;
-    let duration = media_repo::get_by_id(&conn, media_id)?.and_then(|media| {
+    let mut conn = state.db.conn()?;
+    let stored = video::sample_times(&mut conn, media_id)?;
+    let duration = media_repo::get_by_id(&mut conn, media_id)?.and_then(|media| {
         (media.media_type == MediaType::Video.as_str())
             .then_some(media.duration)
             .flatten()
@@ -2021,8 +2031,8 @@ pub fn cancel_export(state: State<'_, Arc<AppState>>, shoot_id: i64) -> Result<(
 
 #[tauri::command]
 pub fn list_exports(state: State<'_, Arc<AppState>>, shoot_id: i64) -> Result<Vec<ExportRecord>> {
-    let conn = state.db.conn()?;
-    Ok(exports::list(&conn, shoot_id, 20)?)
+    let mut conn = state.db.conn()?;
+    Ok(exports::list(&mut conn, shoot_id, 20)?)
 }
 
 // ---------------------------------------------------------------------------
@@ -2037,10 +2047,10 @@ pub fn send_media_to_premiere(
     media_ids: Vec<i64>,
     label: Option<String>,
 ) -> Result<()> {
-    let conn = state.db.conn()?;
+    let mut conn = state.db.conn()?;
     let mut files = Vec::new();
     for id in &media_ids {
-        if let Some(item) = media_repo::get_by_id(&conn, *id)? {
+        if let Some(item) = media_repo::get_by_id(&mut conn, *id)? {
             if std::path::Path::new(&item.path).is_file() {
                 files.push(crate::state::PremiereJobFile {
                     is_video: item.media_type == "video",
@@ -2063,8 +2073,8 @@ pub fn send_media_to_premiere(
 #[tauri::command]
 pub fn send_collection_to_premiere(state: State<'_, Arc<AppState>>, collection_id: String) -> Result<()> {
     let (account_id, email, organisation) = crate::catalogue::current_project_identity(&state)?;
-    let conn = state.db.conn()?;
-    let accessible = projects::list_accessible(&conn, &account_id, &email, organisation.as_deref())?;
+    let mut conn = state.db.conn()?;
+    let accessible = projects::list_accessible(&mut conn, &account_id, &email, organisation.as_deref())?;
     drop(conn);
 
     let collection = accessible
@@ -2095,17 +2105,17 @@ pub fn send_collection_to_premiere(state: State<'_, Arc<AppState>>, collection_i
 
 #[tauri::command]
 pub fn recent_logs(state: State<'_, Arc<AppState>>, shoot_id: Option<i64>, limit: i64) -> Result<Vec<LogEntry>> {
-    let conn = state.db.conn()?;
-    Ok(logs::recent(&conn, shoot_id, limit)?)
+    let mut conn = state.db.conn()?;
+    Ok(logs::recent(&mut conn, shoot_id, limit)?)
 }
 
 /// Deletes every embedding while leaving detections and albums intact.
 #[tauri::command]
 pub fn clear_all_embeddings(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<usize> {
     let cleared = state.db.transaction(faces::clear_all_embeddings)?;
-    let conn = state.db.conn()?;
+    let mut conn = state.db.conn()?;
     logs::record_quiet(
-        &conn,
+        &mut conn,
         logs::EVENT_RECOGNITION_DATA_CLEARED,
         None,
         None,
@@ -2120,18 +2130,21 @@ pub fn clear_all_embeddings(app: AppHandle, state: State<'_, Arc<AppState>>) -> 
 #[tauri::command]
 pub fn clear_all_recognition_data(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<()> {
     state.db.transaction(|conn| {
-        conn.execute("DELETE FROM video_detections", [])?;
-        conn.execute("DELETE FROM faces", [])?;
-        conn.execute("DELETE FROM clusters", [])?;
-        conn.execute("DELETE FROM albums", [])?;
-        conn.execute("DELETE FROM people", [])?;
-        conn.execute("UPDATE media SET face_count = 0, processing_status = 'indexed'", [])?;
+        conn.exec("DELETE FROM video_detections", skwad_database::params![])?;
+        conn.exec("DELETE FROM faces", skwad_database::params![])?;
+        conn.exec("DELETE FROM clusters", skwad_database::params![])?;
+        conn.exec("DELETE FROM albums", skwad_database::params![])?;
+        conn.exec("DELETE FROM people", skwad_database::params![])?;
+        conn.exec(
+            "UPDATE media SET face_count = 0, processing_status = 'indexed'",
+            skwad_database::params![],
+        )?;
         Ok(())
     })?;
 
-    let conn = state.db.conn()?;
+    let mut conn = state.db.conn()?;
     logs::record_quiet(
-        &conn,
+        &mut conn,
         logs::EVENT_RECOGNITION_DATA_CLEARED,
         None,
         None,
@@ -2145,16 +2158,15 @@ pub fn clear_all_recognition_data(app: AppHandle, state: State<'_, Arc<AppState>
 #[tauri::command]
 pub fn clear_thumbnail_cache(state: State<'_, Arc<AppState>>) -> Result<u64> {
     let removed = state.thumbnails.clear()? + state.proxies.clear()?;
-    let conn = state.db.conn()?;
-    conn.execute("UPDATE media SET thumbnail_path = NULL", [])
-        .map_err(skwad_database::DbError::from)?;
+    let mut conn = state.db.conn()?;
+    conn.exec("UPDATE media SET thumbnail_path = NULL", skwad_database::params![])?;
     Ok(removed)
 }
 
 #[tauri::command]
 pub fn clear_log(state: State<'_, Arc<AppState>>) -> Result<()> {
-    let conn = state.db.conn()?;
-    Ok(logs::clear(&conn)?)
+    let mut conn = state.db.conn()?;
+    Ok(logs::clear(&mut conn)?)
 }
 
 #[cfg(test)]

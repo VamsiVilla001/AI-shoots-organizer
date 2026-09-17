@@ -18,6 +18,7 @@ export function SettingsScreen() {
   const info = useQuery({ queryKey: ['appInfo'], queryFn: api.appInfo })
   const session = useQuery({ queryKey: ['catalogueSession'], queryFn: api.catalogueSessionStatus })
   const settingsQuery = useQuery({ queryKey: ['settings'], queryFn: api.getSettings })
+  const panel = useQuery({ queryKey: ['premierePanel'], queryFn: api.premierePanelStatus })
   const [draft, setDraft] = useState<AppSettings | null>(null)
 
   useEffect(() => {
@@ -42,6 +43,17 @@ export function SettingsScreen() {
       queryClient.invalidateQueries({ queryKey: ['appInfo'] })
     },
   })
+  const installPanel = useMutation({
+    mutationFn: api.installPremierePanel,
+    onSuccess: (status) => {
+      queryClient.setQueryData(['premierePanel'], status)
+      pushNotice({
+        level: 'success',
+        message: 'Premiere panel installed — restart Premiere Pro, then open Window → Extensions → SKWAD Collections.',
+      })
+    },
+    onError: (e) => pushNotice({ level: 'error', message: String(e) }),
+  })
   const clearEmbeddings = useMutation({ mutationFn: api.clearAllEmbeddings })
   const clearEverything = useMutation({
     mutationFn: api.clearAllRecognitionData,
@@ -61,6 +73,41 @@ export function SettingsScreen() {
   const set = <K extends keyof AppSettings>(key: K, value: AppSettings[K]) =>
     setDraft({ ...draft, [key]: value })
 
+  /**
+   * The panel installs itself on launch, so this is only ever a report — and
+   * the cases worth distinguishing are the ones where it did not: no Creative
+   * Cloud to install through, or a build that never packaged the panel.
+   */
+  const panelHint = () => {
+    if (!panel.data) return <div className="hint">Checking…</div>
+    const { bundledVersion, installedVersion, installerAvailable } = panel.data
+    if (installedVersion) {
+      return (
+        <div className="hint">
+          Installed (version {installedVersion}). Open it in Premiere Pro under Window →
+          {' '}Extensions → SKWAD Collections. Keep this app running — the panel reads your
+          {' '}Collections from it.
+        </div>
+      )
+    }
+    if (!bundledVersion) {
+      return <div className="hint">This build does not include the Premiere panel.</div>
+    }
+    if (!installerAvailable) {
+      return (
+        <div className="hint">
+          Not installed — the Creative Cloud desktop app is needed to install Premiere
+          {' '}plugins, and it was not found on this machine.
+        </div>
+      )
+    }
+    return (
+      <div className="hint">
+        Not installed yet. It installs automatically on launch; use the button if it did
+        {' '}not.
+      </div>
+    )
+  }
   const number = (
     label: string,
     key: keyof AppSettings,
@@ -194,6 +241,17 @@ export function SettingsScreen() {
             {clearIndexes.isPending ? 'Clearing indexed media…' : 'Clear all indexed media'}
           </button>
 
+          <h2 style={{ marginTop: 8 }}>Premiere Pro panel</h2>
+          {panelHint()}
+          {panel.data?.bundledVersion && !panel.data.installedVersion && panel.data.installerAvailable && (
+            <button
+              className="small"
+              disabled={installPanel.isPending}
+              onClick={() => installPanel.mutate()}
+            >
+              {installPanel.isPending ? 'Installing…' : 'Install panel'}
+            </button>
+          )}
           <h2 style={{ marginTop: 8 }}>Privacy</h2>
           <div className="hint">
             All recognition runs locally. Nothing is uploaded, ever.

@@ -2,9 +2,50 @@ use std::{io::Cursor, path::Path};
 
 use rusqlite::{params, params_from_iter, types::Value, Connection};
 use serde::{Deserialize, Serialize};
+use skwad_database::client::Db;
 use zeroize::Zeroizing;
 
 use crate::{normalize_relative_path, CatalogueError, Result};
+
+/// A portable catalogue is read **out of** the live index and written **into**
+/// a standalone SQLite file, so the two halves of this module speak different
+/// dialects: the `source` is now PostgreSQL (`&mut dyn Db`), while the
+/// destination stays a `rusqlite::Connection`.
+///
+/// The destination deliberately did not move with the rest of the storage
+/// layer. A `.skwadpkg` is a file handed to another studio — one file, no
+/// server, openable by anything that can read SQLite. That is a container
+/// format, not a database the application runs on, so Postgres has nothing to
+/// offer it.
+///
+/// Converts one column of a Postgres row into the dynamically-typed value
+/// rusqlite binds. Postgres is statically typed, so the column's own type is
+/// what decides — the same dispatch `skwad-db-migrate` does in the other
+/// direction.
+fn pg_value(row: &skwad_database::postgres::Row, index: usize) -> Result<Value> {
+    use skwad_database::postgres::types::Type;
+    let column_type = row.columns()[index].type_().clone();
+    let value = match column_type {
+        Type::INT2 => row
+            .try_get::<_, Option<i16>>(index)
+            .map(|v| v.map(|v| Value::Integer(v.into()))),
+        Type::INT4 => row
+            .try_get::<_, Option<i32>>(index)
+            .map(|v| v.map(|v| Value::Integer(v.into()))),
+        Type::INT8 => row.try_get::<_, Option<i64>>(index).map(|v| v.map(Value::Integer)),
+        Type::FLOAT4 => row
+            .try_get::<_, Option<f32>>(index)
+            .map(|v| v.map(|v| Value::Real(v.into()))),
+        Type::FLOAT8 => row.try_get::<_, Option<f64>>(index).map(|v| v.map(Value::Real)),
+        Type::BOOL => row
+            .try_get::<_, Option<bool>>(index)
+            .map(|v| v.map(|v| Value::Integer(v.into()))),
+        Type::BYTEA => row.try_get::<_, Option<Vec<u8>>>(index).map(|v| v.map(Value::Blob)),
+        _ => row.try_get::<_, Option<String>>(index).map(|v| v.map(Value::Text)),
+    }
+    .map_err(|error| CatalogueError::Invalid(format!("reading column {index}: {error}")))?;
+    Ok(value.unwrap_or(Value::Null))
+}
 
 pub(crate) const PORTABLE_SCHEMA: &str = r#"
 PRAGMA application_id = 1397442372;
@@ -105,17 +146,26 @@ pub struct CatalogueMedia {
 }
 
 pub fn build_portable_catalogue(
-    source: &Connection,
+    source: &mut dyn Db,
     shoot_id: i64,
     published_revision: u64,
 ) -> Result<PortableCatalogue> {
-    let (stable_shoot_id, library_id, source_root): (String, String, String) = source
-        .query_row(
-            "SELECT stable_id, library_id, source_path FROM shoots WHERE id = ?1 AND tombstone = 0",
-            [shoot_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    let row = source
+        .row_opt(
+            "SELECT stable_id, library_id, source_path FROM shoots WHERE id = $1 AND tombstone = 0",
+            skwad_database::params![shoot_id],
         )
-        .map_err(|error| CatalogueError::Invalid(format!("shoot cannot be published: {error}")))?;
+        .map_err(|error| CatalogueError::Invalid(format!("shoot cannot be published: {error}")))?
+        .ok_or_else(|| CatalogueError::Invalid(format!("shoot {shoot_id} cannot be published")))?;
+    let stable_shoot_id: String = row
+        .try_get(0)
+        .map_err(|e| CatalogueError::Invalid(format!("shoot stable id: {e}")))?;
+    let library_id: String = row
+        .try_get(1)
+        .map_err(|e| CatalogueError::Invalid(format!("shoot library id: {e}")))?;
+    let source_root: String = row
+        .try_get(2)
+        .map_err(|e| CatalogueError::Invalid(format!("shoot source path: {e}")))?;
 
     let mut destination = Connection::open_in_memory()
         .map_err(|error| CatalogueError::Invalid(format!("create portable catalogue: {error}")))?;
@@ -132,16 +182,18 @@ pub fn build_portable_catalogue(
     )
     .map_err(sql_error)?;
 
+    // Source placeholders are `$1` now; the destination keeps `?1`, because the
+    // destination is still SQLite.
     copy_rows(
         source,
         &tx,
-        "SELECT id, stable_id, library_id, name, status, notes, created_at, updated_at FROM shoots WHERE id = ?1",
+        "SELECT id, stable_id, library_id, name, status, notes, created_at, updated_at FROM shoots WHERE id = $1",
         "INSERT INTO shoot VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
-        &[Value::Integer(shoot_id)],
+        shoot_id,
     )?;
     copy_rows(source, &tx,
-        "SELECT DISTINCT p.id,p.stable_id,p.name,p.team,p.notes,p.created_at,p.updated_at FROM people p WHERE p.id IN (SELECT person_id FROM faces WHERE shoot_id=?1 AND person_id IS NOT NULL UNION SELECT person_id FROM media_groups WHERE shoot_id=?1 AND person_id IS NOT NULL UNION SELECT person_id FROM clusters WHERE shoot_id=?1 AND person_id IS NOT NULL)",
-        "INSERT INTO people VALUES (?1,?2,?3,?4,?5,?6,?7)", &[Value::Integer(shoot_id)])?;
+        "SELECT DISTINCT p.id,p.stable_id,p.name,p.team,p.notes,p.created_at,p.updated_at FROM people p WHERE p.id IN (SELECT person_id FROM faces WHERE shoot_id=$1 AND person_id IS NOT NULL UNION SELECT person_id FROM media_groups WHERE shoot_id=$1 AND person_id IS NOT NULL UNION SELECT person_id FROM clusters WHERE shoot_id=$1 AND person_id IS NOT NULL)",
+        "INSERT INTO people VALUES (?1,?2,?3,?4,?5,?6,?7)", shoot_id)?;
 
     let media_count = copy_media(source, &tx, shoot_id, &library_id, &source_root)?;
     copy_shoot_tables(source, &tx, shoot_id)?;
@@ -159,20 +211,26 @@ pub fn build_portable_catalogue(
 }
 
 fn copy_media(
-    source: &Connection,
+    source: &mut dyn Db,
     destination: &Connection,
     shoot_id: i64,
     library_id: &str,
     source_root: &str,
 ) -> Result<u64> {
     let mut count = 0;
-    let mut statement = source.prepare(
-        "SELECT id,stable_id,path,normalized_relative_path,filename,media_type,extension,width,height,duration,fps,bitrate,video_codec,audio_codec,file_size,captured_at,camera_make,camera_model,lens,iso,focal_length,aperture,shutter,orientation,processing_status,face_count,person_count,quality_score,sharpness_score,exposure_score,duplicate_group_id,duplicate_count,is_best_shot,rating,pick_state FROM media WHERE shoot_id=?1 AND tombstone=0 ORDER BY id"
-    ).map_err(sql_error)?;
-    let mut rows = statement.query([shoot_id]).map_err(sql_error)?;
-    while let Some(row) = rows.next().map_err(sql_error)? {
-        let absolute: String = row.get(2).map_err(sql_error)?;
-        let stored_relative: Option<String> = row.get(3).map_err(sql_error)?;
+    let rows = source.rows(
+        "SELECT id,stable_id,path,normalized_relative_path,filename,media_type,extension,width,height,duration,fps,bitrate,video_codec,audio_codec,file_size,captured_at,camera_make,camera_model,lens,iso,focal_length,aperture,shutter,orientation,processing_status,face_count,person_count,quality_score,sharpness_score,exposure_score,duplicate_group_id,duplicate_count,is_best_shot,rating,pick_state FROM media WHERE shoot_id=$1 AND tombstone=0 ORDER BY id",
+        skwad_database::params![shoot_id],
+    ).map_err(|error| CatalogueError::Invalid(format!("read media: {error}")))?;
+
+    for row in &rows {
+        let at = |index: usize| pg_value(row, index);
+        let absolute: String = row
+            .try_get(2)
+            .map_err(|e| CatalogueError::Invalid(format!("media path: {e}")))?;
+        let stored_relative: Option<String> = row
+            .try_get(3)
+            .map_err(|e| CatalogueError::Invalid(format!("media relative path: {e}")))?;
         let relative =
             match stored_relative {
                 Some(path) if !path.trim().is_empty() => normalize_relative_path(Path::new(&path))?,
@@ -180,56 +238,63 @@ fn copy_media(
                     |_| CatalogueError::Invalid(format!("media path is outside the shoot root: {absolute}")),
                 )?)?,
             };
-        let status: String = row.get(24).map_err(sql_error)?;
-        let faces: i64 = row.get(25).map_err(sql_error)?;
+        let status: String = row
+            .try_get(24)
+            .map_err(|e| CatalogueError::Invalid(format!("media processing status: {e}")))?;
+        let faces: i64 = row
+            .try_get(25)
+            .map_err(|e| CatalogueError::Invalid(format!("media face count: {e}")))?;
         destination.execute(
             "INSERT INTO media VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35,?36,?37)",
-            params![row.get::<_, Value>(0).map_err(sql_error)?, row.get::<_, Value>(1).map_err(sql_error)?, shoot_id, library_id, relative,
-                row.get::<_, Value>(4).map_err(sql_error)?, row.get::<_, Value>(5).map_err(sql_error)?, row.get::<_, Value>(6).map_err(sql_error)?,
-                row.get::<_, Value>(7).map_err(sql_error)?, row.get::<_, Value>(8).map_err(sql_error)?, row.get::<_, Value>(9).map_err(sql_error)?,
-                row.get::<_, Value>(10).map_err(sql_error)?, row.get::<_, Value>(11).map_err(sql_error)?, row.get::<_, Value>(12).map_err(sql_error)?,
-                row.get::<_, Value>(13).map_err(sql_error)?, row.get::<_, Value>(14).map_err(sql_error)?, row.get::<_, Value>(15).map_err(sql_error)?,
-                row.get::<_, Value>(16).map_err(sql_error)?, row.get::<_, Value>(17).map_err(sql_error)?, row.get::<_, Value>(18).map_err(sql_error)?,
-                row.get::<_, Value>(19).map_err(sql_error)?, row.get::<_, Value>(20).map_err(sql_error)?, row.get::<_, Value>(21).map_err(sql_error)?,
-                row.get::<_, Value>(22).map_err(sql_error)?, row.get::<_, Value>(23).map_err(sql_error)?, status, faces, row.get::<_, Value>(26).map_err(sql_error)?,
-                recognition_state(&status, faces), row.get::<_, Value>(27).map_err(sql_error)?, row.get::<_, Value>(28).map_err(sql_error)?,
-                row.get::<_, Value>(29).map_err(sql_error)?, row.get::<_, Value>(30).map_err(sql_error)?, row.get::<_, Value>(31).map_err(sql_error)?,
-                row.get::<_, Value>(32).map_err(sql_error)?, row.get::<_, Value>(33).map_err(sql_error)?, row.get::<_, Value>(34).map_err(sql_error)?],
+            params![at(0)?, at(1)?, shoot_id, library_id, relative,
+                at(4)?, at(5)?, at(6)?,
+                at(7)?, at(8)?, at(9)?,
+                at(10)?, at(11)?, at(12)?,
+                at(13)?, at(14)?, at(15)?,
+                at(16)?, at(17)?, at(18)?,
+                at(19)?, at(20)?, at(21)?,
+                at(22)?, at(23)?, status, faces, at(26)?,
+                recognition_state(&status, faces), at(27)?, at(28)?,
+                at(29)?, at(30)?, at(31)?,
+                at(32)?, at(33)?, at(34)?],
         ).map_err(sql_error)?;
         count += 1;
     }
     Ok(count)
 }
 
-fn copy_shoot_tables(source: &Connection, destination: &Connection, shoot_id: i64) -> Result<()> {
-    let arg = [Value::Integer(shoot_id)];
+fn copy_shoot_tables(source: &mut dyn Db, destination: &Connection, shoot_id: i64) -> Result<()> {
     for (select, insert) in [
-        ("SELECT id,stable_id,label,person_id,status,face_count,cover_face_id,created_at FROM clusters WHERE shoot_id=?1", "INSERT INTO clusters VALUES (?1,?2,?3,?4,?5,?6,?7,?8)"),
-        ("SELECT id,media_id,person_id,cluster_id,bbox_x,bbox_y,bbox_w,bbox_h,landmarks,detection_confidence,recognition_confidence,assignment,quality,frame_time,source,created_at FROM faces WHERE shoot_id=?1", "INSERT INTO faces VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)"),
-        ("SELECT vd.id,vd.media_id,vd.person_id,vd.face_id,vd.timestamp,vd.end_timestamp,vd.confidence FROM video_detections vd JOIN media m ON m.id=vd.media_id WHERE m.shoot_id=?1", "INSERT INTO video_detections VALUES (?1,?2,?3,?4,?5,?6,?7)"),
-        ("SELECT vs.media_id,vs.timestamp,vs.created_at FROM video_sample_frames vs JOIN media m ON m.id=vs.media_id WHERE m.shoot_id=?1", "INSERT INTO video_sample_frames VALUES (?1,?2,?3)"),
-        ("SELECT id,stable_id,name,album_type,person_ids,cluster_id,cover_media_id,media_count,photo_count,video_count,sort_order,generated_at FROM albums WHERE shoot_id=?1", "INSERT INTO albums VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)"),
-        ("SELECT am.album_id,am.media_id FROM album_media am JOIN albums a ON a.id=am.album_id WHERE a.shoot_id=?1", "INSERT INTO album_media VALUES (?1,?2)"),
-        ("SELECT id,stable_id,name,folder_name,notes,person_id,sort_order,media_count,photo_count,video_count,cover_media_id,created_at,updated_at FROM media_groups WHERE shoot_id=?1", "INSERT INTO groups VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)"),
-        ("SELECT gi.group_id,gi.media_id,gi.added_at FROM media_group_items gi JOIN media_groups g ON g.id=gi.group_id WHERE g.shoot_id=?1", "INSERT INTO group_media VALUES (?1,?2,?3)"),
-    ] { copy_rows(source, destination, select, insert, &arg)?; }
+        ("SELECT id,stable_id,label,person_id,status,face_count,cover_face_id,created_at FROM clusters WHERE shoot_id=$1", "INSERT INTO clusters VALUES (?1,?2,?3,?4,?5,?6,?7,?8)"),
+        ("SELECT id,media_id,person_id,cluster_id,bbox_x,bbox_y,bbox_w,bbox_h,landmarks,detection_confidence,recognition_confidence,assignment,quality,frame_time,source,created_at FROM faces WHERE shoot_id=$1", "INSERT INTO faces VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)"),
+        ("SELECT vd.id,vd.media_id,vd.person_id,vd.face_id,vd.timestamp,vd.end_timestamp,vd.confidence FROM video_detections vd JOIN media m ON m.id=vd.media_id WHERE m.shoot_id=$1", "INSERT INTO video_detections VALUES (?1,?2,?3,?4,?5,?6,?7)"),
+        ("SELECT vs.media_id,vs.timestamp,vs.created_at FROM video_sample_frames vs JOIN media m ON m.id=vs.media_id WHERE m.shoot_id=$1", "INSERT INTO video_sample_frames VALUES (?1,?2,?3)"),
+        ("SELECT id,stable_id,name,album_type,person_ids,cluster_id,cover_media_id,media_count,photo_count,video_count,sort_order,generated_at FROM albums WHERE shoot_id=$1", "INSERT INTO albums VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)"),
+        ("SELECT am.album_id,am.media_id FROM album_media am JOIN albums a ON a.id=am.album_id WHERE a.shoot_id=$1", "INSERT INTO album_media VALUES (?1,?2)"),
+        ("SELECT id,stable_id,name,folder_name,notes,person_id,sort_order,media_count,photo_count,video_count,cover_media_id,created_at,updated_at FROM media_groups WHERE shoot_id=$1", "INSERT INTO groups VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)"),
+        ("SELECT gi.group_id,gi.media_id,gi.added_at FROM media_group_items gi JOIN media_groups g ON g.id=gi.group_id WHERE g.shoot_id=$1", "INSERT INTO group_media VALUES (?1,?2,?3)"),
+    ] { copy_rows(source, destination, select, insert, shoot_id)?; }
     Ok(())
 }
 
+/// Streams one Postgres query straight into one SQLite insert, column for
+/// column. Every one of these selects is filtered by a single `shoot_id`, which
+/// is why the parameter is now that value rather than the `&[Value]` the
+/// rusqlite version took.
 fn copy_rows(
-    source: &Connection,
+    source: &mut dyn Db,
     destination: &Connection,
     select_sql: &str,
     insert_sql: &str,
-    query_params: &[Value],
+    shoot_id: i64,
 ) -> Result<()> {
-    let mut select = source.prepare(select_sql).map_err(sql_error)?;
-    let column_count = select.column_count();
-    let mut rows = select.query(params_from_iter(query_params.iter())).map_err(sql_error)?;
+    let rows = source
+        .rows(select_sql, skwad_database::params![shoot_id])
+        .map_err(|error| CatalogueError::Invalid(format!("read for publication: {error}")))?;
     let mut insert = destination.prepare_cached(insert_sql).map_err(sql_error)?;
-    while let Some(row) = rows.next().map_err(sql_error)? {
-        let values = (0..column_count)
-            .map(|index| row.get::<_, Value>(index).map_err(sql_error))
+    for row in &rows {
+        let values = (0..row.columns().len())
+            .map(|index| pg_value(row, index))
             .collect::<Result<Vec<_>>>()?;
         insert.execute(params_from_iter(values)).map_err(sql_error)?;
     }
@@ -383,22 +448,23 @@ fn sql_error(error: rusqlite::Error) -> CatalogueError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use skwad_database::Database;
+    use skwad_database::{params as pg, Database};
 
     #[test]
     fn exports_only_relative_references_and_never_embeddings_or_crops() {
-        let db = Database::open_in_memory().unwrap();
-        let conn = db.conn().unwrap();
-        conn.execute("INSERT INTO shoots(id,name,source_path,status,created_at,updated_at) VALUES(1,'Finals','D:\\NAS\\Finals','done','now','now')", []).unwrap();
-        conn.execute(
+        let db = Database::open_test().unwrap();
+        let mut conn = db.conn().unwrap();
+        conn.exec("INSERT INTO shoots(id,name,source_path,status,created_at,updated_at) VALUES(1,'Finals','D:\\NAS\\Finals','done','now','now')", pg![]).unwrap();
+        conn.exec(
             "INSERT INTO people(id,name,created_at,updated_at) VALUES(1,'Player Secret','now','now')",
-            [],
+            pg![],
         )
         .unwrap();
-        conn.execute("INSERT INTO media(id,shoot_id,path,filename,media_type,extension,file_size,content_key,indexed_at,processing_status,face_count) VALUES(1,1,'D:\\NAS\\Finals\\Day1\\frame.jpg','frame.jpg','photo','jpg',123,'key','now','done',1)", []).unwrap();
-        conn.execute("INSERT INTO faces(id,media_id,shoot_id,person_id,embedding,embedding_dim,bbox_x,bbox_y,bbox_w,bbox_h,detection_confidence,assignment,crop_path,created_at) VALUES(1,1,1,1,x'DEADBEEF',1,.1,.2,.3,.4,.9,'confirmed','C:\\secret-crop.jpg','now')", []).unwrap();
+        conn.exec("INSERT INTO media(id,shoot_id,path,filename,media_type,extension,file_size,content_key,indexed_at,processing_status,face_count) VALUES(1,1,'D:\\NAS\\Finals\\Day1\\frame.jpg','frame.jpg','photo','jpg',123,'key','now','done',1)", pg![]).unwrap();
+        // `x'DEADBEEF'` is SQLite's blob literal; Postgres spells it `'\xdeadbeef'::bytea`.
+        conn.exec("INSERT INTO faces(id,media_id,shoot_id,person_id,embedding,embedding_dim,bbox_x,bbox_y,bbox_w,bbox_h,detection_confidence,assignment,crop_path,created_at) VALUES(1,1,1,1,'\\xdeadbeef'::bytea,1,.1,.2,.3,.4,.9,'confirmed','C:\\secret-crop.jpg','now')", pg![]).unwrap();
 
-        let portable = build_portable_catalogue(&conn, 1, 7).unwrap();
+        let portable = build_portable_catalogue(&mut conn, 1, 7).unwrap();
         validate_portable_catalogue(&portable.bytes).unwrap();
         let mut opened = Connection::open_in_memory().unwrap();
         opened

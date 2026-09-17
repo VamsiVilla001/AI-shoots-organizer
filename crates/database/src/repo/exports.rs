@@ -1,10 +1,11 @@
-use rusqlite::{params, Connection, OptionalExtension, Row};
+use postgres::Row;
 
 use super::get;
+use crate::client::Db;
 use crate::models::{ExportRecord, ExportStatus};
-use crate::{now, Result};
+use crate::{now, params, Result};
 
-fn map(row: &Row<'_>) -> rusqlite::Result<ExportRecord> {
+fn map(row: &Row) -> Result<ExportRecord> {
     Ok(ExportRecord {
         id: get(row, "id")?,
         shoot_id: get(row, "shoot_id")?,
@@ -20,50 +21,61 @@ fn map(row: &Row<'_>) -> rusqlite::Result<ExportRecord> {
     })
 }
 
-pub fn create(conn: &Connection, shoot_id: i64, destination: &str, options_json: &str) -> Result<i64> {
-    conn.execute(
+pub fn create(conn: &mut dyn Db, shoot_id: i64, destination: &str, options_json: &str) -> Result<i64> {
+    // `RETURNING id` replaces `last_insert_rowid()`, which had no Postgres
+    // equivalent that is safe under a connection pool.
+    let row = conn.row_one(
         "INSERT INTO exports (shoot_id, destination, options, status, started_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![shoot_id, destination, options_json, ExportStatus::Running, now()],
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING id",
+        params![
+            shoot_id,
+            destination,
+            options_json,
+            ExportStatus::Running.as_str(),
+            now()
+        ],
     )?;
-    Ok(conn.last_insert_rowid())
+    get(&row, "id")
 }
 
-pub fn set_total(conn: &Connection, id: i64, files_total: i64) -> Result<()> {
-    conn.execute(
-        "UPDATE exports SET files_total = ?2 WHERE id = ?1",
+pub fn set_total(conn: &mut dyn Db, id: i64, files_total: i64) -> Result<()> {
+    conn.exec(
+        "UPDATE exports SET files_total = $2 WHERE id = $1",
         params![id, files_total],
     )?;
     Ok(())
 }
 
-pub fn set_progress(conn: &Connection, id: i64, files_done: i64, bytes_done: i64) -> Result<()> {
-    conn.execute(
-        "UPDATE exports SET files_done = ?2, bytes_done = ?3 WHERE id = ?1",
+pub fn set_progress(conn: &mut dyn Db, id: i64, files_done: i64, bytes_done: i64) -> Result<()> {
+    conn.exec(
+        "UPDATE exports SET files_done = $2, bytes_done = $3 WHERE id = $1",
         params![id, files_done, bytes_done],
     )?;
     Ok(())
 }
 
-pub fn finish(conn: &Connection, id: i64, status: ExportStatus, error: Option<&str>) -> Result<()> {
-    conn.execute(
-        "UPDATE exports SET status = ?2, error = ?3, finished_at = ?4 WHERE id = ?1",
-        params![id, status, error, now()],
+pub fn finish(conn: &mut dyn Db, id: i64, status: ExportStatus, error: Option<&str>) -> Result<()> {
+    conn.exec(
+        "UPDATE exports SET status = $2, error = $3, finished_at = $4 WHERE id = $1",
+        params![id, status.as_str(), error, now()],
     )?;
     Ok(())
 }
 
-pub fn get_by_id(conn: &Connection, id: i64) -> Result<Option<ExportRecord>> {
-    Ok(conn
-        .prepare("SELECT * FROM exports WHERE id = ?1")?
-        .query_row(params![id], map)
-        .optional()?)
+pub fn get_by_id(conn: &mut dyn Db, id: i64) -> Result<Option<ExportRecord>> {
+    conn.row_opt("SELECT * FROM exports WHERE id = $1", params![id])?
+        .as_ref()
+        .map(map)
+        .transpose()
 }
 
-pub fn list(conn: &Connection, shoot_id: i64, limit: i64) -> Result<Vec<ExportRecord>> {
-    let mut stmt = conn.prepare("SELECT * FROM exports WHERE shoot_id = ?1 ORDER BY id DESC LIMIT ?2")?;
-    let rows = stmt
-        .query_map(params![shoot_id, limit.clamp(1, 200)], map)?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
+pub fn list(conn: &mut dyn Db, shoot_id: i64, limit: i64) -> Result<Vec<ExportRecord>> {
+    conn.rows(
+        "SELECT * FROM exports WHERE shoot_id = $1 ORDER BY id DESC LIMIT $2",
+        params![shoot_id, limit.clamp(1, 200)],
+    )?
+    .iter()
+    .map(map)
+    .collect()
 }

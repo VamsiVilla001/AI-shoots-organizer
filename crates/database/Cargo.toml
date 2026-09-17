@@ -4,7 +4,20 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "SQLite storage layer for the SKWAD Media Organiser"
+description = "PostgreSQL storage layer for the SKWAD Media Organiser"
+
+[features]
+# Exposes `Database::open_test()` to other crates' test suites. The desktop
+# shell turns this on as a dev-dependency so its own tests get the same
+# throwaway-schema isolation.
+test-support = []
+# The one-shot SQLite importer. Off by default so the app never links SQLite.
+migrate-from-sqlite = ["dep:rusqlite"]
+
+[[bin]]
+name = "skwad-db-migrate"
+path = "src/bin/migrate.rs"
+required-features = ["migrate-from-sqlite"]
 
 [dependencies]
 anyhow = "1.0"
@@ -12,7 +25,14 @@ thiserror = "2.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
-rusqlite = { version = "0.40", features = ["bundled", "chrono", "serde_json", "functions"] }
+postgres = { version = "0.19", features = ["with-chrono-0_4", "with-serde_json-1"] }
 r2d2 = "0.8"
-r2d2_sqlite = "0.35"
+r2d2_postgres = "0.18"
 tracing = "0.1"
+
+# Only the one-shot migration binary reads the old format, so the SQLite
+# dependency is optional and never linked into the app.
+rusqlite = { version = "0.40", features = ["bundled"], optional = true }
+
+[dev-dependencies]
+tempfile = "3.27"

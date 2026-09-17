@@ -198,8 +198,8 @@ async fn require_token(request: Request, next: Next) -> Response {
 /// shape of data the app's own Collections screen navigates.
 async fn list_projects(State(state): State<Arc<AppState>>) -> Result<Json<ProjectsResponse>, ApiError> {
     let (account_id, email, organisation) = crate::catalogue::current_project_identity(&state)?;
-    let conn = state.db.conn()?;
-    let accessible = projects::list_accessible(&conn, &account_id, &email, organisation.as_deref())?;
+    let mut conn = state.db.conn()?;
+    let accessible = projects::list_accessible(&mut conn, &account_id, &email, organisation.as_deref())?;
     drop(conn);
 
     let mut out = Vec::new();
@@ -241,8 +241,8 @@ async fn collection_media(
     RoutePath(collection_id): RoutePath<String>,
 ) -> Result<Json<Vec<CollectionFile>>, ApiError> {
     let (account_id, email, organisation) = crate::catalogue::current_project_identity(&state)?;
-    let conn = state.db.conn()?;
-    let accessible = projects::list_accessible(&conn, &account_id, &email, organisation.as_deref())?;
+    let mut conn = state.db.conn()?;
+    let accessible = projects::list_accessible(&mut conn, &account_id, &email, organisation.as_deref())?;
     drop(conn);
 
     let collection = accessible

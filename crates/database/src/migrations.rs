@@ -1,10 +1,19 @@
-//! Forward-only schema migrations, tracked with SQLite's `user_version`.
+//! Forward-only schema migrations, tracked in a `schema_migrations` table.
 //!
 //! To change the schema, append a new entry to [`MIGRATIONS`]. Never edit an
 //! existing one — installed databases have already run it.
+//!
+//! The SQLite build tracked this in `PRAGMA user_version`, a single integer.
+//! Postgres has no equivalent, and a table is better anyway: it records *when*
+//! each migration ran, which is the first thing you want when a library behaves
+//! differently from the one next to it.
+//!
+//! Versions 1..13 were the SQLite history. They are collapsed into a single
+//! Postgres baseline, because no Postgres database has ever run them — an
+//! existing SQLite library arrives through `skwad-db-migrate`, which copies
+//! rows into the finished schema rather than replaying thirteen migrations.
 
-use rusqlite::Connection;
-
+use crate::client::Db;
 use crate::Result;
 
 struct Migration {
@@ -13,93 +22,65 @@ struct Migration {
     sql: &'static str,
 }
 
-const MIGRATIONS: &[Migration] = &[
-    Migration {
-        version: 1,
-        name: "baseline",
-        sql: include_str!("schema.sql"),
-    },
-    Migration {
-        version: 2,
-        name: "person_count",
-        sql: include_str!("migration_002_person_count.sql"),
-    },
-    Migration {
-        version: 3,
-        name: "manual_groups",
-        sql: include_str!("schema_003_groups.sql"),
-    },
-    Migration {
-        version: 4,
-        name: "media_quality",
-        sql: include_str!("migration_004_media_quality.sql"),
-    },
-    Migration {
-        version: 5,
-        name: "manual_faces",
-        sql: include_str!("migration_005_manual_faces.sql"),
-    },
-    Migration {
-        version: 6,
-        name: "video_sample_frames",
-        sql: include_str!("migration_006_video_sample_frames.sql"),
-    },
-    Migration {
-        version: 7,
-        name: "editorial_ratings",
-        sql: include_str!("migration_007_editorial_ratings.sql"),
-    },
-    Migration {
-        version: 8,
-        name: "shared_catalogue",
-        sql: include_str!("migration_008_shared_catalogue.sql"),
-    },
-    Migration {
-        version: 9,
-        name: "processing_telemetry",
-        sql: include_str!("migration_009_processing_telemetry.sql"),
-    },
-    Migration {
-        version: 10,
-        name: "cpu_metric_scope",
-        sql: include_str!("migration_010_cpu_metric_scope.sql"),
-    },
-    Migration {
-        version: 11,
-        name: "projects",
-        sql: include_str!("migration_011_projects.sql"),
-    },
-    Migration {
-        version: 12,
-        name: "reference_library",
-        sql: include_str!("migration_012_reference_library.sql"),
-    },
-    Migration {
-        version: 13,
-        name: "roster",
-        sql: include_str!("migration_013_roster.sql"),
-    },
-];
+const MIGRATIONS: &[Migration] = &[Migration {
+    version: 1,
+    name: "baseline",
+    sql: include_str!("sql/001_baseline.sql"),
+}];
 
 /// The schema version this build expects.
 pub fn target_version() -> i32 {
     MIGRATIONS.last().map(|m| m.version).unwrap_or(0)
 }
 
-pub fn current_version(conn: &Connection) -> Result<i32> {
-    Ok(conn.query_row("PRAGMA user_version", [], |row| row.get(0))?)
+pub fn current_version(conn: &mut dyn Db) -> Result<i32> {
+    ensure_ledger(conn)?;
+    let row = conn.row_one(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        crate::params![],
+    )?;
+    Ok(row.get(0))
 }
 
-/// Applies every migration newer than the database's `user_version`.
-pub fn run(conn: &mut Connection) -> Result<()> {
+/// Creates the bookkeeping table. Separate from the migrations themselves so
+/// that reading the version from an empty database is not itself a migration.
+fn ensure_ledger(conn: &mut dyn Db) -> Result<()> {
+    conn.batch(
+        "CREATE TABLE IF NOT EXISTS schema_migrations (
+             version    INTEGER PRIMARY KEY,
+             name       TEXT        NOT NULL,
+             applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+         )",
+    )
+}
+
+/// Applies every migration this database has not already run.
+///
+/// Each runs in its own transaction, so a failure leaves the database at the
+/// last version that fully applied rather than half-way through one.
+pub fn run(conn: &mut dyn Db) -> Result<()> {
+    ensure_ledger(conn)?;
     let installed = current_version(conn)?;
 
     for migration in MIGRATIONS.iter().filter(|m| m.version > installed) {
         tracing::info!(version = migration.version, name = migration.name, "applying migration");
-        let tx = conn.transaction()?;
-        tx.execute_batch(migration.sql)?;
-        tx.pragma_update(None, "user_version", migration.version)?;
-        tx.commit()?;
+        conn.batch("BEGIN")?;
+        let applied = (|| -> Result<()> {
+            conn.batch(migration.sql)?;
+            conn.exec(
+                "INSERT INTO schema_migrations (version, name) VALUES ($1, $2)",
+                crate::params![migration.version, migration.name],
+            )?;
+            Ok(())
+        })();
+
+        match applied {
+            Ok(()) => conn.batch("COMMIT")?,
+            Err(error) => {
+                conn.batch("ROLLBACK")?;
+                return Err(error);
+            }
+        }
     }
 
     Ok(())
@@ -108,139 +89,97 @@ pub fn run(conn: &mut Connection) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Database;
+    use crate::{params, Database};
 
     #[test]
     fn migrates_to_target_and_is_idempotent() {
-        let db = Database::open_in_memory().unwrap();
+        let db = Database::open_test().unwrap();
         let mut conn = db.conn().unwrap();
-        assert_eq!(current_version(&conn).unwrap(), target_version());
+        assert_eq!(current_version(&mut conn).unwrap(), target_version());
 
         // Running again must be a no-op rather than an error.
         run(&mut conn).unwrap();
-        assert_eq!(current_version(&conn).unwrap(), target_version());
-    }
-
-    /// The upgrade path real installations take: a database created before
-    /// these migrations existed must gain everything they add, in order,
-    /// without losing a row.
-    #[test]
-    fn a_version_one_database_upgrades_in_place() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(include_str!("schema.sql")).unwrap();
-        conn.pragma_update(None, "user_version", 1).unwrap();
-        conn.execute(
-            "INSERT INTO shoots (id, name, source_path, created_at, updated_at)
-             VALUES (1, 'BGMS Finals', 'D:\\raw', 'now', 'now')",
-            [],
-        )
-        .unwrap();
-
-        run(&mut conn).unwrap();
-
-        assert_eq!(current_version(&conn).unwrap(), target_version());
-        let shoots: i64 = conn.query_row("SELECT COUNT(*) FROM shoots", [], |r| r.get(0)).unwrap();
-        assert_eq!(shoots, 1, "existing rows survive the upgrade");
-        let groups: i64 = conn
-            .query_row("SELECT COUNT(*) FROM media_groups", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(groups, 0, "the new tables exist and start empty");
+        assert_eq!(current_version(&mut conn).unwrap(), target_version());
     }
 
     #[test]
     fn foreign_keys_cascade_from_shoots() {
-        let db = Database::open_in_memory().unwrap();
-        let conn = db.conn().unwrap();
-        conn.execute(
+        let db = Database::open_test().unwrap();
+        let mut conn = db.conn().unwrap();
+        conn.exec(
             "INSERT INTO shoots (id, name, source_path, created_at, updated_at) VALUES (1, 'a', 'p', 'now', 'now')",
-            [],
+            params![],
         )
         .unwrap();
-        conn.execute(
+        conn.exec(
             "INSERT INTO media (id, shoot_id, path, filename, media_type, extension, content_key, indexed_at)
              VALUES (1, 1, 'p/a.jpg', 'a.jpg', 'photo', 'jpg', 'k', 'now')",
-            [],
+            params![],
         )
         .unwrap();
-        conn.execute("DELETE FROM shoots WHERE id = 1", []).unwrap();
+        conn.exec("DELETE FROM shoots WHERE id = 1", params![]).unwrap();
 
-        let remaining: i64 = conn.query_row("SELECT COUNT(*) FROM media", [], |r| r.get(0)).unwrap();
+        let remaining: i64 = conn.row_one("SELECT COUNT(*) FROM media", params![]).unwrap().get(0);
         assert_eq!(remaining, 0, "media rows should cascade away with their shoot");
     }
 
+    /// Foreign keys were enforced by a per-connection `PRAGMA foreign_keys = ON`
+    /// under SQLite, which was easy to lose. In Postgres they are structural —
+    /// this pins that a violation is actually rejected.
     #[test]
-    fn upgrades_manual_group_version_three_databases() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(include_str!("schema.sql")).unwrap();
-        conn.execute_batch(include_str!("migration_002_person_count.sql"))
-            .unwrap();
-        conn.execute_batch(include_str!("schema_003_groups.sql")).unwrap();
-        conn.pragma_update(None, "user_version", 3).unwrap();
-
-        run(&mut conn).unwrap();
-
-        assert_eq!(current_version(&conn).unwrap(), target_version());
-        let has_quality: bool = conn
-            .prepare("PRAGMA table_info(media)")
-            .unwrap()
-            .query_map([], |row| row.get::<_, String>(1))
-            .unwrap()
-            .any(|name| matches!(name.as_deref(), Ok("quality_score")));
-        assert!(has_quality);
-        let has_face_source: bool = conn
-            .prepare("PRAGMA table_info(faces)")
-            .unwrap()
-            .query_map([], |row| row.get::<_, String>(1))
-            .unwrap()
-            .any(|name| matches!(name.as_deref(), Ok("source")));
-        assert!(has_face_source);
-        let has_video_samples: bool = conn
-            .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'video_sample_frames'")
-            .unwrap()
-            .exists([])
-            .unwrap();
-        assert!(has_video_samples);
-        let media_columns = conn
-            .prepare("PRAGMA table_info(media)")
-            .unwrap()
-            .query_map([], |row| row.get::<_, String>(1))
-            .unwrap()
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .unwrap();
-        assert!(media_columns.iter().any(|name| name == "rating"));
-        assert!(media_columns.iter().any(|name| name == "pick_state"));
-        assert!(media_columns.iter().any(|name| name == "stable_id"));
-        assert!(media_columns.iter().any(|name| name == "normalized_relative_path"));
-        conn.prepare("SELECT * FROM projects").unwrap();
-        conn.prepare("SELECT * FROM project_members").unwrap();
-        conn.prepare("SELECT * FROM project_collections").unwrap();
-        conn.prepare("SELECT * FROM project_collection_sources").unwrap();
+    fn a_dangling_foreign_key_is_refused() {
+        let db = Database::open_test().unwrap();
+        let mut conn = db.conn().unwrap();
+        let result = conn.exec(
+            "INSERT INTO media (shoot_id, path, filename, media_type, extension, content_key, indexed_at)
+             VALUES (999, 'p/a.jpg', 'a.jpg', 'photo', 'jpg', 'k', 'now')",
+            params![],
+        );
+        assert!(result.is_err(), "media must not outlive its shoot");
     }
 
+    /// The `nocase` collation stands in for SQLite's `COLLATE NOCASE`, and the
+    /// unique index on `people.name` depends on it being non-deterministic.
     #[test]
-    fn shared_catalogue_migration_backfills_stable_ids() {
-        let db = Database::open_in_memory().unwrap();
-        let conn = db.conn().unwrap();
-        conn.execute(
-            "INSERT INTO shoots (id, name, source_path, created_at, updated_at) VALUES (1, 'a', 'p', 'now', 'now')",
-            [],
+    fn person_names_are_compared_case_insensitively() {
+        let db = Database::open_test().unwrap();
+        let mut conn = db.conn().unwrap();
+        conn.exec(
+            "INSERT INTO people (name, created_at, updated_at) VALUES ('Naresh', 'now', 'now')",
+            params![],
         )
         .unwrap();
-        // New rows are assigned by repository code; this verifies the migration
-        // tables and constraints are ready without exposing local roots.
-        conn.execute(
-            "UPDATE shoots SET stable_id = lower(hex(randomblob(16))), library_id = lower(hex(randomblob(16))) WHERE id = 1",
-            [],
-        )
-        .unwrap();
-        let (stable, library): (String, String) = conn
-            .query_row("SELECT stable_id, library_id FROM shoots WHERE id = 1", [], |row| {
-                Ok((row.get(0)?, row.get(1)?))
-            })
+
+        let found = conn
+            .row_opt("SELECT id FROM people WHERE name = $1", params!["NARESH"])
             .unwrap();
-        assert!(!stable.is_empty() && !library.is_empty());
-        conn.prepare("SELECT * FROM sync_outbox").unwrap();
-        conn.prepare("SELECT * FROM sync_conflicts").unwrap();
-        conn.prepare("SELECT * FROM catalogue_revisions").unwrap();
+        assert!(found.is_some(), "lookup must ignore case");
+
+        let duplicate = conn.exec(
+            "INSERT INTO people (name, created_at, updated_at) VALUES ('naresh', 'now', 'now')",
+            params![],
+        );
+        assert!(duplicate.is_err(), "the unique index must ignore case too");
+    }
+
+    /// The six `*_assign_stable_id` triggers became column defaults; this is
+    /// the behaviour they existed to provide.
+    #[test]
+    fn inserted_rows_get_a_stable_id_without_being_asked() {
+        let db = Database::open_test().unwrap();
+        let mut conn = db.conn().unwrap();
+        let row = conn
+            .row_one(
+                "INSERT INTO shoots (name, source_path, created_at, updated_at)
+                 VALUES ('BGMS Finals', 'D:\\raw', 'now', 'now')
+                 RETURNING stable_id, library_id",
+                params![],
+            )
+            .unwrap();
+        let stable: String = row.get(0);
+        let library: String = row.get(1);
+        assert_eq!(stable.len(), 36, "a uuid, not an empty string");
+        assert_eq!(library.len(), 36);
+        assert_ne!(stable, library);
     }
 }

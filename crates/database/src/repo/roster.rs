@@ -8,10 +8,12 @@
 //! written "S8UL Naresh", "s8ul_naresh" and "iQOOS8ULNaresh" depending on who
 //! typed it.
 
-use rusqlite::{params, Connection};
+use postgres::Row;
 use serde::{Deserialize, Serialize};
 
-use crate::Result;
+use super::get;
+use crate::client::Db;
+use crate::{params, Result};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -50,14 +52,14 @@ fn search_key(entry: &RosterEntry) -> String {
     )
 }
 
-fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RosterEntry> {
+fn map(row: &Row) -> Result<RosterEntry> {
     Ok(RosterEntry {
-        id: row.get("id")?,
-        ign: row.get("ign")?,
-        player_name: row.get("player_name")?,
-        team: row.get("team")?,
-        role: row.get("role")?,
-        source: row.get("source")?,
+        id: get(row, "id")?,
+        ign: get(row, "ign")?,
+        player_name: get(row, "player_name")?,
+        team: get(row, "team")?,
+        role: get(row, "role")?,
+        source: get(row, "source")?,
     })
 }
 
@@ -66,17 +68,26 @@ fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RosterEntry> {
 /// Re-importing a corrected file therefore removes rows that were dropped from
 /// it, while rosters imported from other files are left alone. An IGN that has
 /// moved to another team simply updates.
-pub fn replace_source(conn: &Connection, source: &str, entries: &[RosterEntry]) -> Result<usize> {
-    conn.execute("DELETE FROM roster_entries WHERE source = ?1", params![source])?;
+pub fn replace_source(conn: &mut dyn Db, source: &str, entries: &[RosterEntry]) -> Result<usize> {
+    conn.exec("DELETE FROM roster_entries WHERE source = $1", params![source])?;
     let now = crate::now();
     let mut written = 0usize;
     for entry in entries {
         // An IGN already claimed by another file is updated in place rather
         // than failing the whole import: the newest file wins.
-        conn.execute(
+        //
+        // Deliberately still a row at a time rather than one multi-row insert:
+        // a file that lists the same IGN twice is not rare, and Postgres
+        // refuses an `ON CONFLICT DO UPDATE` that would touch the same row
+        // twice within one statement. Row by row, the second line simply
+        // updates the first — which is the behaviour this has always had.
+        //
+        // The conflict target is plain `(ign)`: the case-insensitivity that
+        // `COLLATE NOCASE` used to spell out here now lives on the column.
+        conn.exec(
             "INSERT INTO roster_entries (ign, player_name, team, role, search_key, source, imported_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT (ign COLLATE NOCASE) DO UPDATE SET
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             ON CONFLICT (ign) DO UPDATE SET
                  player_name = excluded.player_name,
                  team = excluded.team,
                  role = excluded.role,
@@ -98,31 +109,36 @@ pub fn replace_source(conn: &Connection, source: &str, entries: &[RosterEntry]) 
     Ok(written)
 }
 
-pub fn list(conn: &Connection) -> Result<Vec<RosterEntry>> {
-    let mut statement = conn.prepare(
+pub fn list(conn: &mut dyn Db) -> Result<Vec<RosterEntry>> {
+    conn.rows(
         "SELECT id, ign, player_name, team, role, source FROM roster_entries
-         ORDER BY team COLLATE NOCASE, ign COLLATE NOCASE",
-    )?;
-    let rows = statement.query_map([], row)?.collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
+         ORDER BY team, ign",
+        params![],
+    )?
+    .iter()
+    .map(map)
+    .collect()
 }
 
 /// The files rosters were imported from, with how many rows each contributed.
-pub fn sources(conn: &Connection) -> Result<Vec<(String, i64)>> {
-    let mut statement =
-        conn.prepare("SELECT source, COUNT(*) FROM roster_entries GROUP BY source ORDER BY source COLLATE NOCASE")?;
-    let rows = statement
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
+pub fn sources(conn: &mut dyn Db) -> Result<Vec<(String, i64)>> {
+    // `source` is a plain `TEXT` column, so the collation is named inline here
+    // rather than being carried by the column the way `team` and `ign` carry it.
+    conn.rows(
+        "SELECT source, COUNT(*) FROM roster_entries GROUP BY source ORDER BY source COLLATE nocase",
+        params![],
+    )?
+    .iter()
+    .map(|row| Ok((super::at(row, 0)?, super::at(row, 1)?)))
+    .collect()
 }
 
-pub fn clear(conn: &Connection, source: Option<&str>) -> Result<usize> {
+pub fn clear(conn: &mut dyn Db, source: Option<&str>) -> Result<usize> {
     let removed = match source {
-        Some(source) => conn.execute("DELETE FROM roster_entries WHERE source = ?1", params![source])?,
-        None => conn.execute("DELETE FROM roster_entries", [])?,
+        Some(source) => conn.exec("DELETE FROM roster_entries WHERE source = $1", params![source])?,
+        None => conn.exec("DELETE FROM roster_entries", params![])?,
     };
-    Ok(removed)
+    Ok(removed as usize)
 }
 
 /// Suggestions for a half-typed name, best match first.
@@ -130,7 +146,7 @@ pub fn clear(conn: &Connection, source: Option<&str>) -> Result<usize> {
 /// Ranking puts the IGN ahead of the person and the team, so typing "naresh"
 /// offers `iQOOS8ULNaresh` before it offers everyone whose team contains the
 /// same letters.
-pub fn search(conn: &Connection, query: &str, limit: usize) -> Result<Vec<RosterEntry>> {
+pub fn search(conn: &mut dyn Db, query: &str, limit: usize) -> Result<Vec<RosterEntry>> {
     let needle = normalise(query);
     if needle.is_empty() {
         let mut all = list(conn)?;
@@ -177,7 +193,7 @@ fn rank(entry: &RosterEntry, needle: &str) -> Option<(u8, usize)> {
 /// Ambiguity matters: "naresh" matching two players on different teams must not
 /// silently file media under whichever sorted first. An exact IGN or player
 /// name always wins outright, even when other rows also contain those letters.
-pub fn resolve(conn: &Connection, name: &str) -> Result<Option<RosterEntry>> {
+pub fn resolve(conn: &mut dyn Db, name: &str) -> Result<Option<RosterEntry>> {
     let needle = normalise(name);
     if needle.is_empty() {
         return Ok(None);
@@ -221,10 +237,10 @@ mod tests {
     }
 
     fn seeded() -> Database {
-        let db = Database::open_in_memory().unwrap();
-        let conn = db.conn().unwrap();
+        let db = Database::open_test().unwrap();
+        let mut conn = db.conn().unwrap();
         replace_source(
-            &conn,
+            &mut conn,
             "bgis.csv",
             &[
                 entry("iQOOS8ULNaresh", "Naresh Nallamothu", "iQOO Soul"),
@@ -240,8 +256,8 @@ mod tests {
     #[test]
     fn typing_part_of_a_name_suggests_the_in_game_name() {
         let db = seeded();
-        let conn = db.conn().unwrap();
-        let hits = search(&conn, "naresh", 10).unwrap();
+        let mut conn = db.conn().unwrap();
+        let hits = search(&mut conn, "naresh", 10).unwrap();
         assert_eq!(hits[0].ign, "iQOOS8ULNaresh");
         assert_eq!(hits[0].team, "iQOO Soul");
     }
@@ -249,9 +265,9 @@ mod tests {
     #[test]
     fn separators_and_case_do_not_matter() {
         let db = seeded();
-        let conn = db.conn().unwrap();
+        let mut conn = db.conn().unwrap();
         for typed in ["s8ul naresh", "S8UL_NARESH", "iqoos8ulnaresh", "  Naresh  "] {
-            let resolved = resolve(&conn, typed).unwrap();
+            let resolved = resolve(&mut conn, typed).unwrap();
             assert_eq!(
                 resolved.map(|entry| entry.team),
                 Some("iQOO Soul".to_owned()),
@@ -263,8 +279,8 @@ mod tests {
     #[test]
     fn a_team_tag_lists_that_whole_team() {
         let db = seeded();
-        let conn = db.conn().unwrap();
-        let hits = search(&conn, "iqoo", 10).unwrap();
+        let mut conn = db.conn().unwrap();
+        let hits = search(&mut conn, "iqoo", 10).unwrap();
         assert_eq!(hits.len(), 2);
         assert!(hits.iter().all(|entry| entry.team == "iQOO Soul"));
     }
@@ -272,18 +288,18 @@ mod tests {
     #[test]
     fn an_ambiguous_name_resolves_to_nobody() {
         let db = seeded();
-        let conn = db.conn().unwrap();
+        let mut conn = db.conn().unwrap();
         replace_source(
-            &conn,
+            &mut conn,
             "second.csv",
             &[entry("XSparkNaresh", "Naresh Kumar", "Team XSpark")],
         )
         .unwrap();
         // Two players called Naresh: SKWAD must ask rather than guess.
-        assert!(resolve(&conn, "naresh").unwrap().is_none());
+        assert!(resolve(&mut conn, "naresh").unwrap().is_none());
         // The full in-game name is still unambiguous.
         assert_eq!(
-            resolve(&conn, "XSparkNaresh").unwrap().map(|entry| entry.team),
+            resolve(&mut conn, "XSparkNaresh").unwrap().map(|entry| entry.team),
             Some("Team XSpark".to_owned())
         );
     }
@@ -291,18 +307,18 @@ mod tests {
     #[test]
     fn a_name_that_is_on_no_roster_resolves_to_nobody() {
         let db = seeded();
-        let conn = db.conn().unwrap();
-        assert!(resolve(&conn, "Camera operator").unwrap().is_none());
+        let mut conn = db.conn().unwrap();
+        assert!(resolve(&mut conn, "Camera operator").unwrap().is_none());
     }
 
     #[test]
     fn reimporting_a_file_replaces_only_its_own_rows() {
         let db = seeded();
-        let conn = db.conn().unwrap();
-        replace_source(&conn, "other.csv", &[entry("TXNova", "Nova", "Team Nova")]).unwrap();
+        let mut conn = db.conn().unwrap();
+        replace_source(&mut conn, "other.csv", &[entry("TXNova", "Nova", "Team Nova")]).unwrap();
         // The corrected BGIS file drops Jonathan and moves Jelly to a new team.
         replace_source(
-            &conn,
+            &mut conn,
             "bgis.csv",
             &[
                 entry("iQOOS8ULNaresh", "Naresh Nallamothu", "iQOO Soul"),
@@ -311,12 +327,12 @@ mod tests {
         )
         .unwrap();
 
-        let all = list(&conn).unwrap();
+        let all = list(&mut conn).unwrap();
         assert_eq!(all.len(), 3, "the other file's row survives");
         assert!(all.iter().any(|entry| entry.ign == "TXNova"));
         assert!(!all.iter().any(|entry| entry.ign == "iQOOS8ULJonathan"));
         assert_eq!(
-            resolve(&conn, "GodLikeJelly").unwrap().map(|entry| entry.team),
+            resolve(&mut conn, "GodLikeJelly").unwrap().map(|entry| entry.team),
             Some("Team XSpark".to_owned()),
             "a transfer updates the team"
         );
@@ -325,10 +341,32 @@ mod tests {
     #[test]
     fn clearing_one_source_leaves_the_others() {
         let db = seeded();
-        let conn = db.conn().unwrap();
-        replace_source(&conn, "other.csv", &[entry("TXNova", "Nova", "Team Nova")]).unwrap();
-        assert_eq!(clear(&conn, Some("bgis.csv")).unwrap(), 3);
-        assert_eq!(list(&conn).unwrap().len(), 1);
-        assert_eq!(sources(&conn).unwrap(), vec![("other.csv".to_owned(), 1)]);
+        let mut conn = db.conn().unwrap();
+        replace_source(&mut conn, "other.csv", &[entry("TXNova", "Nova", "Team Nova")]).unwrap();
+        assert_eq!(clear(&mut conn, Some("bgis.csv")).unwrap(), 3);
+        assert_eq!(list(&mut conn).unwrap().len(), 1);
+        assert_eq!(sources(&mut conn).unwrap(), vec![("other.csv".to_owned(), 1)]);
+    }
+
+    /// One file listing the same IGN twice is common (a player appears under
+    /// two teams in a draft sheet). Postgres refuses a multi-row upsert that
+    /// touches one row twice, which is why the import is still row-by-row.
+    #[test]
+    fn a_file_that_repeats_an_ign_keeps_the_last_line() {
+        let db = Database::open_test().unwrap();
+        let mut conn = db.conn().unwrap();
+        replace_source(
+            &mut conn,
+            "draft.csv",
+            &[
+                entry("TXNova", "Nova", "Team Nova"),
+                entry("txnova", "Nova Singh", "Team XSpark"),
+            ],
+        )
+        .unwrap();
+
+        let all = list(&mut conn).unwrap();
+        assert_eq!(all.len(), 1, "the repeat updated rather than inserted");
+        assert_eq!(all[0].team, "Team XSpark");
     }
 }

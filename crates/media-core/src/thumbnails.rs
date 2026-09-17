@@ -74,7 +74,8 @@ impl ThumbnailCache {
         duration: Option<f64>,
         ffmpeg: Option<&Ffmpeg>,
     ) -> Result<PathBuf> {
-        let (kind, _) = formats::classify(source).ok_or_else(|| MediaError::Unsupported(source.display().to_string()))?;
+        let (kind, _) =
+            formats::classify(source).ok_or_else(|| MediaError::Unsupported(source.display().to_string()))?;
         let target = self.path_for(content_key, kind);
         if target.is_file() {
             return Ok(target);
@@ -139,7 +140,13 @@ impl ThumbnailCache {
     }
 }
 
-fn render_source(source: &Path, kind: MediaKind, orientation: u16, duration: Option<f64>, ffmpeg: Option<&Ffmpeg>) -> Result<RgbImage> {
+fn render_source(
+    source: &Path,
+    kind: MediaKind,
+    orientation: u16,
+    duration: Option<f64>,
+    ffmpeg: Option<&Ffmpeg>,
+) -> Result<RgbImage> {
     match kind {
         MediaKind::Photo => crate::decode::load_image(source, orientation, Some(THUMBNAIL_MAX_DIM * 2), ffmpeg),
         MediaKind::Video => {
@@ -245,7 +252,9 @@ mod tests {
     fn video_poster_frames_stay_jpeg() {
         let dir = tempfile::tempdir().unwrap();
         let cache = ThumbnailCache::new(dir.path());
-        let path = cache.store(&RgbImage::new(800, 600), "poster", MediaKind::Video).unwrap();
+        let path = cache
+            .store(&RgbImage::new(800, 600), "poster", MediaKind::Video)
+            .unwrap();
         assert!(path.is_file());
         assert!(path.ends_with("poster.jpg"));
         assert!(!path.with_extension("jpg.part").exists());

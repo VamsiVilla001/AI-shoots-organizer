@@ -4,6 +4,7 @@
 //! idempotent — re-running it produces the same result and never undoes a
 //! human decision. That property is what makes "Resume Processing" safe.
 
+use skwad_database::Db;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
@@ -69,13 +70,14 @@ pub fn scan_shoot(
     mut on_progress: impl FnMut(usize),
 ) -> Result<ScanSummary> {
     let shoot = {
-        let conn = db.conn()?;
-        shoots::get_by_id(&conn, shoot_id)?.ok_or_else(|| StageError::Other(format!("shoot {shoot_id} not found")))?
+        let mut conn = db.conn()?;
+        shoots::get_by_id(&mut conn, shoot_id)?
+            .ok_or_else(|| StageError::Other(format!("shoot {shoot_id} not found")))?
     };
 
     {
-        let conn = db.conn()?;
-        shoots::set_status(&conn, shoot_id, ShootStatus::Scanning)?;
+        let mut conn = db.conn()?;
+        shoots::set_status(&mut conn, shoot_id, ShootStatus::Scanning)?;
     }
 
     let options = ScanOptions {
@@ -131,8 +133,8 @@ pub fn scan_shoot(
     // Queue per-file work only for files that still need it, so a re-scan of a
     // mostly-processed shoot is nearly free.
     let pending: std::collections::HashSet<i64> = {
-        let conn = db.conn()?;
-        media_repo::pending(&conn, shoot_id, i64::MAX)?
+        let mut conn = db.conn()?;
+        media_repo::pending(&mut conn, shoot_id, i64::MAX)?
             .into_iter()
             .map(|m| m.id)
             .collect()
@@ -166,11 +168,11 @@ pub fn scan_shoot(
     }
 
     {
-        let conn = db.conn()?;
-        queue_finishing_stages(&conn, shoot_id)?;
-        shoots::set_status(&conn, shoot_id, ShootStatus::Processing)?;
+        let mut conn = db.conn()?;
+        queue_finishing_stages(&mut conn, shoot_id)?;
+        shoots::set_status(&mut conn, shoot_id, ShootStatus::Processing)?;
         logs::record_quiet(
-            &conn,
+            &mut conn,
             logs::EVENT_SHOOT_IMPORTED,
             Some(shoot_id),
             None,
@@ -186,7 +188,7 @@ pub fn scan_shoot(
 }
 
 /// Queues the three shoot-wide stages, if they are not already waiting.
-pub fn queue_finishing_stages(conn: &skwad_database::rusqlite::Connection, shoot_id: i64) -> Result<()> {
+pub fn queue_finishing_stages(conn: &mut dyn skwad_database::Db, shoot_id: i64) -> Result<()> {
     jobs::enqueue_unique(conn, shoot_id, JobKind::Recognise, None, priority::RECOGNISE)?;
     jobs::enqueue_unique(conn, shoot_id, JobKind::Cluster, None, priority::CLUSTER)?;
     jobs::enqueue_unique(conn, shoot_id, JobKind::Albums, None, priority::ALBUMS)?;
@@ -209,11 +211,11 @@ pub struct RecogniseReport {
 /// appear twice in the same frame" rule can be applied.
 pub fn recognise_shoot(db: &Database, shoot_id: i64, settings: &AppSettings) -> Result<RecogniseReport> {
     let (library, unassigned) = {
-        let conn = db.conn()?;
-        faces::clear_suggestions_for_shoot(&conn, shoot_id)?;
+        let mut conn = db.conn()?;
+        faces::clear_suggestions_for_shoot(&mut conn, shoot_id)?;
         (
-            select_reference_vectors(faces::library_vectors(&conn)?),
-            faces::unassigned_vectors(&conn, shoot_id)?,
+            select_reference_vectors(faces::library_vectors(&mut conn)?),
+            faces::unassigned_vectors(&mut conn, shoot_id)?,
         )
     };
 
@@ -274,14 +276,13 @@ pub fn recognise_shoot(db: &Database, shoot_id: i64, settings: &AppSettings) -> 
 
     // Carry the identifications through to the video timeline.
     {
-        let conn = db.conn()?;
-        conn.execute(
+        let mut conn = db.conn()?;
+        conn.exec(
             "UPDATE video_detections SET person_id = (SELECT f.person_id FROM faces f WHERE f.id = video_detections.face_id)
               WHERE face_id IS NOT NULL
-                AND media_id IN (SELECT id FROM media WHERE shoot_id = ?1)",
-            skwad_database::rusqlite::params![shoot_id],
-        )
-        .map_err(skwad_database::DbError::from)?;
+                AND media_id IN (SELECT id FROM media WHERE shoot_id = $1)",
+            skwad_database::params![shoot_id],
+        )?;
     }
 
     Ok(report)
@@ -325,10 +326,10 @@ fn select_reference_vectors(
 /// repeatedly (e.g. once per shoot, whenever the user asks).
 pub fn match_person_in_shoot(db: &Database, shoot_id: i64, person_id: i64, settings: &AppSettings) -> Result<usize> {
     let (reference, unassigned) = {
-        let conn = db.conn()?;
+        let mut conn = db.conn()?;
         (
-            faces::reference_vectors_for_person(&conn, person_id)?,
-            faces::unassigned_vectors(&conn, shoot_id)?,
+            faces::reference_vectors_for_person(&mut conn, person_id)?,
+            faces::unassigned_vectors(&mut conn, shoot_id)?,
         )
     };
     if reference.is_empty() || unassigned.is_empty() {
@@ -374,15 +375,15 @@ pub struct ClusterReport {
 /// Groups whatever recognition could not identify (§7).
 pub fn cluster_shoot(db: &Database, shoot_id: i64, settings: &AppSettings) -> Result<ClusterReport> {
     let vectors = {
-        let conn = db.conn()?;
+        let mut conn = db.conn()?;
         // Named clusters survive; only the machine-generated ones are rebuilt.
-        clusters::clear_unnamed(&conn, shoot_id)?;
-        faces::unassigned_vectors(&conn, shoot_id)?
+        clusters::clear_unnamed(&mut conn, shoot_id)?;
+        faces::unassigned_vectors(&mut conn, shoot_id)?
     };
 
     if vectors.is_empty() {
-        let conn = db.conn()?;
-        clusters::refresh_counts(&conn, shoot_id)?;
+        let mut conn = db.conn()?;
+        clusters::refresh_counts(&mut conn, shoot_id)?;
         return Ok(ClusterReport::default());
     }
 
@@ -415,8 +416,8 @@ pub fn cluster_shoot(db: &Database, shoot_id: i64, settings: &AppSettings) -> Re
     })?;
 
     {
-        let conn = db.conn()?;
-        clusters::refresh_counts(&conn, shoot_id)?;
+        let mut conn = db.conn()?;
+        clusters::refresh_counts(&mut conn, shoot_id)?;
     }
 
     Ok(report)
@@ -429,14 +430,14 @@ pub fn generate_albums(db: &Database, shoot_id: i64) -> Result<usize> {
         albums::regenerate(conn, shoot_id)
     })?;
 
-    let conn = db.conn()?;
-    let progress = jobs::progress(&conn, shoot_id)?;
+    let mut conn = db.conn()?;
+    let progress = jobs::progress(&mut conn, shoot_id)?;
     let status = if progress.media_failed > 0 && progress.media_analysed == 0 {
         ShootStatus::Failed
     } else {
         ShootStatus::Completed
     };
-    shoots::set_status(&conn, shoot_id, status)?;
+    shoots::set_status(&mut conn, shoot_id, status)?;
     Ok(created)
 }
 
@@ -444,21 +445,21 @@ pub fn generate_albums(db: &Database, shoot_id: i64) -> Result<usize> {
 /// from scratch — used after changing a model or a threshold.
 pub fn reset_analysis(db: &Database, shoot_id: i64) -> Result<()> {
     db.transaction(|conn| {
-        conn.execute(
-            "DELETE FROM faces WHERE shoot_id = ?1",
-            skwad_database::rusqlite::params![shoot_id],
+        conn.exec(
+            "DELETE FROM faces WHERE shoot_id = $1",
+            skwad_database::params![shoot_id],
         )?;
-        conn.execute(
-            "DELETE FROM video_detections WHERE media_id IN (SELECT id FROM media WHERE shoot_id = ?1)",
-            skwad_database::rusqlite::params![shoot_id],
+        conn.exec(
+            "DELETE FROM video_detections WHERE media_id IN (SELECT id FROM media WHERE shoot_id = $1)",
+            skwad_database::params![shoot_id],
         )?;
-        conn.execute(
-            "DELETE FROM clusters WHERE shoot_id = ?1",
-            skwad_database::rusqlite::params![shoot_id],
+        conn.exec(
+            "DELETE FROM clusters WHERE shoot_id = $1",
+            skwad_database::params![shoot_id],
         )?;
-        conn.execute(
-            "DELETE FROM albums WHERE shoot_id = ?1",
-            skwad_database::rusqlite::params![shoot_id],
+        conn.exec(
+            "DELETE FROM albums WHERE shoot_id = $1",
+            skwad_database::params![shoot_id],
         )?;
         // `media_groups` is deliberately left alone: the editor's own sorting is
         // not an AI result and must survive a re-analysis.
@@ -466,17 +467,17 @@ pub fn reset_analysis(db: &Database, shoot_id: i64) -> Result<()> {
         Ok(())
     })?;
 
-    let conn = db.conn()?;
-    jobs::cancel_for_shoot(&conn, shoot_id)?;
-    jobs::clear_finished(&conn, shoot_id)?;
+    let mut conn = db.conn()?;
+    jobs::cancel_for_shoot(&mut conn, shoot_id)?;
+    jobs::clear_finished(&mut conn, shoot_id)?;
     Ok(())
 }
 
 /// Queues analysis for anything in the shoot that is not finished.
 pub fn queue_pending_work(db: &Database, shoot_id: i64) -> Result<usize> {
     let pending = {
-        let conn = db.conn()?;
-        media_repo::pending(&conn, shoot_id, i64::MAX)?
+        let mut conn = db.conn()?;
+        media_repo::pending(&mut conn, shoot_id, i64::MAX)?
     };
 
     let queued = db.transaction(|conn| {
@@ -503,9 +504,9 @@ pub fn queue_pending_work(db: &Database, shoot_id: i64) -> Result<usize> {
     })?;
 
     {
-        let conn = db.conn()?;
-        queue_finishing_stages(&conn, shoot_id)?;
-        shoots::set_status(&conn, shoot_id, ShootStatus::Processing)?;
+        let mut conn = db.conn()?;
+        queue_finishing_stages(&mut conn, shoot_id)?;
+        shoots::set_status(&mut conn, shoot_id, ShootStatus::Processing)?;
     }
 
     Ok(queued)
@@ -518,14 +519,14 @@ mod tests {
     use skwad_database::repo::people;
 
     fn seed_shoot(db: &Database) -> i64 {
-        let conn = db.conn().unwrap();
-        shoots::create(&conn, "Test Shoot", "C:\\shoot").unwrap().id
+        let mut conn = db.conn().unwrap();
+        shoots::create(&mut conn, "Test Shoot", "C:\\shoot").unwrap().id
     }
 
     fn add_face(db: &Database, shoot_id: i64, filename: &str, embedding: Vec<f32>) -> (i64, i64) {
-        let conn = db.conn().unwrap();
+        let mut conn = db.conn().unwrap();
         let media_id = media_repo::upsert(
-            &conn,
+            &mut conn,
             &NewMedia {
                 shoot_id,
                 path: format!("C:\\shoot\\{filename}"),
@@ -539,7 +540,7 @@ mod tests {
         )
         .unwrap();
         let face_id = faces::insert(
-            &conn,
+            &mut conn,
             &skwad_database::models::NewFace {
                 media_id,
                 shoot_id,
@@ -562,9 +563,9 @@ mod tests {
     }
 
     fn add_video_faces(db: &Database, shoot_id: i64, filename: &str, samples: &[(f64, Vec<f32>)]) -> Vec<i64> {
-        let conn = db.conn().unwrap();
+        let mut conn = db.conn().unwrap();
         let media_id = media_repo::upsert(
-            &conn,
+            &mut conn,
             &NewMedia {
                 shoot_id,
                 path: format!("C:\\shoot\\{filename}"),
@@ -581,7 +582,7 @@ mod tests {
             .iter()
             .map(|(frame_time, embedding)| {
                 faces::insert(
-                    &conn,
+                    &mut conn,
                     &skwad_database::models::NewFace {
                         media_id,
                         shoot_id,
@@ -611,15 +612,15 @@ mod tests {
 
     #[test]
     fn recognition_suggests_rather_than_confirms_by_default() {
-        let db = Database::open_in_memory().unwrap();
+        let db = Database::open_test().unwrap();
         let shoot_id = seed_shoot(&db);
 
         // A known player, established by a confirmed face in an earlier shoot.
         let (_, known_face) = add_face(&db, shoot_id, "known.jpg", unit(vec![1.0, 0.0, 0.0]));
         {
-            let conn = db.conn().unwrap();
-            let person = people::get_or_create(&conn, "Jonathan", None).unwrap();
-            faces::assign(&conn, known_face, person.id, Some(1.0)).unwrap();
+            let mut conn = db.conn().unwrap();
+            let person = people::get_or_create(&mut conn, "Jonathan", None).unwrap();
+            faces::assign(&mut conn, known_face, person.id, Some(1.0)).unwrap();
         }
 
         // RAW and finished stills share the exact same recognition route once
@@ -631,15 +632,15 @@ mod tests {
         assert_eq!(report.faces_matched, 1);
         assert_eq!(report.faces_auto_confirmed, 0, "nothing is auto-confirmed by default");
 
-        let conn = db.conn().unwrap();
-        let face = faces::get_by_id(&conn, new_face).unwrap().unwrap();
+        let mut conn = db.conn().unwrap();
+        let face = faces::get_by_id(&mut conn, new_face).unwrap().unwrap();
         assert_eq!(face.assignment, "suggested");
         assert!(face.person_id.is_some());
     }
 
     #[test]
     fn naming_a_raw_reference_after_the_initial_pass_enables_matching() {
-        let db = Database::open_in_memory().unwrap();
+        let db = Database::open_test().unwrap();
         let shoot_id = seed_shoot(&db);
         let (_, reference) = add_face(&db, shoot_id, "reference.RAF", unit(vec![1.0, 0.0, 0.0]));
         let (_, similar) = add_face(&db, shoot_id, "similar.RAF", unit(vec![0.98, 0.08, 0.0]));
@@ -649,28 +650,28 @@ mod tests {
         assert_eq!(first_pass.faces_matched, 0);
 
         {
-            let conn = db.conn().unwrap();
-            let person = people::get_or_create(&conn, "Jonathan", None).unwrap();
-            faces::assign(&conn, reference, person.id, None).unwrap();
+            let mut conn = db.conn().unwrap();
+            let person = people::get_or_create(&mut conn, "Jonathan", None).unwrap();
+            faces::assign(&mut conn, reference, person.id, None).unwrap();
         }
 
         let after_naming = recognise_shoot(&db, shoot_id, &AppSettings::default()).unwrap();
         assert_eq!(after_naming.faces_matched, 1);
-        let conn = db.conn().unwrap();
-        let matched = faces::get_by_id(&conn, similar).unwrap().unwrap();
+        let mut conn = db.conn().unwrap();
+        let matched = faces::get_by_id(&mut conn, similar).unwrap().unwrap();
         assert_eq!(matched.assignment, "suggested");
         assert!(matched.person_id.is_some());
     }
 
     #[test]
     fn the_same_player_can_match_at_multiple_video_sample_times() {
-        let db = Database::open_in_memory().unwrap();
+        let db = Database::open_test().unwrap();
         let shoot_id = seed_shoot(&db);
         let (_, reference) = add_face(&db, shoot_id, "reference.jpg", unit(vec![1.0, 0.0, 0.0]));
         {
-            let conn = db.conn().unwrap();
-            let person = people::get_or_create(&conn, "Jonathan", None).unwrap();
-            faces::assign(&conn, reference, person.id, Some(1.0)).unwrap();
+            let mut conn = db.conn().unwrap();
+            let person = people::get_or_create(&mut conn, "Jonathan", None).unwrap();
+            faces::assign(&mut conn, reference, person.id, Some(1.0)).unwrap();
         }
         let samples = add_video_faces(
             &db,
@@ -681,22 +682,22 @@ mod tests {
 
         let report = recognise_shoot(&db, shoot_id, &AppSettings::default()).unwrap();
         assert_eq!(report.faces_matched, 2);
-        let conn = db.conn().unwrap();
+        let mut conn = db.conn().unwrap();
         assert!(samples.into_iter().all(|face_id| {
-            let face = faces::get_by_id(&conn, face_id).unwrap().unwrap();
+            let face = faces::get_by_id(&mut conn, face_id).unwrap().unwrap();
             face.person_id.is_some() && face.assignment == "suggested"
         }));
     }
 
     #[test]
     fn auto_confirm_applies_above_its_threshold() {
-        let db = Database::open_in_memory().unwrap();
+        let db = Database::open_test().unwrap();
         let shoot_id = seed_shoot(&db);
         let (_, known_face) = add_face(&db, shoot_id, "known.jpg", unit(vec![1.0, 0.0, 0.0]));
         {
-            let conn = db.conn().unwrap();
-            let person = people::get_or_create(&conn, "Jonathan", None).unwrap();
-            faces::assign(&conn, known_face, person.id, Some(1.0)).unwrap();
+            let mut conn = db.conn().unwrap();
+            let person = people::get_or_create(&mut conn, "Jonathan", None).unwrap();
+            faces::assign(&mut conn, known_face, person.id, Some(1.0)).unwrap();
         }
         let (_, new_face) = add_face(&db, shoot_id, "new.jpg", unit(vec![0.999, 0.02, 0.0]));
 
@@ -707,23 +708,23 @@ mod tests {
         let report = recognise_shoot(&db, shoot_id, &settings).unwrap();
         assert_eq!(report.faces_auto_confirmed, 1);
 
-        let conn = db.conn().unwrap();
+        let mut conn = db.conn().unwrap();
         assert_eq!(
-            faces::get_by_id(&conn, new_face).unwrap().unwrap().assignment,
+            faces::get_by_id(&mut conn, new_face).unwrap().unwrap().assignment,
             "confirmed"
         );
     }
 
     #[test]
     fn a_stricter_rerun_removes_a_stale_suggestion() {
-        let db = Database::open_in_memory().unwrap();
+        let db = Database::open_test().unwrap();
         let shoot_id = seed_shoot(&db);
         let (_, known_face) = add_face(&db, shoot_id, "known.jpg", unit(vec![1.0, 0.0]));
         let (_, borderline) = add_face(&db, shoot_id, "borderline.jpg", unit(vec![0.6, 0.8]));
         {
-            let conn = db.conn().unwrap();
-            let person = people::get_or_create(&conn, "Jonathan", None).unwrap();
-            faces::assign(&conn, known_face, person.id, Some(1.0)).unwrap();
+            let mut conn = db.conn().unwrap();
+            let person = people::get_or_create(&mut conn, "Jonathan", None).unwrap();
+            faces::assign(&mut conn, known_face, person.id, Some(1.0)).unwrap();
         }
 
         let permissive = AppSettings {
@@ -739,8 +740,8 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(recognise_shoot(&db, shoot_id, &strict).unwrap().faces_matched, 0);
-        let conn = db.conn().unwrap();
-        let face = faces::get_by_id(&conn, borderline).unwrap().unwrap();
+        let mut conn = db.conn().unwrap();
+        let face = faces::get_by_id(&mut conn, borderline).unwrap().unwrap();
         assert_eq!(face.assignment, "unassigned");
         assert_eq!(face.person_id, None);
     }
@@ -774,7 +775,7 @@ mod tests {
 
     #[test]
     fn an_empty_library_leaves_everything_for_clustering() {
-        let db = Database::open_in_memory().unwrap();
+        let db = Database::open_test().unwrap();
         let shoot_id = seed_shoot(&db);
         add_face(&db, shoot_id, "a.jpg", unit(vec![1.0, 0.0, 0.0]));
 
@@ -785,13 +786,13 @@ mod tests {
 
     #[test]
     fn match_person_in_shoot_suggests_without_touching_other_people() {
-        let db = Database::open_in_memory().unwrap();
+        let db = Database::open_test().unwrap();
         let shoot_id = seed_shoot(&db);
         let (_, existing_known) = add_face(&db, shoot_id, "known.jpg", unit(vec![0.0, 1.0, 0.0]));
         let jonathan = {
-            let conn = db.conn().unwrap();
-            let p = people::get_or_create(&conn, "Jonathan", None).unwrap();
-            faces::assign(&conn, existing_known, p.id, Some(1.0)).unwrap();
+            let mut conn = db.conn().unwrap();
+            let p = people::get_or_create(&mut conn, "Jonathan", None).unwrap();
+            faces::assign(&mut conn, existing_known, p.id, Some(1.0)).unwrap();
             p
         };
 
@@ -799,17 +800,17 @@ mod tests {
         // reference sample lives outside the shoot, like the hidden
         // Reference Library shoot enrollment uses.
         let reference_shoot_id = {
-            let conn = db.conn().unwrap();
-            shoots::create(&conn, "Reference Library", "").unwrap().id
+            let mut conn = db.conn().unwrap();
+            shoots::create(&mut conn, "Reference Library", "").unwrap().id
         };
         let mavi = {
-            let conn = db.conn().unwrap();
-            people::get_or_create(&conn, "Mavi", None).unwrap()
+            let mut conn = db.conn().unwrap();
+            people::get_or_create(&mut conn, "Mavi", None).unwrap()
         };
         let (_, reference_face) = add_face(&db, reference_shoot_id, "ref.jpg", unit(vec![1.0, 0.0, 0.0]));
         {
-            let conn = db.conn().unwrap();
-            faces::assign(&conn, reference_face, mavi.id, Some(1.0)).unwrap();
+            let mut conn = db.conn().unwrap();
+            faces::assign(&mut conn, reference_face, mavi.id, Some(1.0)).unwrap();
         }
 
         let (_, candidate) = add_face(&db, shoot_id, "candidate.jpg", unit(vec![0.99, 0.05, 0.0]));
@@ -817,13 +818,13 @@ mod tests {
         let new_suggestions = match_person_in_shoot(&db, shoot_id, mavi.id, &AppSettings::default()).unwrap();
         assert_eq!(new_suggestions, 1);
 
-        let conn = db.conn().unwrap();
-        let matched = faces::get_by_id(&conn, candidate).unwrap().unwrap();
+        let mut conn = db.conn().unwrap();
+        let matched = faces::get_by_id(&mut conn, candidate).unwrap().unwrap();
         assert_eq!(matched.person_id, Some(mavi.id));
         assert_eq!(matched.assignment, "suggested");
 
         // Jonathan's confirmed face in the same shoot is untouched.
-        let unaffected = faces::get_by_id(&conn, existing_known).unwrap().unwrap();
+        let unaffected = faces::get_by_id(&mut conn, existing_known).unwrap().unwrap();
         assert_eq!(unaffected.person_id, Some(jonathan.id));
         assert_eq!(unaffected.assignment, "confirmed");
         drop(conn);
@@ -838,7 +839,7 @@ mod tests {
 
     #[test]
     fn clustering_groups_unknown_faces_and_names_them_in_order() {
-        let db = Database::open_in_memory().unwrap();
+        let db = Database::open_test().unwrap();
         let shoot_id = seed_shoot(&db);
 
         for i in 0..5 {
@@ -862,8 +863,8 @@ mod tests {
         assert_eq!(report.clusters_created, 2);
         assert_eq!(report.faces_clustered, 8);
 
-        let conn = db.conn().unwrap();
-        let summaries = clusters::list_summaries(&conn, shoot_id, false).unwrap();
+        let mut conn = db.conn().unwrap();
+        let summaries = clusters::list_summaries(&mut conn, shoot_id, false).unwrap();
         assert_eq!(summaries[0].cluster.label, "Unknown Person 1");
         assert_eq!(summaries[0].cluster.face_count, 5);
         assert_eq!(summaries[1].cluster.face_count, 3);
@@ -871,7 +872,7 @@ mod tests {
 
     #[test]
     fn reclustering_preserves_a_named_cluster() {
-        let db = Database::open_in_memory().unwrap();
+        let db = Database::open_test().unwrap();
         let shoot_id = seed_shoot(&db);
         for i in 0..5 {
             add_face(
@@ -885,45 +886,51 @@ mod tests {
         cluster_shoot(&db, shoot_id, &AppSettings::default()).unwrap();
 
         let named_id = {
-            let conn = db.conn().unwrap();
-            let summaries = clusters::list_summaries(&conn, shoot_id, false).unwrap();
-            let person = people::get_or_create(&conn, "Jelly", None).unwrap();
-            clusters::name_cluster(&conn, summaries[0].cluster.id, person.id).unwrap();
+            let mut conn = db.conn().unwrap();
+            let summaries = clusters::list_summaries(&mut conn, shoot_id, false).unwrap();
+            let person = people::get_or_create(&mut conn, "Jelly", None).unwrap();
+            clusters::name_cluster(&mut conn, summaries[0].cluster.id, person.id).unwrap();
             summaries[0].cluster.id
         };
 
         // Re-running must not undo the identification.
         cluster_shoot(&db, shoot_id, &AppSettings::default()).unwrap();
 
-        let conn = db.conn().unwrap();
-        let cluster = clusters::get_by_id(&conn, named_id)
+        let mut conn = db.conn().unwrap();
+        let cluster = clusters::get_by_id(&mut conn, named_id)
             .unwrap()
             .expect("named cluster survives");
         assert_eq!(cluster.status, "named");
-        assert_eq!(faces::library_vectors(&conn).unwrap().len(), 1);
+        assert_eq!(faces::library_vectors(&mut conn).unwrap().len(), 1);
     }
 
     #[test]
     fn albums_are_generated_and_the_shoot_completes() {
-        let db = Database::open_in_memory().unwrap();
+        let db = Database::open_test().unwrap();
         let shoot_id = seed_shoot(&db);
         let (_, face_id) = add_face(&db, shoot_id, "a.jpg", unit(vec![1.0, 0.0]));
         {
-            let conn = db.conn().unwrap();
-            let person = people::get_or_create(&conn, "Mavi", None).unwrap();
-            faces::assign(&conn, face_id, person.id, Some(0.99)).unwrap();
+            let mut conn = db.conn().unwrap();
+            let person = people::get_or_create(&mut conn, "Mavi", None).unwrap();
+            faces::assign(&mut conn, face_id, person.id, Some(0.99)).unwrap();
         }
 
         assert!(generate_albums(&db, shoot_id).unwrap() >= 1);
 
-        let conn = db.conn().unwrap();
-        assert_eq!(shoots::get_by_id(&conn, shoot_id).unwrap().unwrap().status, "completed");
-        assert!(albums::list(&conn, shoot_id).unwrap().iter().any(|a| a.name == "Mavi"));
+        let mut conn = db.conn().unwrap();
+        assert_eq!(
+            shoots::get_by_id(&mut conn, shoot_id).unwrap().unwrap().status,
+            "completed"
+        );
+        assert!(albums::list(&mut conn, shoot_id)
+            .unwrap()
+            .iter()
+            .any(|a| a.name == "Mavi"));
     }
 
     #[test]
     fn reset_clears_derived_data_but_keeps_the_media_index() {
-        let db = Database::open_in_memory().unwrap();
+        let db = Database::open_test().unwrap();
         let shoot_id = seed_shoot(&db);
         add_face(&db, shoot_id, "a.jpg", unit(vec![1.0, 0.0]));
         cluster_shoot(&db, shoot_id, &AppSettings::default()).unwrap();
@@ -931,14 +938,14 @@ mod tests {
 
         reset_analysis(&db, shoot_id).unwrap();
 
-        let conn = db.conn().unwrap();
+        let mut conn = db.conn().unwrap();
         assert_eq!(
-            media_repo::count_for_shoot(&conn, shoot_id).unwrap(),
+            media_repo::count_for_shoot(&mut conn, shoot_id).unwrap(),
             1,
             "the file index survives"
         );
-        assert!(faces::for_media(&conn, 1).unwrap().is_empty());
-        assert!(albums::list(&conn, shoot_id).unwrap().is_empty());
-        assert!(clusters::list_summaries(&conn, shoot_id, true).unwrap().is_empty());
+        assert!(faces::for_media(&mut conn, 1).unwrap().is_empty());
+        assert!(albums::list(&mut conn, shoot_id).unwrap().is_empty());
+        assert!(clusters::list_summaries(&mut conn, shoot_id, true).unwrap().is_empty());
     }
 }

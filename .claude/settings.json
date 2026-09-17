@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo test *)",
+      "Bash(git commit -m ' *)",
+      "WebSearch",
+      "Bash(node --check apps/premiere-panel/main.js)",
+      "Bash(node -e \"JSON.parse\\(require\\('fs'\\).readFileSync\\('apps/premiere-panel/manifest.json','utf-8'\\)\\); console.log\\('manifest ok'\\)\")",
+      "Bash(node -e \"JSON.parse\\(require\\('fs'\\).readFileSync\\('apps/premiere-panel/package.json','utf-8'\\)\\); console.log\\('package.json ok'\\)\")"
+    ]
+  }
+}

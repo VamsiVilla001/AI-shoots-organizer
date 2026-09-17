@@ -74,7 +74,11 @@ fn route(app: &AppHandle, request: &Request<Vec<u8>>) -> Response<Vec<u8>> {
         return error(StatusCode::SERVICE_UNAVAILABLE, "application is still starting");
     };
 
-    let media = match state.db.conn().and_then(|conn| media_repo::get_by_id(&conn, id)) {
+    let media = match state
+        .db
+        .conn()
+        .and_then(|mut conn| media_repo::get_by_id(&mut conn, id))
+    {
         Ok(Some(media)) => media,
         Ok(None) => return error(StatusCode::NOT_FOUND, "not indexed"),
         Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),

@@ -213,8 +213,8 @@ impl Engine {
                 source = orientation,
                 "correcting stale photo orientation before face analysis"
             );
-            let conn = db.conn()?;
-            media_repo::set_orientation(&conn, item.id, i64::from(orientation))?;
+            let mut conn = db.conn()?;
+            media_repo::set_orientation(&mut conn, item.id, i64::from(orientation))?;
         }
 
         let decoded = skwad_media_core::decode::decode_image(
@@ -226,8 +226,8 @@ impl Engine {
 
         // Re-analysis must replace, not append.
         {
-            let conn = db.conn()?;
-            faces::delete_for_media(&conn, item.id)?;
+            let mut conn = db.conn()?;
+            faces::delete_for_media(&mut conn, item.id)?;
         }
 
         let ai_started = Instant::now();
@@ -235,9 +235,9 @@ impl Engine {
         let ai_elapsed = ai_started.elapsed();
 
         {
-            let conn = db.conn()?;
-            media_repo::set_status(&conn, item.id, ProcessingStatus::Analysed, None)?;
-            media_repo::refresh_face_count(&conn, item.id)?;
+            let mut conn = db.conn()?;
+            media_repo::set_status(&mut conn, item.id, ProcessingStatus::Analysed, None)?;
+            media_repo::refresh_face_count(&mut conn, item.id)?;
         }
         tracing::info!(
             file = %item.filename,
@@ -271,8 +271,8 @@ impl Engine {
                 source = orientation,
                 "correcting stale video orientation before face analysis"
             );
-            let conn = db.conn()?;
-            media_repo::set_orientation(&conn, item.id, i64::from(orientation))?;
+            let mut conn = db.conn()?;
+            media_repo::set_orientation(&mut conn, item.id, i64::from(orientation))?;
         }
         let config = self.settings.video_config();
         let dimensions = item
@@ -283,10 +283,10 @@ impl Engine {
         let plan = skwad_video_analysis::plan_video(&ffmpeg, &path, item.duration, dimensions, &config);
 
         {
-            let conn = db.conn()?;
-            faces::delete_for_media(&conn, item.id)?;
-            video_repo::delete_for_media(&conn, item.id)?;
-            video_repo::delete_sample_frames(&conn, item.id)?;
+            let mut conn = db.conn()?;
+            faces::delete_for_media(&mut conn, item.id)?;
+            video_repo::delete_for_media(&mut conn, item.id)?;
+            video_repo::delete_sample_frames(&mut conn, item.id)?;
         }
         if let Err(error) = self.video_frames.remove(&item.content_key) {
             tracing::warn!(video = %item.filename, %error, "could not clear stale review frames");
@@ -306,8 +306,8 @@ impl Engine {
                 Ok(frame) => {
                     decoded_frames += 1;
                     {
-                        let conn = db.conn()?;
-                        video_repo::insert_sample_frame(&conn, item.id, frame.timestamp)?;
+                        let mut conn = db.conn()?;
+                        video_repo::insert_sample_frame(&mut conn, item.id, frame.timestamp)?;
                     }
                     let mut analysed_faces = self.detect_and_embed(&frame.image)?;
                     if let Some(previous) = previous_frame.as_ref() {
@@ -372,9 +372,9 @@ impl Engine {
         };
 
         {
-            let conn = db.conn()?;
-            media_repo::set_status(&conn, item.id, ProcessingStatus::Analysed, None)?;
-            media_repo::refresh_face_count(&conn, item.id)?;
+            let mut conn = db.conn()?;
+            media_repo::set_status(&mut conn, item.id, ProcessingStatus::Analysed, None)?;
+            media_repo::refresh_face_count(&mut conn, item.id)?;
         }
 
         tracing::info!(
@@ -543,7 +543,7 @@ impl Engine {
             ..Default::default()
         };
 
-        let conn = db.conn()?;
+        let mut conn = db.conn()?;
         for analysed in analysed_faces {
             let detection = &analysed.detection;
             let (x, y, w, h) = detection.bbox.normalised(width, height);
@@ -556,7 +556,7 @@ impl Engine {
             }
 
             let face_id = faces::insert(
-                &conn,
+                &mut conn,
                 &NewFace {
                     media_id: item.id,
                     shoot_id: item.shoot_id,
@@ -576,7 +576,7 @@ impl Engine {
             // Videos additionally get a timeline entry, filled in with a person
             // once recognition runs.
             if let Some(at) = frame_time {
-                video_repo::insert(&conn, item.id, None, Some(face_id), at, detection.score as f64)?;
+                video_repo::insert(&mut conn, item.id, None, Some(face_id), at, detection.score as f64)?;
             }
         }
 
@@ -588,8 +588,13 @@ impl Engine {
         match formats::classify(Path::new(&item.path)).map(|(kind, _)| kind) {
             Some(MediaKind::Video) => {
                 if !self.settings.video_enabled {
-                    let conn = db.conn()?;
-                    media_repo::set_status(&conn, item.id, ProcessingStatus::Skipped, Some("video analysis is off"))?;
+                    let mut conn = db.conn()?;
+                    media_repo::set_status(
+                        &mut conn,
+                        item.id,
+                        ProcessingStatus::Skipped,
+                        Some("video analysis is off"),
+                    )?;
                     return Ok(AnalysisOutcome::default());
                 }
                 self.analyse_video(db, item)
@@ -632,8 +637,13 @@ pub fn discover_ffmpeg(settings: &AppSettings) -> Option<Ffmpeg> {
 pub fn index_media(db: &Database, thumbnails: &ThumbnailCache, ffmpeg: Option<&Ffmpeg>, item: &Media) -> Result<()> {
     let path = PathBuf::from(&item.path);
     if !path.exists() {
-        let conn = db.conn()?;
-        media_repo::set_status(&conn, item.id, ProcessingStatus::Failed, Some("file no longer exists"))?;
+        let mut conn = db.conn()?;
+        media_repo::set_status(
+            &mut conn,
+            item.id,
+            ProcessingStatus::Failed,
+            Some("file no longer exists"),
+        )?;
         return Err(PipelineError::Other(format!("{} no longer exists", item.path)));
     }
 
@@ -642,9 +652,9 @@ pub fn index_media(db: &Database, thumbnails: &ThumbnailCache, ffmpeg: Option<&F
     let meta = skwad_media_core::metadata::read(&path, kind, decoder, ffmpeg);
 
     {
-        let conn = db.conn()?;
+        let mut conn = db.conn()?;
         media_repo::set_metadata(
-            &conn,
+            &mut conn,
             item.id,
             &MediaMetadata {
                 width: meta.width.map(|v| v as i64),
@@ -665,14 +675,14 @@ pub fn index_media(db: &Database, thumbnails: &ThumbnailCache, ffmpeg: Option<&F
 
     match thumbnails.ensure(&path, &item.content_key, meta.orientation, meta.duration, ffmpeg) {
         Ok(thumb) => {
-            let conn = db.conn()?;
-            media_repo::set_thumbnail(&conn, item.id, &thumb.display().to_string())?;
+            let mut conn = db.conn()?;
+            media_repo::set_thumbnail(&mut conn, item.id, &thumb.display().to_string())?;
             if kind == MediaKind::Photo {
                 match image::open(&thumb) {
                     Ok(image) => {
                         let quality = skwad_media_core::quality::analyse(&image.to_rgb8());
                         media_repo::set_quality(
-                            &conn,
+                            &mut conn,
                             item.id,
                             quality.overall,
                             quality.sharpness,
@@ -685,14 +695,14 @@ pub fn index_media(db: &Database, thumbnails: &ThumbnailCache, ffmpeg: Option<&F
                     }
                 }
             }
-            media_repo::set_status(&conn, item.id, ProcessingStatus::Thumbnailed, None)?;
+            media_repo::set_status(&mut conn, item.id, ProcessingStatus::Thumbnailed, None)?;
         }
         Err(e) => {
             // A missing thumbnail is a cosmetic failure; the file can still
             // be analysed and exported, so it must not stop the pipeline.
             tracing::warn!(file = %item.path, error = %e, "thumbnail generation failed");
-            let conn = db.conn()?;
-            media_repo::set_status(&conn, item.id, ProcessingStatus::Indexed, None)?;
+            let mut conn = db.conn()?;
+            media_repo::set_status(&mut conn, item.id, ProcessingStatus::Indexed, None)?;
         }
     }
 
@@ -852,12 +862,12 @@ mod tests {
         let photo = source.path().join("IMG_0231.jpg");
         write_jpeg(&photo);
 
-        let db = Database::open_in_memory().unwrap();
+        let db = Database::open_test().unwrap();
         let item = {
-            let conn = db.conn().unwrap();
-            let shoot = shoots::create(&conn, "Shoot", &source.path().display().to_string()).unwrap();
+            let mut conn = db.conn().unwrap();
+            let shoot = shoots::create(&mut conn, "Shoot", &source.path().display().to_string()).unwrap();
             let media_id = media_repo::upsert(
-                &conn,
+                &mut conn,
                 &NewMedia {
                     shoot_id: shoot.id,
                     path: photo.display().to_string(),
@@ -870,15 +880,15 @@ mod tests {
                 },
             )
             .unwrap();
-            media_repo::get_by_id(&conn, media_id).unwrap().unwrap()
+            media_repo::get_by_id(&mut conn, media_id).unwrap().unwrap()
         };
 
         let thumbnails = ThumbnailCache::new(cache.path());
         // No models directory, no FFmpeg — both deliberately absent.
         index_media(&db, &thumbnails, None, &item).expect("indexing must not need AI models");
 
-        let conn = db.conn().unwrap();
-        let stored = media_repo::get_by_id(&conn, item.id).unwrap().unwrap();
+        let mut conn = db.conn().unwrap();
+        let stored = media_repo::get_by_id(&mut conn, item.id).unwrap().unwrap();
         assert_eq!(stored.processing_status, "thumbnailed");
         assert!(stored.thumbnail_path.is_some(), "a thumbnail should have been produced");
         assert_eq!(stored.width, Some(320));
@@ -892,12 +902,12 @@ mod tests {
         let photo = source.path().join("portrait.jpg");
         write_oriented_jpeg(&photo, 6);
 
-        let db = Database::open_in_memory().unwrap();
+        let db = Database::open_test().unwrap();
         let item = {
-            let conn = db.conn().unwrap();
-            let shoot = shoots::create(&conn, "Shoot", &source.path().display().to_string()).unwrap();
+            let mut conn = db.conn().unwrap();
+            let shoot = shoots::create(&mut conn, "Shoot", &source.path().display().to_string()).unwrap();
             let media_id = media_repo::upsert(
-                &conn,
+                &mut conn,
                 &NewMedia {
                     shoot_id: shoot.id,
                     path: photo.display().to_string(),
@@ -910,7 +920,7 @@ mod tests {
                 },
             )
             .unwrap();
-            media_repo::get_by_id(&conn, media_id).unwrap().unwrap()
+            media_repo::get_by_id(&mut conn, media_id).unwrap().unwrap()
         };
 
         assert_eq!(
@@ -929,12 +939,12 @@ mod tests {
     #[test]
     fn a_missing_source_file_is_reported_not_panicked() {
         let cache = tempfile::tempdir().unwrap();
-        let db = Database::open_in_memory().unwrap();
+        let db = Database::open_test().unwrap();
         let item = {
-            let conn = db.conn().unwrap();
-            let shoot = shoots::create(&conn, "Shoot", "C:\\gone").unwrap();
+            let mut conn = db.conn().unwrap();
+            let shoot = shoots::create(&mut conn, "Shoot", "C:\\gone").unwrap();
             let media_id = media_repo::upsert(
-                &conn,
+                &mut conn,
                 &NewMedia {
                     shoot_id: shoot.id,
                     path: "C:\\gone\\missing.jpg".into(),
@@ -947,15 +957,15 @@ mod tests {
                 },
             )
             .unwrap();
-            media_repo::get_by_id(&conn, media_id).unwrap().unwrap()
+            media_repo::get_by_id(&mut conn, media_id).unwrap().unwrap()
         };
 
         let thumbnails = ThumbnailCache::new(cache.path());
         assert!(index_media(&db, &thumbnails, None, &item).is_err());
 
-        let conn = db.conn().unwrap();
+        let mut conn = db.conn().unwrap();
         assert_eq!(
-            media_repo::get_by_id(&conn, item.id)
+            media_repo::get_by_id(&mut conn, item.id)
                 .unwrap()
                 .unwrap()
                 .processing_status,

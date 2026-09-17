@@ -9,6 +9,7 @@ pub mod models;
 pub mod paths;
 pub mod pipeline;
 pub mod premiere_api;
+pub mod premiere_plugin;
 pub mod protocol;
 pub mod resource_monitor;
 pub mod roster;
@@ -20,7 +21,7 @@ pub mod worker;
 
 use std::sync::Arc;
 
-use skwad_database::{Database, StorageMode};
+use skwad_database::{Database, PgConfig};
 use tauri::Manager;
 
 use crate::paths::AppPaths;
@@ -61,13 +62,26 @@ pub fn run() {
                 tracing::info!(?migration, "migrated the pre-SKWAD application library");
             }
 
-            let storage_mode = if location.network_share {
-                StorageMode::NetworkShare
-            } else {
-                StorageMode::Local
-            };
-            let db = Database::open_with_mode(paths.database_file(), storage_mode)
-                .map_err(|e| format!("could not open the database: {e}"))?;
+            // `StorageMode` is gone with SQLite. It existed to downgrade the
+            // journal and stretch the busy timeout when the `.db` sat on an SMB
+            // share, because WAL needs shared memory an SMB client cannot
+            // provide. A Postgres library is reached over TCP, so a shared
+            // library is simply a server several machines connect to, and the
+            // locking that mode worked around is the server's job.
+            let db_config = PgConfig::resolve(&paths.root);
+            tracing::info!(database = %db_config.describe(), "connecting to the library database");
+            let db = Database::connect(db_config.clone()).map_err(|e| {
+                if e.is_unavailable() {
+                    format!(
+                        "could not reach the library database at {}.\n\n\
+                         The SKWAD server must be running before the app can open a library. \
+                         See docs/deployment.md.\n\nUnderlying error: {e}",
+                        db_config.describe()
+                    )
+                } else {
+                    format!("could not open the database at {}: {e}", db_config.describe())
+                }
+            })?;
             let settings = AppSettings::load(&db).unwrap_or_default().sanitised();
 
             let state = Arc::new(AppState::new(db, paths, settings, protocol::url_base()));
@@ -80,6 +94,11 @@ pub fn run() {
             // Lets an external process (the Premiere Pro panel) read Collections
             // over loopback HTTP — see premiere_api.rs for why that's necessary.
             premiere_api::start(Arc::clone(&state));
+
+            // Puts the Premiere panel on this machine without anyone having to
+            // install a plugin by hand — see premiere_plugin.rs. Runs on its own
+            // thread and cannot fail startup.
+            premiere_plugin::ensure_installed(app.handle().clone());
 
             // Workers start immediately so an import interrupted by a previous
             // quit resumes without the user having to ask (§18).
@@ -218,6 +237,8 @@ pub fn run() {
             // premiere
             commands::send_media_to_premiere,
             commands::send_collection_to_premiere,
+            premiere_plugin::premiere_panel_status,
+            premiere_plugin::install_premiere_panel,
             // logs and privacy
             commands::recent_logs,
             commands::clear_all_embeddings,

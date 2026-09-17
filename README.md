@@ -12,12 +12,12 @@ export native references to the untouched originals in a folder per group.
 > once in the app and every file you put in it lands in a folder of that name.
 
 **Platforms:** Windows 10/11 · macOS (Apple Silicon)
-**Stack:** Tauri 2 · React + TypeScript · Rust · ONNX Runtime · LibRaw · FFmpeg · GStreamer · optional OpenCV tracking · SQLite
+**Stack:** Tauri 2 · React + TypeScript · Rust · ONNX Runtime · LibRaw · FFmpeg · GStreamer · optional OpenCV tracking · PostgreSQL
 
 AI analysis, originals, proxies, thumbnails, crops and face embeddings remain
 local. V2 publishes encrypted metadata-only `.skwad` catalogues; source media
 is never uploaded or copied. Authentication is local and uses a JSON credential
-file containing Argon2id password hashes. Profiles stay in the local SQLite
+file containing Argon2id password hashes. Profiles stay in the local PostgreSQL
 database and device sessions stay in the operating-system credential manager.
 
 ## Repository layout
@@ -25,7 +25,7 @@ database and device sessions stay in the operating-system credential manager.
 ```
 apps/desktop/            Tauri app — React frontend (src/) + Rust shell (src-tauri/)
 crates/
-  database/              SQLite schema, migrations, repositories, job queue
+  database/              PostgreSQL schema, migrations, repositories, job queue
   media-core/            Folder scanner, EXIF metadata, decoding, thumbnails
   face-detection/        ONNX Runtime setup, SCRFD detector, NMS
   face-recognition/      Landmark alignment, ArcFace embeddings
@@ -43,13 +43,19 @@ docs/                    Architecture and development notes
 
 ## Getting started
 
-Prerequisites: Rust (stable, MSVC on Windows), Node 20+, FFmpeg on `PATH`
-(needed for video analysis and HEIC), and the GStreamer 1.0 runtime (needed for
-full-duration 512px video proxies). Camera RAW is decoded by bundled LibRaw on
-Windows.
+Prerequisites: **PostgreSQL 15+** (the index lives there; the app will not open
+a library without one), Rust (stable, MSVC on Windows), Node 20+, FFmpeg on
+`PATH` (needed for video analysis and HEIC), and the GStreamer 1.0 runtime
+(needed for full-duration 512px video proxies). Camera RAW is decoded by bundled
+LibRaw on Windows.
 
 ```bash
 npm install
+
+# a database server, once per machine
+winget install PostgreSQL.PostgreSQL.17                 # Windows
+brew install postgresql@17 && brew services start postgresql@17   # macOS
+PGPASSWORD=<postgres password> npm run db:setup         # role + databases + password file
 
 # fetch the face models (~280 MB, one time)
 powershell -ExecutionPolicy Bypass -File scripts/fetch-models.ps1   # Windows
@@ -101,14 +107,20 @@ slower.
 ## Verifying the code
 
 ```bash
-npm run rs:test        # Rust workspace tests
+npm run rs:test        # Rust workspace tests (needs the server from db:setup)
 npm run rs:clippy      # lints
 npm run typecheck      # TypeScript
 ```
 
+The Rust tests each build a throwaway schema on the `skwad_test` database, so a
+server has to be running. `SKWAD_TEST_DATABASE_URL` points them somewhere else.
+
+Coming from an older build whose library is a `media.db` file? See
+[bringing an old SQLite library across](docs/development.md#bringing-an-old-sqlite-library-across).
+
 ## How it works
 
-1. **Scan** — the shoot folder is walked and indexed into SQLite; thumbnails
+1. **Scan** — the shoot folder is walked and indexed into the database; thumbnails
    generate in the background so the grid is browsable immediately.
 2. **Detect + embed** — SCRFD finds faces, each is aligned via its landmarks
    and embedded with an ArcFace model into a 512-d vector (batched per image).
@@ -136,7 +148,7 @@ npm run typecheck      # TypeScript
 Face recognition is optional to the sorting flow: with no models installed the
 shoot still scans, and every group can be filled by hand.
 
-Processing is a resumable SQLite-backed job queue — quitting mid-import loses
+Processing is a resumable database-backed job queue — quitting mid-import loses
 nothing. See the [current full application documentation](docs/current-application.md)
 for the implemented product guide, [docs/development.md](docs/development.md)
 for engineering notes, [docs/release-1.0.md](docs/release-1.0.md) for the

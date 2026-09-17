@@ -33,6 +33,9 @@
   "bundle": {
     "active": true,
     "targets": ["nsis", "app", "dmg"],
+    "resources": {
+      "resources/premiere-panel/*": "resources/premiere-panel/"
+    },
     "category": "Photography",
     "fileAssociations": [
       {

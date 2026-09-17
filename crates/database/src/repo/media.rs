@@ -1,10 +1,12 @@
-use rusqlite::{params, Connection, OptionalExtension, Row};
+use postgres::types::ToSql;
+use postgres::Row;
 
 use super::get;
+use crate::client::Db;
 use crate::models::{Media, MediaMetadata, MediaQuery, NewMedia, ProcessingStatus};
-use crate::{now, Result};
+use crate::{now, params, Result};
 
-fn map(row: &Row<'_>) -> rusqlite::Result<Media> {
+fn map(row: &Row) -> Result<Media> {
     Ok(Media {
         id: get(row, "id")?,
         shoot_id: get(row, "shoot_id")?,
@@ -46,10 +48,12 @@ fn map(row: &Row<'_>) -> rusqlite::Result<Media> {
 
 /// Inserts a scanned file, or returns the existing id if this shoot already
 /// indexed that path. Re-importing a folder is therefore safe and cheap.
-pub fn upsert(conn: &Connection, m: &NewMedia) -> Result<i64> {
-    conn.execute(
+pub fn upsert(conn: &mut dyn Db, m: &NewMedia) -> Result<i64> {
+    // `RETURNING id` fires on the conflict branch too, which folds what used to
+    // be an insert followed by a separate `SELECT id` into one round trip.
+    let row = conn.row_one(
         "INSERT INTO media (shoot_id, path, filename, media_type, extension, file_size, content_key, captured_at, indexed_at)
-              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
          ON CONFLICT (shoot_id, path) DO UPDATE SET
               file_size   = excluded.file_size,
               captured_at = COALESCE(media.captured_at, excluded.captured_at),
@@ -73,12 +77,13 @@ pub fn upsert(conn: &Connection, m: &NewMedia) -> Result<i64> {
                                        THEN media.duplicate_count ELSE 1 END,
               is_best_shot      = CASE WHEN media.content_key = excluded.content_key
                                        THEN media.is_best_shot ELSE 0 END,
-              content_key = excluded.content_key",
+              content_key = excluded.content_key
+         RETURNING id",
         params![
             m.shoot_id,
             m.path,
             m.filename,
-            m.media_type,
+            m.media_type.as_str(),
             m.extension,
             m.file_size,
             m.content_key,
@@ -86,30 +91,24 @@ pub fn upsert(conn: &Connection, m: &NewMedia) -> Result<i64> {
             now(),
         ],
     )?;
-
-    let id: i64 = conn.query_row(
-        "SELECT id FROM media WHERE shoot_id = ?1 AND path = ?2",
-        params![m.shoot_id, m.path],
-        |r| r.get(0),
-    )?;
-    Ok(id)
+    get(&row, "id")
 }
 
-pub fn get_by_id(conn: &Connection, id: i64) -> Result<Option<Media>> {
-    Ok(conn
-        .prepare("SELECT * FROM media WHERE id = ?1")?
-        .query_row(params![id], map)
-        .optional()?)
+pub fn get_by_id(conn: &mut dyn Db, id: i64) -> Result<Option<Media>> {
+    conn.row_opt("SELECT * FROM media WHERE id = $1", params![id])?
+        .as_ref()
+        .map(map)
+        .transpose()
 }
 
-pub fn set_metadata(conn: &Connection, id: i64, meta: &MediaMetadata) -> Result<()> {
-    conn.execute(
-        "UPDATE media SET width = ?2, height = ?3, duration = ?4,
-                          captured_at = COALESCE(?5, captured_at),
-                          camera_make = ?6, camera_model = ?7, lens = ?8,
-                          iso = ?9, focal_length = ?10, aperture = ?11, shutter = ?12,
-                          orientation = ?13
-          WHERE id = ?1",
+pub fn set_metadata(conn: &mut dyn Db, id: i64, meta: &MediaMetadata) -> Result<()> {
+    conn.exec(
+        "UPDATE media SET width = $2, height = $3, duration = $4,
+                          captured_at = COALESCE($5, captured_at),
+                          camera_make = $6, camera_model = $7, lens = $8,
+                          iso = $9, focal_length = $10, aperture = $11, shutter = $12,
+                          orientation = $13
+          WHERE id = $1",
         params![
             id,
             meta.width,
@@ -129,9 +128,9 @@ pub fn set_metadata(conn: &Connection, id: i64, meta: &MediaMetadata) -> Result<
     Ok(())
 }
 
-pub fn set_thumbnail(conn: &Connection, id: i64, thumbnail_path: &str) -> Result<()> {
-    conn.execute(
-        "UPDATE media SET thumbnail_path = ?2 WHERE id = ?1",
+pub fn set_thumbnail(conn: &mut dyn Db, id: i64, thumbnail_path: &str) -> Result<()> {
+    conn.exec(
+        "UPDATE media SET thumbnail_path = $2 WHERE id = $1",
         params![id, thumbnail_path],
     )?;
     Ok(())
@@ -140,7 +139,7 @@ pub fn set_thumbnail(conn: &Connection, id: i64, thumbnail_path: &str) -> Result
 /// Applies an editor's rating and/or pick decision to one or more files.
 /// Passing `None` for a field leaves that field unchanged.
 pub fn set_editorial_state(
-    conn: &Connection,
+    conn: &mut dyn Db,
     media_ids: &[i64],
     rating: Option<i64>,
     pick_state: Option<&str>,
@@ -158,33 +157,36 @@ pub fn set_editorial_state(
             return Err(crate::DbError::other("pick state must be none, pick, or reject"));
         }
     }
-
-    let mut changed = 0;
-    let mut stmt = conn.prepare(
-        "UPDATE media
-            SET rating = COALESCE(?2, rating),
-                pick_state = COALESCE(?3, pick_state)
-          WHERE id = ?1",
-    )?;
-    for media_id in media_ids {
-        changed += stmt.execute(params![media_id, rating, pick_state])?;
+    if media_ids.is_empty() {
+        return Ok(0);
     }
-    Ok(changed)
+
+    // The `::bigint` / `::text` casts are required, not cosmetic: a bare `$2`
+    // inside `COALESCE($2, rating)` gives Postgres nothing to infer the
+    // parameter's type from when the caller passes `None`.
+    let changed = conn.exec(
+        "UPDATE media
+            SET rating = COALESCE($2::bigint, rating),
+                pick_state = COALESCE($3::text, pick_state)
+          WHERE id = ANY($1)",
+        params![media_ids, rating, pick_state],
+    )?;
+    Ok(changed as usize)
 }
 
 pub fn set_quality(
-    conn: &Connection,
+    conn: &mut dyn Db,
     id: i64,
     quality: f64,
     sharpness: f64,
     exposure: f64,
     perceptual_hash: u64,
 ) -> Result<()> {
-    conn.execute(
+    conn.exec(
         "UPDATE media
-            SET quality_score = ?2, sharpness_score = ?3, exposure_score = ?4,
-                perceptual_hash = ?5, is_best_shot = 1
-          WHERE id = ?1",
+            SET quality_score = $2, sharpness_score = $3, exposure_score = $4,
+                perceptual_hash = $5, is_best_shot = 1
+          WHERE id = $1",
         params![id, quality, sharpness, exposure, format!("{perceptual_hash:016x}")],
     )?;
     Ok(())
@@ -196,30 +198,31 @@ pub fn set_quality(
 /// distance of six catches resized/re-encoded bursts without treating broadly
 /// similar compositions as copies. Single photos remain best shots but do not
 /// receive a duplicate-group badge.
-pub fn refresh_duplicate_groups(conn: &Connection, shoot_id: i64, max_distance: u32) -> Result<usize> {
-    let candidates = {
-        let mut stmt = conn.prepare(
+pub fn refresh_duplicate_groups(conn: &mut dyn Db, shoot_id: i64, max_distance: u32) -> Result<usize> {
+    let candidates = conn
+        .rows(
             "SELECT id, perceptual_hash, COALESCE(quality_score, 0)
                FROM media
-              WHERE shoot_id = ?1 AND media_type = 'photo' AND perceptual_hash IS NOT NULL
+              WHERE shoot_id = $1 AND media_type = 'photo' AND perceptual_hash IS NOT NULL
               ORDER BY id",
-        )?;
-        let rows = stmt.query_map(params![shoot_id], |row| {
-            let encoded: String = row.get(1)?;
+            params![shoot_id],
+        )?
+        .iter()
+        .map(|row| {
+            let encoded: String = super::at(row, 1)?;
             Ok((
-                row.get::<_, i64>(0)?,
+                super::at::<i64>(row, 0)?,
                 u64::from_str_radix(&encoded, 16).unwrap_or_default(),
-                row.get::<_, f64>(2)?,
+                super::at::<f64>(row, 2)?,
             ))
-        })?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()?
-    };
+        })
+        .collect::<Result<Vec<_>>>()?;
 
-    conn.execute(
+    conn.exec(
         "UPDATE media
             SET duplicate_group_id = NULL, duplicate_count = 1,
                 is_best_shot = CASE WHEN quality_score IS NULL THEN 0 ELSE 1 END
-          WHERE shoot_id = ?1 AND media_type = 'photo'",
+          WHERE shoot_id = $1 AND media_type = 'photo'",
         params![shoot_id],
     )?;
 
@@ -266,19 +269,18 @@ pub fn refresh_duplicate_groups(conn: &Connection, shoot_id: i64, max_distance: 
             })
             .unwrap_or(members[0]);
         let group_id = candidates[members[0]].0;
-        for &member in members {
-            conn.execute(
-                "UPDATE media
-                    SET duplicate_group_id = ?2, duplicate_count = ?3, is_best_shot = ?4
-                  WHERE id = ?1",
-                params![
-                    candidates[member].0,
-                    group_id,
-                    members.len() as i64,
-                    i64::from(member == best),
-                ],
-            )?;
-        }
+        let member_ids: Vec<i64> = members.iter().map(|&m| candidates[m].0).collect();
+        // One statement per group rather than per member: a burst of thirty
+        // frames was thirty round trips, and the `CASE` picks the winner
+        // without needing a second pass.
+        conn.exec(
+            "UPDATE media
+                SET duplicate_group_id = $2,
+                    duplicate_count = $3,
+                    is_best_shot = CASE WHEN id = $4 THEN 1 ELSE 0 END
+              WHERE id = ANY($1)",
+            params![member_ids, group_id, members.len() as i64, candidates[best].0],
+        )?;
     }
 
     Ok(duplicate_groups)
@@ -307,10 +309,10 @@ fn hash_band(hash: u64, band: u32, band_count: u32) -> u64 {
     (hash >> start) & mask
 }
 
-pub fn set_status(conn: &Connection, id: i64, status: ProcessingStatus, error: Option<&str>) -> Result<()> {
-    conn.execute(
-        "UPDATE media SET processing_status = ?2, error = ?3 WHERE id = ?1",
-        params![id, status, error],
+pub fn set_status(conn: &mut dyn Db, id: i64, status: ProcessingStatus, error: Option<&str>) -> Result<()> {
+    conn.exec(
+        "UPDATE media SET processing_status = $2, error = $3 WHERE id = $1",
+        params![id, status.as_str(), error],
     )?;
     Ok(())
 }
@@ -318,18 +320,18 @@ pub fn set_status(conn: &Connection, id: i64, status: ProcessingStatus, error: O
 /// Corrects orientation when analysis defensively re-reads the source file.
 /// Indexing normally writes this first; keeping the repair narrow avoids
 /// replacing unrelated metadata with fallbacks after a transient read issue.
-pub fn set_orientation(conn: &Connection, id: i64, orientation: i64) -> Result<()> {
-    conn.execute(
-        "UPDATE media SET orientation = ?2 WHERE id = ?1",
+pub fn set_orientation(conn: &mut dyn Db, id: i64, orientation: i64) -> Result<()> {
+    conn.exec(
+        "UPDATE media SET orientation = $2 WHERE id = $1",
         params![id, orientation.clamp(1, 8)],
     )?;
     Ok(())
 }
 
-pub fn refresh_face_count(conn: &Connection, id: i64) -> Result<()> {
-    conn.execute(
-        "UPDATE media SET face_count = (SELECT COUNT(*) FROM faces WHERE media_id = ?1 AND assignment != 'ignored')
-          WHERE id = ?1",
+pub fn refresh_face_count(conn: &mut dyn Db, id: i64) -> Result<()> {
+    conn.exec(
+        "UPDATE media SET face_count = (SELECT COUNT(*) FROM faces WHERE media_id = $1 AND assignment != 'ignored')
+          WHERE id = $1",
         params![id],
     )?;
     Ok(())
@@ -360,14 +362,18 @@ pub fn refresh_face_count(conn: &Connection, id: i64) -> Result<()> {
 /// The expression needs no branching on media type: a photo's `frame_time` is
 /// NULL, so all its faces fall into one group and it collapses to "faces in
 /// the frame".
-pub fn refresh_person_counts(conn: &Connection, shoot_id: i64) -> Result<()> {
-    conn.execute(
+pub fn refresh_person_counts(conn: &mut dyn Db, shoot_id: i64) -> Result<()> {
+    // The one dialect change that matters here: SQLite's two-argument scalar
+    // `MAX(a, b)` is `GREATEST(a, b)` in Postgres, where `MAX` is only ever the
+    // aggregate. Left as `MAX` this would have failed as "function max(bigint,
+    // bigint) does not exist" rather than quietly computing the wrong number.
+    conn.exec(
         "WITH per_frame AS (
              SELECT media_id, frame_time,
                     COUNT(*) AS total,
                     SUM(CASE WHEN person_id IS NULL AND cluster_id IS NULL THEN 1 ELSE 0 END) AS unknown
                FROM faces
-              WHERE shoot_id = ?1 AND assignment != 'ignored'
+              WHERE shoot_id = $1 AND assignment != 'ignored'
               GROUP BY media_id, frame_time
          ),
          frame_max AS (
@@ -379,61 +385,65 @@ pub fn refresh_person_counts(conn: &Connection, shoot_id: i64) -> Result<()> {
                     COUNT(DISTINCT CASE WHEN person_id  IS NOT NULL THEN 'p' || person_id
                                         WHEN cluster_id IS NOT NULL THEN 'c' || cluster_id END) AS c
                FROM faces
-              WHERE shoot_id = ?1 AND assignment != 'ignored'
+              WHERE shoot_id = $1 AND assignment != 'ignored'
               GROUP BY media_id
          )
-         UPDATE media SET person_count = MAX(
+         UPDATE media SET person_count = GREATEST(
                COALESCE((SELECT c           FROM identified WHERE media_id = media.id), 0)
              + COALESCE((SELECT max_unknown FROM frame_max  WHERE media_id = media.id), 0),
                COALESCE((SELECT max_total   FROM frame_max  WHERE media_id = media.id), 0)
          )
-          WHERE shoot_id = ?1",
+          WHERE shoot_id = $1",
         params![shoot_id],
     )?;
     Ok(())
 }
 
 /// Paths already indexed for a shoot — used by the scanner to skip work.
-pub fn existing_content_keys(conn: &Connection, shoot_id: i64) -> Result<std::collections::HashMap<String, String>> {
-    let mut stmt = conn.prepare("SELECT path, content_key FROM media WHERE shoot_id = ?1")?;
+pub fn existing_content_keys(conn: &mut dyn Db, shoot_id: i64) -> Result<std::collections::HashMap<String, String>> {
     let mut out = std::collections::HashMap::new();
-    let rows = stmt.query_map(params![shoot_id], |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-    })?;
-    for row in rows {
-        let (path, key) = row?;
-        out.insert(path, key);
+    for row in conn.rows(
+        "SELECT path, content_key FROM media WHERE shoot_id = $1",
+        params![shoot_id],
+    )? {
+        out.insert(super::at::<String>(&row, 0)?, super::at::<String>(&row, 1)?);
     }
     Ok(out)
 }
 
 /// Files that still need the analysis pipeline run over them.
-pub fn pending(conn: &Connection, shoot_id: i64, limit: i64) -> Result<Vec<Media>> {
-    let mut stmt = conn.prepare(
+pub fn pending(conn: &mut dyn Db, shoot_id: i64, limit: i64) -> Result<Vec<Media>> {
+    conn.rows(
         "SELECT * FROM media
-          WHERE shoot_id = ?1 AND processing_status IN ('pending', 'indexed', 'thumbnailed')
-          ORDER BY id LIMIT ?2",
-    )?;
-    let rows = stmt
-        .query_map(params![shoot_id, limit], map)?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
+          WHERE shoot_id = $1 AND processing_status IN ('pending', 'indexed', 'thumbnailed')
+          ORDER BY id LIMIT $2",
+        params![shoot_id, limit],
+    )?
+    .iter()
+    .map(map)
+    .collect()
 }
 
-pub fn count_for_shoot(conn: &Connection, shoot_id: i64) -> Result<i64> {
-    Ok(conn.query_row(
-        "SELECT COUNT(*) FROM media WHERE shoot_id = ?1",
-        params![shoot_id],
-        |r| r.get(0),
-    )?)
+pub fn count_for_shoot(conn: &mut dyn Db, shoot_id: i64) -> Result<i64> {
+    super::at(
+        &conn.row_one("SELECT COUNT(*) FROM media WHERE shoot_id = $1", params![shoot_id])?,
+        0,
+    )
 }
 
 /// The media grid query. Built as dynamic SQL because the filters in §23 and
 /// §10 combine freely.
-pub fn query(conn: &Connection, q: &MediaQuery) -> Result<Vec<Media>> {
-    let mut sql = String::from("SELECT DISTINCT m.* FROM media m");
+pub fn query(conn: &mut dyn Db, q: &MediaQuery) -> Result<Vec<Media>> {
+    // `GROUP BY m.id` rather than `SELECT DISTINCT`: the joins below can match
+    // a file several times (one row per face, per album entry) and both forms
+    // collapse that to one row, but Postgres requires every `ORDER BY`
+    // expression of a `DISTINCT` query to appear in the select list — which
+    // rules out `(m.captured_at IS NULL)` and `m.filename COLLATE nocase`.
+    // Grouping by the primary key has no such restriction, and Postgres knows
+    // the rest of `m.*` is functionally dependent on it.
+    let mut sql = String::from("SELECT m.* FROM media m");
     let mut wheres: Vec<String> = Vec::new();
-    let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    let mut args: Vec<Box<dyn ToSql + Sync>> = Vec::new();
 
     if q.album_id.is_some() {
         sql.push_str(" JOIN album_media am ON am.media_id = m.id");
@@ -446,19 +456,19 @@ pub fn query(conn: &Connection, q: &MediaQuery) -> Result<Vec<Media>> {
     }
 
     if let Some(shoot_id) = q.shoot_id {
-        wheres.push(format!("m.shoot_id = ?{}", args.len() + 1));
+        wheres.push(format!("m.shoot_id = ${}", args.len() + 1));
         args.push(Box::new(shoot_id));
     }
     if let Some(exclude_shoot_id) = q.exclude_shoot_id {
-        wheres.push(format!("m.shoot_id != ?{}", args.len() + 1));
+        wheres.push(format!("m.shoot_id != ${}", args.len() + 1));
         args.push(Box::new(exclude_shoot_id));
     }
     if let Some(album_id) = q.album_id {
-        wheres.push(format!("am.album_id = ?{}", args.len() + 1));
+        wheres.push(format!("am.album_id = ${}", args.len() + 1));
         args.push(Box::new(album_id));
     }
     if let Some(group_id) = q.group_id {
-        wheres.push(format!("gi.group_id = ?{}", args.len() + 1));
+        wheres.push(format!("gi.group_id = ${}", args.len() + 1));
         args.push(Box::new(group_id));
     }
     if q.ungrouped {
@@ -466,13 +476,13 @@ pub fn query(conn: &Connection, q: &MediaQuery) -> Result<Vec<Media>> {
     }
     if let Some(person_id) = q.person_id {
         wheres.push(format!(
-            "f.person_id = ?{} AND f.assignment IN ('suggested','confirmed')",
+            "f.person_id = ${} AND f.assignment IN ('suggested','confirmed')",
             args.len() + 1
         ));
         args.push(Box::new(person_id));
     }
     if let Some(cluster_id) = q.cluster_id {
-        wheres.push(format!("f.cluster_id = ?{}", args.len() + 1));
+        wheres.push(format!("f.cluster_id = ${}", args.len() + 1));
         args.push(Box::new(cluster_id));
     }
     if q.only_unidentified {
@@ -482,14 +492,14 @@ pub fn query(conn: &Connection, q: &MediaQuery) -> Result<Vec<Media>> {
         // At the cap this means "or more", so the filter matches the album it
         // came from (see repo::albums::GROUP_SIZE_CAP).
         if size >= crate::repo::albums::GROUP_SIZE_CAP {
-            wheres.push(format!("m.person_count >= ?{}", args.len() + 1));
+            wheres.push(format!("m.person_count >= ${}", args.len() + 1));
         } else {
-            wheres.push(format!("m.person_count = ?{}", args.len() + 1));
+            wheres.push(format!("m.person_count = ${}", args.len() + 1));
         }
         args.push(Box::new(size));
     }
     if let Some(media_type) = &q.media_type {
-        wheres.push(format!("m.media_type = ?{}", args.len() + 1));
+        wheres.push(format!("m.media_type = ${}", args.len() + 1));
         args.push(Box::new(media_type.clone()));
     }
     if q.only_best_shots {
@@ -499,18 +509,21 @@ pub fn query(conn: &Connection, q: &MediaQuery) -> Result<Vec<Media>> {
         wheres.push("m.media_type = 'photo' AND m.duplicate_group_id IS NOT NULL".to_string());
     }
     if let Some(min_rating) = q.min_rating.filter(|value| *value > 0) {
-        wheres.push(format!("m.rating >= ?{}", args.len() + 1));
+        wheres.push(format!("m.rating >= ${}", args.len() + 1));
         args.push(Box::new(min_rating.clamp(1, 5)));
     }
     if let Some(pick_state) = q.pick_state.as_deref() {
         if matches!(pick_state, "none" | "pick" | "reject") {
-            wheres.push(format!("m.pick_state = ?{}", args.len() + 1));
+            wheres.push(format!("m.pick_state = ${}", args.len() + 1));
             args.push(Box::new(pick_state.to_string()));
         }
     }
     if let Some(search) = &q.search {
         if !search.trim().is_empty() {
-            wheres.push(format!("m.filename LIKE ?{}", args.len() + 1));
+            // `ILIKE`, not `LIKE`: SQLite's `LIKE` ignores case for ASCII by
+            // default, Postgres' does not. Typing "img" must keep finding
+            // "IMG_0421.jpg" the way it always has.
+            wheres.push(format!("m.filename ILIKE ${}", args.len() + 1));
             args.push(Box::new(format!("%{}%", search.trim())));
         }
     }
@@ -519,34 +532,45 @@ pub fn query(conn: &Connection, q: &MediaQuery) -> Result<Vec<Media>> {
         sql.push_str(" WHERE ");
         sql.push_str(&wheres.join(" AND "));
     }
+    sql.push_str(" GROUP BY m.id");
+    // `x IS NULL` sorts false before true in both engines, so NULLs still land
+    // last without switching to `NULLS LAST`.
+    //
+    // Every `filename` term names `COLLATE nocase` explicitly, and that is
+    // load-bearing in two ways. SQLite compared text by raw bytes, so
+    // `clip.mp4` sorted *after* `IMG_0001.jpg` (uppercase first); Postgres
+    // compares linguistically by default, which puts `clip.mp4` first. Naming
+    // the collation picks the humane answer deliberately — case-insensitive,
+    // the way an editor scanning a file list expects — instead of inheriting
+    // whichever `lc_collate` the server happened to be created with, so a
+    // studio server and a laptop order a shoot identically.
     match q.sort.as_deref() {
-        Some("quality") => sql.push_str(" ORDER BY m.quality_score IS NULL, m.quality_score DESC, m.filename"),
+        Some("quality") => {
+            sql.push_str(" ORDER BY (m.quality_score IS NULL), m.quality_score DESC, m.filename COLLATE nocase")
+        }
         Some("rating") => sql.push_str(
-            " ORDER BY m.rating DESC, (m.pick_state = 'pick') DESC, m.captured_at IS NULL, m.captured_at, m.filename",
+            " ORDER BY m.rating DESC, (m.pick_state = 'pick') DESC, (m.captured_at IS NULL), m.captured_at, \
+             m.filename COLLATE nocase",
         ),
-        Some("filename") => sql.push_str(" ORDER BY m.filename COLLATE NOCASE"),
-        _ => sql.push_str(" ORDER BY m.captured_at IS NULL, m.captured_at, m.filename"),
+        Some("filename") => sql.push_str(" ORDER BY m.filename COLLATE nocase"),
+        _ => sql.push_str(" ORDER BY (m.captured_at IS NULL), m.captured_at, m.filename COLLATE nocase"),
     }
 
     let limit = q.limit.unwrap_or(500).clamp(1, 5_000);
-    sql.push_str(&format!(" LIMIT ?{}", args.len() + 1));
+    sql.push_str(&format!(" LIMIT ${}", args.len() + 1));
     args.push(Box::new(limit));
-    sql.push_str(&format!(" OFFSET ?{}", args.len() + 1));
+    sql.push_str(&format!(" OFFSET ${}", args.len() + 1));
     args.push(Box::new(q.offset.unwrap_or(0).max(0)));
 
-    let mut stmt = conn.prepare(&sql)?;
-    let refs: Vec<&dyn rusqlite::ToSql> = args.iter().map(|b| b.as_ref()).collect();
-    let rows = stmt
-        .query_map(refs.as_slice(), map)?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
+    let refs: Vec<&(dyn ToSql + Sync)> = args.iter().map(|b| b.as_ref()).collect();
+    conn.rows(&sql, refs.as_slice())?.iter().map(map).collect()
 }
 
 /// Reverts derived state so a shoot can be re-analysed from scratch without
 /// re-scanning the folder.
-pub fn reset_analysis(conn: &Connection, shoot_id: i64) -> Result<()> {
-    conn.execute(
-        "UPDATE media SET processing_status = 'indexed', face_count = 0, error = NULL WHERE shoot_id = ?1",
+pub fn reset_analysis(conn: &mut dyn Db, shoot_id: i64) -> Result<()> {
+    conn.exec(
+        "UPDATE media SET processing_status = 'indexed', face_count = 0, error = NULL WHERE shoot_id = $1",
         params![shoot_id],
     )?;
     Ok(())
@@ -559,7 +583,7 @@ mod tests {
     use crate::repo::shoots;
     use crate::Database;
 
-    fn seed(conn: &Connection) -> i64 {
+    fn seed(conn: &mut dyn Db) -> i64 {
         let shoot = shoots::create(conn, "Test", "C:\\shoot").unwrap();
         for (i, name) in ["a.jpg", "b.raf", "c.mp4"].iter().enumerate() {
             upsert(
@@ -586,26 +610,27 @@ mod tests {
 
     #[test]
     fn upsert_is_idempotent_per_path() {
-        let db = Database::open_in_memory().unwrap();
-        let conn = db.conn().unwrap();
-        let shoot_id = seed(&conn);
-        assert_eq!(count_for_shoot(&conn, shoot_id).unwrap(), 3);
-        seed(&conn); // a second shoot, not duplicates in the first
-        assert_eq!(count_for_shoot(&conn, shoot_id).unwrap(), 3);
+        let db = Database::open_test().unwrap();
+        let mut conn = db.conn().unwrap();
+        let shoot_id = seed(&mut conn);
+        assert_eq!(count_for_shoot(&mut conn, shoot_id).unwrap(), 3);
+        seed(&mut conn); // a second shoot, not duplicates in the first
+        assert_eq!(count_for_shoot(&mut conn, shoot_id).unwrap(), 3);
     }
 
     #[test]
     fn changed_content_key_resets_processing() {
-        let db = Database::open_in_memory().unwrap();
-        let conn = db.conn().unwrap();
-        let shoot_id = seed(&conn);
+        let db = Database::open_test().unwrap();
+        let mut conn = db.conn().unwrap();
+        let shoot_id = seed(&mut conn);
         let id: i64 = conn
-            .query_row("SELECT id FROM media WHERE filename = 'a.jpg'", [], |r| r.get(0))
-            .unwrap();
-        set_status(&conn, id, ProcessingStatus::Analysed, None).unwrap();
+            .row_one("SELECT id FROM media WHERE filename = 'a.jpg'", params![])
+            .unwrap()
+            .get(0);
+        set_status(&mut conn, id, ProcessingStatus::Analysed, None).unwrap();
 
         upsert(
-            &conn,
+            &mut conn,
             &NewMedia {
                 shoot_id,
                 path: "C:\\shoot\\a.jpg".into(),
@@ -619,18 +644,40 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(get_by_id(&conn, id).unwrap().unwrap().processing_status, "pending");
+        assert_eq!(get_by_id(&mut conn, id).unwrap().unwrap().processing_status, "pending");
+    }
+
+    /// The upsert returns an id on both branches; re-importing must return the
+    /// *same* id, or every cached thumbnail and face crop would be orphaned.
+    #[test]
+    fn upsert_returns_the_existing_id_on_conflict() {
+        let db = Database::open_test().unwrap();
+        let mut conn = db.conn().unwrap();
+        let shoot = shoots::create(&mut conn, "Test", "C:\\shoot").unwrap();
+        let new = NewMedia {
+            shoot_id: shoot.id,
+            path: "C:\\shoot\\a.jpg".into(),
+            filename: "a.jpg".into(),
+            media_type: MediaType::Photo,
+            extension: "jpg".into(),
+            file_size: 1,
+            content_key: "key".into(),
+            captured_at: None,
+        };
+        let first = upsert(&mut conn, &new).unwrap();
+        let second = upsert(&mut conn, &new).unwrap();
+        assert_eq!(first, second);
     }
 
     #[test]
     fn query_filters_by_group_and_backlog() {
         use crate::repo::groups;
 
-        let db = Database::open_in_memory().unwrap();
-        let conn = db.conn().unwrap();
-        let shoot_id = seed(&conn);
+        let db = Database::open_test().unwrap();
+        let mut conn = db.conn().unwrap();
+        let shoot_id = seed(&mut conn);
         let all = query(
-            &conn,
+            &mut conn,
             &MediaQuery {
                 shoot_id: Some(shoot_id),
                 ..Default::default()
@@ -638,11 +685,11 @@ mod tests {
         )
         .unwrap();
 
-        let group = groups::get_or_create(&conn, shoot_id, "Jonathan", None).unwrap();
-        groups::add_media(&conn, group.id, &[all[0].id]).unwrap();
+        let group = groups::get_or_create(&mut conn, shoot_id, "Jonathan", None).unwrap();
+        groups::add_media(&mut conn, group.id, &[all[0].id]).unwrap();
 
         let in_group = query(
-            &conn,
+            &mut conn,
             &MediaQuery {
                 shoot_id: Some(shoot_id),
                 group_id: Some(group.id),
@@ -653,7 +700,7 @@ mod tests {
         assert_eq!(in_group.len(), 1);
 
         let backlog = query(
-            &conn,
+            &mut conn,
             &MediaQuery {
                 shoot_id: Some(shoot_id),
                 ungrouped: true,
@@ -667,11 +714,11 @@ mod tests {
 
     #[test]
     fn query_filters_by_type() {
-        let db = Database::open_in_memory().unwrap();
-        let conn = db.conn().unwrap();
-        let shoot_id = seed(&conn);
+        let db = Database::open_test().unwrap();
+        let mut conn = db.conn().unwrap();
+        let shoot_id = seed(&mut conn);
         let videos = query(
-            &conn,
+            &mut conn,
             &MediaQuery {
                 shoot_id: Some(shoot_id),
                 media_type: Some("video".into()),
@@ -683,15 +730,35 @@ mod tests {
         assert_eq!(videos[0].filename, "c.mp4");
     }
 
+    /// SQLite's `LIKE` ignored ASCII case; Postgres' does not. The search
+    /// filter uses `ILIKE` to keep the behaviour reviewers are used to.
+    #[test]
+    fn filename_search_ignores_case() {
+        let db = Database::open_test().unwrap();
+        let mut conn = db.conn().unwrap();
+        let shoot_id = seed(&mut conn);
+        let found = query(
+            &mut conn,
+            &MediaQuery {
+                shoot_id: Some(shoot_id),
+                search: Some("A.JPG".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].filename, "a.jpg");
+    }
+
     #[test]
     fn query_excludes_one_shoot_while_matching_a_person_across_the_rest() {
-        let db = Database::open_in_memory().unwrap();
-        let conn = db.conn().unwrap();
-        let reference_shoot = shoots::create(&conn, "Reference Library", "").unwrap();
-        let real_shoot = seed(&conn);
+        let db = Database::open_test().unwrap();
+        let mut conn = db.conn().unwrap();
+        let reference_shoot = shoots::create(&mut conn, "Reference Library", "").unwrap();
+        let real_shoot = seed(&mut conn);
 
         let ref_media = upsert(
-            &conn,
+            &mut conn,
             &NewMedia {
                 shoot_id: reference_shoot.id,
                 path: "C:\\ref\\a.jpg".into(),
@@ -706,7 +773,7 @@ mod tests {
         .unwrap();
 
         let all = query(
-            &conn,
+            &mut conn,
             &MediaQuery {
                 exclude_shoot_id: Some(reference_shoot.id),
                 ..Default::default()
@@ -725,29 +792,31 @@ mod tests {
 
     #[test]
     fn near_duplicates_promote_the_highest_quality_photo() {
-        let db = Database::open_in_memory().unwrap();
-        let conn = db.conn().unwrap();
-        let shoot_id = seed(&conn);
-        let a = conn
-            .query_row("SELECT id FROM media WHERE filename = 'a.jpg'", [], |row| row.get(0))
-            .unwrap();
-        let b = conn
-            .query_row("SELECT id FROM media WHERE filename = 'b.raf'", [], |row| row.get(0))
-            .unwrap();
+        let db = Database::open_test().unwrap();
+        let mut conn = db.conn().unwrap();
+        let shoot_id = seed(&mut conn);
+        let a: i64 = conn
+            .row_one("SELECT id FROM media WHERE filename = 'a.jpg'", params![])
+            .unwrap()
+            .get(0);
+        let b: i64 = conn
+            .row_one("SELECT id FROM media WHERE filename = 'b.raf'", params![])
+            .unwrap()
+            .get(0);
 
-        set_quality(&conn, a, 0.45, 0.4, 0.6, 0xaaaa_aaaa_aaaa_aaaa).unwrap();
-        set_quality(&conn, b, 0.90, 0.9, 0.9, 0xaaaa_aaaa_aaaa_aaab).unwrap();
-        assert_eq!(refresh_duplicate_groups(&conn, shoot_id, 6).unwrap(), 1);
+        set_quality(&mut conn, a, 0.45, 0.4, 0.6, 0xaaaa_aaaa_aaaa_aaaa).unwrap();
+        set_quality(&mut conn, b, 0.90, 0.9, 0.9, 0xaaaa_aaaa_aaaa_aaab).unwrap();
+        assert_eq!(refresh_duplicate_groups(&mut conn, shoot_id, 6).unwrap(), 1);
 
-        let first = get_by_id(&conn, a).unwrap().unwrap();
-        let second = get_by_id(&conn, b).unwrap().unwrap();
+        let first = get_by_id(&mut conn, a).unwrap().unwrap();
+        let second = get_by_id(&mut conn, b).unwrap().unwrap();
         assert_eq!(first.duplicate_group_id, second.duplicate_group_id);
         assert_eq!(first.duplicate_count, 2);
         assert!(!first.is_best_shot);
         assert!(second.is_best_shot);
 
         let best = query(
-            &conn,
+            &mut conn,
             &MediaQuery {
                 shoot_id: Some(shoot_id),
                 only_best_shots: true,
@@ -761,11 +830,11 @@ mod tests {
 
     #[test]
     fn editorial_ratings_persist_filter_and_sort() {
-        let db = Database::open_in_memory().unwrap();
-        let conn = db.conn().unwrap();
-        let shoot_id = seed(&conn);
+        let db = Database::open_test().unwrap();
+        let mut conn = db.conn().unwrap();
+        let shoot_id = seed(&mut conn);
         let all = query(
-            &conn,
+            &mut conn,
             &MediaQuery {
                 shoot_id: Some(shoot_id),
                 ..Default::default()
@@ -773,11 +842,11 @@ mod tests {
         )
         .unwrap();
 
-        set_editorial_state(&conn, &[all[0].id], Some(3), Some("pick")).unwrap();
-        set_editorial_state(&conn, &[all[1].id], Some(5), None).unwrap();
+        set_editorial_state(&mut conn, &[all[0].id], Some(3), Some("pick")).unwrap();
+        set_editorial_state(&mut conn, &[all[1].id], Some(5), None).unwrap();
 
         let picks = query(
-            &conn,
+            &mut conn,
             &MediaQuery {
                 shoot_id: Some(shoot_id),
                 pick_state: Some("pick".into()),
@@ -789,7 +858,7 @@ mod tests {
         assert_eq!(picks[0].rating, 3);
 
         let rated = query(
-            &conn,
+            &mut conn,
             &MediaQuery {
                 shoot_id: Some(shoot_id),
                 min_rating: Some(3),
@@ -800,9 +869,34 @@ mod tests {
         .unwrap();
         assert_eq!(rated.iter().map(|item| item.rating).collect::<Vec<_>>(), vec![5, 3]);
 
-        reset_analysis(&conn, shoot_id).unwrap();
-        let kept = get_by_id(&conn, all[0].id).unwrap().unwrap();
+        reset_analysis(&mut conn, shoot_id).unwrap();
+        let kept = get_by_id(&mut conn, all[0].id).unwrap().unwrap();
         assert_eq!(kept.rating, 3);
         assert_eq!(kept.pick_state, "pick");
+    }
+
+    /// `COALESCE($3::text, pick_state)` must leave the other field alone —
+    /// without the cast Postgres rejects the statement outright when the
+    /// caller passes `None`, which is the common case from the ratings bar.
+    #[test]
+    fn setting_only_a_rating_leaves_the_pick_state_alone() {
+        let db = Database::open_test().unwrap();
+        let mut conn = db.conn().unwrap();
+        let shoot_id = seed(&mut conn);
+        let all = query(
+            &mut conn,
+            &MediaQuery {
+                shoot_id: Some(shoot_id),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        set_editorial_state(&mut conn, &[all[0].id], None, Some("reject")).unwrap();
+        set_editorial_state(&mut conn, &[all[0].id], Some(4), None).unwrap();
+
+        let updated = get_by_id(&mut conn, all[0].id).unwrap().unwrap();
+        assert_eq!(updated.rating, 4);
+        assert_eq!(updated.pick_state, "reject");
     }
 }

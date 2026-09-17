@@ -1,12 +1,64 @@
 # Development notes
 
+## First run
+
+The index lives in PostgreSQL 15+, so a server has to exist before the app or
+the tests can do anything. Once per machine:
+
+```bash
+# 1. A server. Any PostgreSQL 15+ build with ICU support will do.
+winget install PostgreSQL.PostgreSQL.17      # Windows
+brew install postgresql@17 && brew services start postgresql@17   # macOS
+sudo apt install postgresql                                       # Debian/Ubuntu
+
+# 2. The `skwad` role, the `skwad` and `skwad_test` databases, and the
+#    password file. Idempotent; never touches an existing database's contents.
+PGPASSWORD=<postgres superuser password> npm run db:setup
+
+# 3. Confirm.
+npm run db:check
+```
+
+`npm run dev` then finds the server through `database.json` in the library
+folder, falling back to `skwad` on `localhost:5432`. `SKWAD_DATABASE_URL`
+overrides everything, which is the quickest way to point at a scratch database:
+
+```bash
+SKWAD_DATABASE_URL=postgres://skwad@localhost:5432/scratch npm run dev
+```
+
+### Bringing an old SQLite library across
+
+Libraries from v2.0.0-alpha.3 and earlier are a `media.db` file. `skwad-db-migrate`
+copies one into PostgreSQL, opening the source **read-only** so a failed run
+costs nothing:
+
+```bash
+npm run db:migrate -- --sqlite "<path>/media.db" \
+                      --postgres postgres://skwad@localhost:5432/skwad --dry-run
+npm run db:migrate -- --sqlite "<path>/media.db" \
+                      --postgres postgres://skwad@localhost:5432/skwad
+npm run db:verify -- "<library folder>"     # reads it back through the app's own queries
+```
+
+`--dry-run` reads and counts everything, then rolls back. The real run is one
+transaction that verifies per-table row counts before it commits, so a mismatch
+leaves an empty database rather than half a library. Back up `media.db`
+**together with its `-wal` and `-shm` siblings** first — a WAL database is all
+three files, and copying only the `.db` silently loses whatever is still in the
+log.
+
+Ids are preserved deliberately: `thumbnail_path`, the sharded
+`face_cache/<id>.jpg` crops and the `skwadmedia://` URLs the webview holds all
+embed a media or face id, so renumbering would orphan every cached file on disk.
+
 ## Architecture at a glance
 
 ```
 React UI  ──invoke──▶  Tauri commands (commands.rs)   ── thin: validate, query, return
    ▲                        │
    │ events                 ▼
-   └──────────────  SQLite (skwad-database)  ◀── jobs table = the queue
+   └────────────  PostgreSQL (skwad-database)  ◀── jobs table = the queue
                             ▲
         worker threads (worker.rs) ── claim job → run stage → write results
                             │
@@ -29,9 +81,12 @@ Key decisions, and where to look:
   `clear_all_recognition_data` and `albums::regenerate` all leave it alone.
   Group names become folder names, which is why they are validated on the way
   in rather than at export time.
-- **The queue lives in SQLite** (`repo/jobs.rs`). `claim_next` is a single
-  `UPDATE … RETURNING`, so concurrent workers cannot double-claim. On startup
-  `requeue_stale` recovers anything a crash left `running`.
+- **The queue lives in the database** (`repo/jobs.rs`). `claim_next` is a single
+  `UPDATE … RETURNING` whose sub-select ends `FOR UPDATE SKIP LOCKED`, so
+  concurrent workers cannot double-claim. The locking clause is not optional
+  now that writers really do run at the same time — SQLite serialised them, so
+  the same statement was atomic without it. On startup `requeue_stale` recovers
+  anything a crash left `running`.
 - **One dedicated AI worker and one optional I/O helper** (`worker.rs`). Worker
   zero owns a single `pipeline.rs::Engine` and the shoot-wide finishing stages;
   worker one handles scans and thumbnails. This overlaps indexing with GPU
@@ -75,8 +130,18 @@ change the other in the same commit.
 
 ## Testing
 
-- `cargo test --workspace` — 200+ unit tests, all hermetic (in-memory SQLite,
-  temp dirs; no models or network needed).
+- `cargo test --workspace` — 350+ unit tests. **They need a PostgreSQL server**,
+  which is the one thing the SQLite build did not: `:memory:` has no equivalent.
+  Each test instead creates a uniquely-named schema on the test database and
+  pins its pool's `search_path` to it, which preserves the property that
+  mattered — two tests running at once cannot see each other's rows. Run
+  `npm run db:setup` once; `SKWAD_TEST_DATABASE_URL` overrides the default of
+  `postgres://postgres:postgres@localhost:5432/skwad_test`. Everything else
+  stays hermetic (temp dirs; no models or network).
+  - Test pools are deliberately `max_size(2)` with `min_idle(0)`. `cargo test`
+    runs one pool *per test in parallel*, so the real ceiling is
+    `max_size × test threads` against the server's `max_connections`; a pool of
+    four exhausted a 36-core machine outright.
 - AI correctness is pinned by math-level tests: SCRFD anchor decode,
   similarity-transform alignment, cosine/kNN, cluster determinism (seeded
   PRNG in `cluster.rs` — clustering the same shoot twice gives identical
@@ -118,9 +183,13 @@ Four things this pinned down, each of which had a wrong default:
    threads than the machine had. The current policy caps the pool at two,
    reserves one logical CPU for the UI/supporting work, gives only worker zero
    an AI engine, and caps inference threads at four.
-5. **Long SQLite writer transactions look like a frozen application.** Scan
-   inserts and job enqueues are committed in batches of 200 so UI reads and
-   progress updates regularly regain access to the database.
+5. **Long writer transactions look like a frozen application.** Scan inserts and
+   job enqueues are committed in batches of 200 so UI reads and progress updates
+   regularly regain access. This mattered more under SQLite, where one writer
+   locked out every reader; Postgres readers are never blocked by a writer, so
+   the batching now bounds transaction size and replication lag rather than
+   preventing a freeze. It is kept because the batch size is also what keeps
+   memory flat on a 50 000-file import.
 
 ## Threshold defaults
 
@@ -148,12 +217,32 @@ All are user-configurable in Settings and clamped in
 
 ## Schema changes
 
-Append a new migration to `crates/database/src/migrations.rs` — never edit an
-existing one; installed databases have already run it. Migration 3
-(`schema_003_groups.sql`) is the worked example: it adds tables and touches
-nothing an earlier migration created. Check the highest version already in use
-before claiming a number — a collision means the migration is silently skipped
-on every database that has passed that version.
+Append a new entry to `MIGRATIONS` in `crates/database/src/migrations.rs` with
+its SQL under `crates/database/src/sql/` — never edit an existing one; installed
+databases have already run it. Versions are tracked in a `schema_migrations`
+table (SQLite used `PRAGMA user_version`); the table also records *when* each
+ran, which is the first thing you want when two libraries behave differently.
+Check the highest version in use before claiming a number — a collision means
+the migration is silently skipped on every database past that version.
+
+Dialect traps, all of which compile fine and fail (or silently misbehave) at
+runtime, because the compiler cannot see inside a SQL string:
+
+- `?1` is not a placeholder. Postgres uses `$1`.
+- `MAX(a, b)` / `MIN(a, b)` are `GREATEST` / `LEAST`. In Postgres `MAX` is only
+  ever the aggregate, so the two-argument form is a "function does not exist"
+  error rather than a wrong answer — but only when that branch runs.
+- `LIKE` is case-sensitive. SQLite's ignored ASCII case, so a filename search
+  needs `ILIKE` to keep behaving.
+- A parameter needs a type. `$1 IS NULL`, `COALESCE($1, col)` and a bare `$1` in
+  an `INSERT … SELECT` list give Postgres nothing to infer from; write
+  `$1::bigint` / `$1::text`.
+- `SELECT DISTINCT` may only `ORDER BY` expressions in its select list, which
+  rules out `(x IS NULL)` and `x COLLATE nocase`. Group by the primary key
+  instead — Postgres knows the rest of the row depends on it.
+- Text ordering is locale-aware, where SQLite compared bytes. Name
+  `COLLATE nocase` explicitly on any user-visible ordering so a studio server
+  and a laptop sort a shoot identically.
 
 ## Folder-name previews
 

@@ -16,6 +16,22 @@ cross-compile shortcut.
 
 ## What ships inside, and what does not
 
+- **PostgreSQL** — never. This is the one genuinely new prerequisite: the index
+  moved out of an embedded `media.db` and into a real server, so a machine needs
+  one reachable before the app can open a library at all. It is not bundled:
+  the installers are per-user and unsigned-driver-free, while a database server
+  wants a service account, a data directory and an upgrade path of its own —
+  shipping one inside an app bundle is how you end up with an un-upgradable
+  database nobody can back up.
+  - **A single edit bay:** install PostgreSQL 17 on that machine and run
+    `npm run db:setup`. The app talks to `localhost` and nothing changes for
+    the editor.
+  - **A studio:** one server everyone connects to, which is what makes a shared
+    library work properly for the first time — see [one library, shared across
+    the network](shared-library.md).
+  - The server must have **ICU collation support** (every mainstream build
+    does). The schema's `nocase` collation is built on it, and without it the
+    first migration fails rather than silently sorting differently.
 - **The frontend, the shell binary, and `skwad-server`** — always. The desktop app
   is a client of a private server it starts on loopback, so the installer ships
   both binaries; without the sidecar the app opens, says the local server did not
@@ -42,6 +58,46 @@ cross-compile shortcut.
   without it runs on CPU — the README's measurements put that at roughly 2.6x
   slower detection and 7.9x slower embedding. **Settings → Acceleration** shows
   what actually started, which is the quickest way to check a fresh install.
+- **The Premiere Pro panel** — always, as a `.ccx` inside the bundle.
+  `npm run package:premiere-panel` builds it and `npm run build` runs that
+  first, so a release cannot accidentally ship without it. See below.
+
+## The Premiere Pro panel installs itself
+
+Editors do not install a plugin. The app carries the panel and installs it on
+first launch through Adobe's own installer agent, which ships with the Creative
+Cloud desktop app — so a machine that can run Premiere can already install the
+panel. Install SKWAD, open Premiere, and it is under **Window → Extensions →
+SKWAD Collections**. No UXP Developer Tool, no developer mode, no Creative
+Cloud Marketplace listing.
+
+This is a per-user install, which is why it runs from the app rather than from
+the installer: the Windows bundle is `perMachine` and runs elevated, so an NSIS
+hook would install the panel into the administrator's profile instead of the
+editor's. Running at launch puts it in the right profile by construction, and
+covers macOS with the same code path. The details are in
+[`apps/desktop/src-tauri/src/premiere_plugin.rs`](../apps/desktop/src-tauri/src/premiere_plugin.rs).
+
+Nothing about it can fail an install or a launch — a machine with no Creative
+Cloud or no Premiere logs a line and carries on. **Settings → Premiere Pro
+panel** reports the state and offers a retry, which is where to look first if
+an editor says the panel is missing.
+
+Two things worth knowing before a wide rollout:
+
+- **The package is unsigned.** Adobe's agent is the sanctioned route for
+  internally distributed plugins, so this is the expected case rather than a
+  workaround — but whether a given Creative Cloud version accepts an unsigned
+  package silently has moved across releases. Check one machine before
+  rolling out: install, open Premiere, look for the panel. If it is refused,
+  sign the package once with the UXP Developer Tool's **Package** command and
+  stage it with `node scripts/package-premiere-panel.mjs --from <signed.ccx>`;
+  nothing else changes.
+- **Updates ride along with the app.** The panel's own manifest version decides
+  whether an installed copy is stale, so bumping it in
+  `apps/premiere-panel/manifest.json` is what makes existing installs upgrade
+  on next launch. Change the panel without bumping it and editors keep the old
+  one.
 
 ## Path A — CI builds both installers (recommended)
 
@@ -172,10 +228,11 @@ file**: SKWAD is a desktop application whose UI talks to its Rust backend over
 Tauri IPC, not HTTP, so there is nothing here to host as a website — a browser
 build would render and then fail on every action.
 
-**Apache must not host the shared library.** The library is a SQLite database
-that needs real file locking; over WebDAV or HTTP it corrupts. It goes on a
-Windows file share — see [one library, shared across the
-network](shared-library.md).
+**Apache must not host the shared library.** The index is a PostgreSQL database
+— machines share it by connecting to the server, not by reaching a file over
+WebDAV or HTTP. Point each machine at the server in **Settings → Library
+database**, or write `database.json` into the library folder; see [one library,
+shared across the network](shared-library.md).
 
 ### Publish a build
 

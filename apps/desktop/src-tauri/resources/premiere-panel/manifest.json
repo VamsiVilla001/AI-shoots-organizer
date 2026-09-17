@@ -1,0 +1,30 @@
+{
+  "id": "com.skwad.premiere-panel",
+  "name": "SKWAD Collections",
+  "version": "1.0.0",
+  "main": "index.html",
+  "host": {
+    "app": "premierepro",
+    "minVersion": "24.0"
+  },
+  "entrypoints": [
+    {
+      "type": "panel",
+      "id": "skwad.collections.panel",
+      "label": {
+        "default": "SKWAD Collections"
+      },
+      "minimumSize": { "width": 260, "height": 240 },
+      "maximumSize": { "width": 2000, "height": 2000 },
+      "preferredDockedSize": { "width": 320, "height": 420 },
+      "preferredFloatingSize": { "width": 320, "height": 420 },
+      "icons": []
+    }
+  ],
+  "requiredPermissions": {
+    "network": {
+      "domains": ["http://localhost:51823"]
+    }
+  },
+  "manifestVersion": 5
+}
