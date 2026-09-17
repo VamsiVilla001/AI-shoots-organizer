@@ -16,6 +16,15 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal
 tower-http = { version = "0.6", features = ["limit", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# A service has no console to log to, so it logs to a daily-rolled file.
+tracing-appender = "0.2"
+
+# Running under the Service Control Manager: the control handler, the status
+# reporting it demands, and registration. Only compiled on Windows — everywhere
+# else the binary is an ordinary foreground process run by systemd or launchd,
+# which need no in-process support.
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.7"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

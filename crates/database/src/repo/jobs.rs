@@ -677,10 +677,12 @@ mod tests {
             }
             let mut cursor = None;
             for turn in 0..3 {
-                for (i, shoot) in ids.iter().enumerate() {
+                // One pass per turn, visiting every shoot: the lane must rotate
+                // between shoots rather than draining one before moving on.
+                for (shoot, jobs) in ids.iter().zip(&expected) {
                     let job = claim_next_fair(&mut conn, lane, cursor).unwrap().unwrap();
                     assert_eq!(job.shoot_id, *shoot);
-                    assert_eq!(job.id, expected[i][turn]);
+                    assert_eq!(job.id, jobs[turn]);
                     assert_eq!(job.attempts, 1);
                     complete(&mut conn, job.id).unwrap();
                     cursor = Some(job.shoot_id);

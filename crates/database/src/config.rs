@@ -158,10 +158,11 @@ impl PgConfig {
             host: parsed
                 .get_hosts()
                 .iter()
-                .find_map(|h| {
+                .map(|h| {
                     let postgres::config::Host::Tcp(host) = h;
-                    Some(host.clone())
+                    host.clone()
                 })
+                .next()
                 .unwrap_or(defaults.host),
             port: parsed.get_ports().first().copied().unwrap_or(defaults.port),
             database: parsed.get_dbname().unwrap_or(&defaults.database).to_string(),

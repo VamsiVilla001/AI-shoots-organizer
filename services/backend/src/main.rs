@@ -34,29 +34,133 @@ struct PublicKeys {
     wrapping_public_key: String,
 }
 
-#[tokio::main]
-async fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
-        .init();
+mod config;
+#[cfg(windows)]
+mod install;
+#[cfg(windows)]
+mod service;
 
-    if env::args().nth(1).as_deref() == Some("keygen") {
-        print_generated_keys();
-        return;
+fn main() {
+    let subcommand = env::args().nth(1);
+    match subcommand.as_deref() {
+        Some("keygen") => {
+            init_console_logging();
+            print_generated_keys();
+        }
+        Some("help" | "--help" | "-h") => {
+            init_console_logging();
+            print_usage();
+        }
+
+        // Service management. Windows-only: elsewhere this is a foreground
+        // process and the init system owns its lifecycle, so there is nothing
+        // for the binary itself to install.
+        #[cfg(windows)]
+        Some(command @ ("install" | "uninstall" | "start" | "status")) => {
+            init_console_logging();
+            if let Err(error) = install::dispatch(command) {
+                eprintln!("\n{error}");
+                std::process::exit(1);
+            }
+        }
+        #[cfg(not(windows))]
+        Some(command @ ("install" | "uninstall" | "start" | "status")) => {
+            eprintln!("`{command}` is Windows-only; use systemd or launchd to supervise this binary.");
+            std::process::exit(2);
+        }
+
+        Some(other) => {
+            eprintln!("unrecognised command: {other}\n");
+            print_usage();
+            std::process::exit(2);
+        }
+
+        // No subcommand: either the SCM started us, or a person did.
+        None => run_foreground_or_service(),
+    }
+}
+
+fn run_foreground_or_service() {
+    // Ask the Service Control Manager to dispatch. It declines with 1063 when
+    // nothing started us as a service, which is how "run from a shell" is
+    // distinguished without a flag the SCM would have to be told to pass.
+    #[cfg(windows)]
+    {
+        match service::try_run_as_service() {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(error) => {
+                init_console_logging();
+                eprintln!("could not talk to the service control manager: {error}");
+                std::process::exit(1);
+            }
+        }
     }
 
-    let state = Arc::new(BackendState::from_env().unwrap_or_else(|error| {
-        eprintln!("SKWAD backend configuration error: {error}");
-        eprintln!("Run `cargo run -p skwad-backend -- keygen` and put the values in server-side secret configuration.");
+    init_console_logging();
+    let result = serve_blocking(|| {}, async {
+        let _ = tokio::signal::ctrl_c().await;
+    });
+    if let Err(error) = result {
+        eprintln!("SKWAD backend: {error}");
         std::process::exit(2);
-    }));
-    let bind = env::var("SKWAD_BACKEND_BIND").unwrap_or_else(|_| "127.0.0.1:8787".into());
-    let listener = tokio::net::TcpListener::bind(&bind).await.expect("bind SKWAD backend");
-    tracing::info!(%bind, "SKWAD backend listening");
-    axum::serve(listener, app(state))
-        .with_graceful_shutdown(shutdown())
-        .await
-        .expect("serve SKWAD backend");
+    }
+}
+
+fn print_usage() {
+    println!(
+        "skwad-backend — signs and rewraps SKWAD catalogue packages\n\n\
+         USAGE\n  \
+           skwad-backend              run in the foreground (Ctrl-C to stop)\n  \
+           skwad-backend keygen       print a fresh set of secrets\n"
+    );
+    #[cfg(windows)]
+    println!(
+        "  skwad-backend install      register the Windows service (needs an elevated shell)\n  \
+           skwad-backend start        start the installed service\n  \
+           skwad-backend status       report whether it is installed and running\n  \
+           skwad-backend uninstall    stop and deregister it\n"
+    );
+    println!(
+        "CONFIGURATION\n  \
+           Secrets come from the environment, then from {}.\n  \
+           SKWAD_BACKEND_BIND sets the listen address (default 127.0.0.1:8787).",
+        config::default_config_path().display()
+    );
+}
+
+fn init_console_logging() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+        .try_init();
+}
+
+/// Runs the server on its own runtime until `shutdown` completes.
+///
+/// Split out of `main` because a Windows service entry point is a plain
+/// function — it cannot be `#[tokio::main]`, and it has to own the runtime so
+/// it can report `Stopped` to the SCM after the runtime winds down.
+///
+/// `on_listening` fires once the socket is accepting, which is the moment the
+/// service is genuinely usable and therefore the moment to report `Running`.
+fn serve_blocking(
+    on_listening: impl FnOnce(),
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Result<(), String> {
+    let runtime = tokio::runtime::Runtime::new().map_err(|error| format!("could not start the runtime: {error}"))?;
+    runtime.block_on(async move {
+        let state = Arc::new(BackendState::load()?);
+        let bind = env::var("SKWAD_BACKEND_BIND").unwrap_or_else(|_| "127.0.0.1:8787".into());
+        let listener = tokio::net::TcpListener::bind(&bind)
+            .await
+            .map_err(|error| format!("could not bind {bind}: {error}"))?;
+        tracing::info!(%bind, "SKWAD backend listening");
+        on_listening();
+        axum::serve(listener, app(state))
+            .with_graceful_shutdown(shutdown)
+            .await
+            .map_err(|error| format!("server stopped: {error}"))
+    })
 }
 
 fn app(state: Arc<BackendState>) -> Router {
@@ -137,7 +241,28 @@ fn error_response(error: impl std::fmt::Display) -> Response {
 }
 
 impl BackendState {
-    fn from_env() -> Result<Self, String> {
+    /// Reads the secrets from the environment, then from the config file.
+    ///
+    /// Both sources matter: a developer exports the variables, while the
+    /// service is started by the SCM with an empty environment block and can
+    /// only get them from the file. See [`config`].
+    fn load() -> Result<Self, String> {
+        let source = config::Source::discover();
+        let required = |name: &str| -> Result<String, String> {
+            source.get(name).ok_or_else(|| {
+                let file = source.path().display();
+                if source.file_was_read() {
+                    format!("{name} is not set, and {file} does not define it")
+                } else {
+                    format!(
+                        "{name} is not set, and there is no config file at {file}.\n\
+                         Run `skwad-backend install` to generate one, or `skwad-backend keygen` \
+                         and export the values yourself."
+                    )
+                }
+            })
+        };
+
         let auth_token = required("SKWAD_BACKEND_AUTH_TOKEN")?;
         if auth_token.len() < 24 {
             return Err("SKWAD_BACKEND_AUTH_TOKEN must contain at least 24 characters".into());
@@ -160,10 +285,6 @@ impl BackendState {
     }
 }
 
-fn required(name: &str) -> Result<String, String> {
-    env::var(name).map_err(|_| format!("{name} is required"))
-}
-
 fn decode_fixed<const N: usize>(value: &str) -> Result<[u8; N], String> {
     B64.decode(value)
         .map_err(|_| "invalid base64 secret".to_string())?
@@ -171,24 +292,40 @@ fn decode_fixed<const N: usize>(value: &str) -> Result<[u8; N], String> {
         .map_err(|_| format!("secret must be {N} bytes"))
 }
 
-fn print_generated_keys() {
+/// A fresh set of secrets, in the order they are written to a config file.
+///
+/// `SKWAD_SIGNING_PUBLIC_KEY` is included even though the service derives it
+/// from the private key rather than reading it: it is the value clients need in
+/// order to trust catalogues this backend signs, and having it recorded beside
+/// the key it belongs to is what makes a key rotation auditable.
+fn generate_secrets() -> Vec<(String, String)> {
     let signing = SigningKeyPair::generate("local-signing-v1");
     let wrapping = generate_device_keypair("local-wrapping-v1");
     let auth = generate_device_keypair("auth-randomness");
-    println!("SKWAD_BACKEND_AUTH_TOKEN={}", B64.encode(auth.private_key_bytes()));
-    println!("SKWAD_SIGNING_KEY_ID={}", signing.key_id);
-    println!("SKWAD_SIGNING_PRIVATE_KEY={}", B64.encode(signing.secret_bytes()));
-    println!("SKWAD_SIGNING_PUBLIC_KEY={}", B64.encode(signing.verifying_key_bytes()));
-    println!("SKWAD_WRAPPING_KEY_ID={}", wrapping.key_id);
-    println!(
-        "SKWAD_WRAPPING_PRIVATE_KEY={}",
-        B64.encode(wrapping.private_key_bytes())
-    );
-    println!("SKWAD_WRAPPING_PUBLIC_KEY={}", B64.encode(wrapping.public_key_bytes()));
+    vec![
+        ("SKWAD_BACKEND_AUTH_TOKEN".into(), B64.encode(auth.private_key_bytes())),
+        ("SKWAD_SIGNING_KEY_ID".into(), signing.key_id.clone()),
+        ("SKWAD_SIGNING_PRIVATE_KEY".into(), B64.encode(signing.secret_bytes())),
+        (
+            "SKWAD_SIGNING_PUBLIC_KEY".into(),
+            B64.encode(signing.verifying_key_bytes()),
+        ),
+        ("SKWAD_WRAPPING_KEY_ID".into(), wrapping.key_id.clone()),
+        (
+            "SKWAD_WRAPPING_PRIVATE_KEY".into(),
+            B64.encode(wrapping.private_key_bytes()),
+        ),
+        (
+            "SKWAD_WRAPPING_PUBLIC_KEY".into(),
+            B64.encode(wrapping.public_key_bytes()),
+        ),
+    ]
 }
 
-async fn shutdown() {
-    let _ = tokio::signal::ctrl_c().await;
+fn print_generated_keys() {
+    for (key, value) in generate_secrets() {
+        println!("{key}={value}");
+    }
 }
 
 #[cfg(test)]

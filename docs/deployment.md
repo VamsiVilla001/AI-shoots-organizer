@@ -62,6 +62,61 @@ cross-compile shortcut.
   `npm run package:premiere-panel` builds it and `npm run build` runs that
   first, so a release cannot accidentally ship without it. See below.
 
+## The catalogue backend as a Windows service
+
+`skwad-backend` signs and rewraps `.skwad` packages and holds the organisation
+signing key. It is not on the app's critical path — the desktop app only calls
+it when someone publishes or loads a catalogue — but it has to be up at that
+moment, and it is the one component that genuinely wants to outlive a login
+session. It registers itself:
+
+```powershell
+# In an elevated terminal. Copy the release binary somewhere stable first —
+# a service running out of target\ breaks on the next `cargo clean`.
+mkdir "C:\Program Files\SKWAD"
+copy target\release\skwad-backend.exe "C:\Program Files\SKWAD\"
+& "C:\Program Files\SKWAD\skwad-backend.exe" install
+& "C:\Program Files\SKWAD\skwad-backend.exe" start
+```
+
+`install` does four things, together, because doing them separately is how the
+signing key ends up world-readable:
+
+1. Generates a signing keypair, a wrapping keypair and an auth token — **unless
+   `C:\ProgramData\SKWAD\backend.env` already exists**, which it never
+   overwrites. Replacing that file invalidates every catalogue already
+   published under the old key, so rotating is a deliberate act: delete the
+   file yourself first.
+2. Writes them to that file and strips its inherited permissions, leaving read
+   access to SYSTEM, Administrators and the service account only. `%PROGRAMDATA%`
+   grants Users write by default, so without this step any account on the
+   machine could read — or replace — the signing key.
+3. Creates `C:\ProgramData\SKWAD\logs` and grants the service account write. A
+   service has no console, so this file is the only place its output goes;
+   it rolls daily.
+4. Registers `SkwadBackend`, automatic start, running as
+   `NT AUTHORITY\LocalService` — it reads one config, writes a log and listens
+   on loopback, so it needs none of the authority `LocalSystem` would give it.
+
+`skwad-backend status` reports whether it is installed, whether it is running,
+and **which secrets actually resolve** — a half-filled config starts the service
+and then fails, which otherwise shows up only as a service that will not stay
+running. `uninstall` stops and deregisters it, and deliberately leaves the
+signing key in place.
+
+The binary is a real service, not a console app registered with `sc create`: it
+connects to the Service Control Manager, registers a control handler and reports
+`Running` only once the socket is accepting. That is what makes `Stop` return in
+milliseconds instead of hanging for thirty seconds and being force-killed, and
+what lets a dependent service order itself after it. The same binary still runs
+in the foreground when a person starts it — it asks the SCM to dispatch and
+falls back when told there is no service controller, so nothing about developing
+against it changes.
+
+On macOS and Linux there is no `install`: the binary is an ordinary foreground
+process and launchd or systemd owns its lifecycle. It reads the same
+`/etc/skwad/backend.env`.
+
 ## The Premiere Pro panel installs itself
 
 Editors do not install a plugin. The app carries the panel and installs it on
