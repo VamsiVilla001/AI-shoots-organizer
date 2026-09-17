@@ -21,8 +21,9 @@ pub mod worker;
 
 use std::sync::Arc;
 
-use skwad_database::{Database, PgConfig};
+use skwad_database::{Database, DbError, PgConfig};
 use tauri::Manager;
+use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 
 use crate::paths::AppPaths;
 use crate::settings::AppSettings;
@@ -70,18 +71,25 @@ pub fn run() {
             // locking that mode worked around is the server's job.
             let db_config = PgConfig::resolve(&paths.root);
             tracing::info!(database = %db_config.describe(), "connecting to the library database");
-            let db = Database::connect(db_config.clone()).map_err(|e| {
-                if e.is_unavailable() {
-                    format!(
-                        "could not reach the library database at {}.\n\n\
-                         The SKWAD server must be running before the app can open a library. \
-                         See docs/deployment.md.\n\nUnderlying error: {e}",
-                        db_config.describe()
-                    )
-                } else {
-                    format!("could not open the database at {}: {e}", db_config.describe())
+            let db = match Database::connect(db_config.clone()) {
+                Ok(db) => db,
+                Err(error) => {
+                    // Returning `Err` from `setup` makes Tauri exit before any
+                    // window exists, so the message goes only to the log and
+                    // the app looks like it hung for the connect timeout and
+                    // then vanished. Say it to the person's face instead —
+                    // this is the most likely first-run failure now that the
+                    // index lives on a server.
+                    let detail = describe_connection_failure(&error, &db_config, &paths.root);
+                    tracing::error!(%error, "could not open the library database");
+                    app.dialog()
+                        .message(&detail)
+                        .kind(MessageDialogKind::Error)
+                        .title("SKWAD cannot reach its library")
+                        .blocking_show();
+                    return Err(detail.into());
                 }
-            })?;
+            };
             let settings = AppSettings::load(&db).unwrap_or_default().sanitised();
 
             let state = Arc::new(AppState::new(db, paths, settings, protocol::url_base()));
@@ -254,6 +262,65 @@ use parking_lot::Mutex;
 
 /// Logs to a rolling file in the app data directory, and to the console during
 /// development. Kept lightweight, as §25 asks.
+/// Turns a connection failure into something the person in front of the machine
+/// can act on.
+///
+/// The three cases are genuinely different problems with different fixes, and
+/// the raw driver error distinguishes none of them: "connection refused" reads
+/// the same whether the server is off, the firewall is shut, or this machine
+/// was never told where to look.
+fn describe_connection_failure(error: &DbError, config: &PgConfig, library_root: &std::path::Path) -> String {
+    let where_it_looked = config.describe();
+    let config_file = library_root.join("database.json");
+
+    if !error.is_unavailable() {
+        return format!(
+            "The library database at {where_it_looked} rejected the connection.\n\n\
+             This usually means the password is wrong or the account has no access.\n\
+             The password is read from %APPDATA%\\postgresql\\pgpass.conf.\n\n\
+             Details: {error}"
+        );
+    }
+
+    // Nothing answered. Which advice is useful depends entirely on whether this
+    // machine is meant to host the library or reach one elsewhere.
+    if config.is_local() && !config_file.exists() {
+        format!(
+            "SKWAD could not reach a database, and this machine has not been told where to find one.\n\n\
+             It looked for {where_it_looked}, which is the default.\n\n\
+             If the library lives on ANOTHER machine, create:\n  \
+               {}\n  \
+             containing that machine's address — see docs/deployment.md.\n\n\
+             If the library should live on THIS machine, install PostgreSQL 15+ and run\n  \
+               npm run db:setup\n\n\
+             Details: {error}",
+            config_file.display()
+        )
+    } else if config.is_local() {
+        format!(
+            "SKWAD could not reach its library database at {where_it_looked}.\n\n\
+             The database server on this machine does not appear to be running.\n\
+             Start the \"postgresql\" service, then open SKWAD again.\n\n\
+             Details: {error}"
+        )
+    } else {
+        format!(
+            "SKWAD could not reach its library database at {where_it_looked}.\n\n\
+             That machine is configured in:\n  {}\n\n\
+             Check, in this order:\n  \
+               1. that machine is on and its PostgreSQL service is running\n  \
+               2. its firewall allows TCP {} from this machine\n  \
+               3. its pg_hba.conf permits this machine's address\n\n\
+             From this machine, `Test-NetConnection {} -Port {}` should succeed.\n\n\
+             Details: {error}",
+            config_file.display(),
+            config.port,
+            config.host,
+            config.port
+        )
+    }
+}
+
 fn init_logging(paths: &AppPaths) {
     use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
