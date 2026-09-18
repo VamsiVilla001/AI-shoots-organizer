@@ -205,6 +205,7 @@ pub fn run() {
             commands::assign_group_tag,
             commands::unassign_group_tag,
             commands::media_with_tag,
+            commands::propagate_group_tags,
             commands::suggest_tag_values,
             commands::preview_taxonomy_text,
             commands::import_taxonomy_text,

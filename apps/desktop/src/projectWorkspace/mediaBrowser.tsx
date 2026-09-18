@@ -41,7 +41,13 @@ export function MediaBrowser({ shootId, excludeShootId, groupId, personId, fixed
   // A collection from a tag takes every file carrying the value, not only
   // the page on screen; the collection is offered under the value's name.
   const collectByTag = useMutation({
-    mutationFn: async (target: 'new' | 'existing') => ({ target, media: await api.mediaWithTag(tagFilter.tag || null, tagFilter.value) }),
+    mutationFn: async (target: 'new' | 'existing') => {
+      // Tags put on groups reach their files through the server; make sure
+      // that has happened before gathering, so a tag applied a moment ago
+      // (or before a regroup) is not missed.
+      await api.propagateGroupTags(null).catch(() => 0)
+      return { target, media: await api.mediaWithTag(tagFilter.tag || null, tagFilter.value) }
+    },
     onSuccess: ({ target, media }) => {
       if (media.length === 0) { notice({ level: 'warn', message: 'No files carry that tag value yet.' }); return }
       useUi.getState().setPendingCollectionTag({ tag: tagFilter.tag || null, value: tagFilter.value })

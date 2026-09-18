@@ -162,6 +162,15 @@ pub fn media_with_tag(ctx: &Ctx, tag: Option<String>, value: String) -> Result<V
     Ok(out)
 }
 
+/// Writes every group's tags onto the files currently in the group, across
+/// the library or for one collection. Runs by itself after each analysis;
+/// this is the same thing on demand, for tags applied before a regroup.
+pub fn propagate_group_tags(ctx: &Ctx, shoot_id: Option<i64>) -> Result<usize> {
+    let mut conn = ctx.state.db.conn()?;
+    Ok(taxonomy::propagate_group_tags(&mut conn, shoot_id)?)
+}
+
+
 // --- import and export -------------------------------------------------------------
 
 /// What an import file turned out to contain, before anything is saved.

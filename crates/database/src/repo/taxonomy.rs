@@ -428,6 +428,99 @@ pub fn media_ids_with_value(conn: &mut dyn Db, tag: Option<&str>, value: &str) -
     .collect()
 }
 
+// --- keeping group tags on the files ----------------------------------------------
+
+/// Resolves the key a group's tags are stored under (see `albumTagKey` in
+/// the front end) to the group's current row, if it still exists.
+///
+/// `shoot:S/cluster:ID` names a cluster; `shoot:S/person:P`,
+/// `shoot:S/persons:A+B` and `shoot:S/{type}:{name}` name an album by what
+/// it is, which is why an album keeps its tags across a regeneration.
+pub fn resolve_group_key(conn: &mut dyn Db, kind: &str, key: &str) -> Result<Option<i64>> {
+    let Some((shoot_part, rest)) = key.split_once('/') else { return Ok(None) };
+    let Some(shoot_id) = shoot_part.strip_prefix("shoot:").and_then(|s| s.parse::<i64>().ok()) else {
+        return Ok(None);
+    };
+    let Some((selector, target)) = rest.split_once(':') else { return Ok(None) };
+    let row = match (kind, selector) {
+        ("cluster", "cluster") => {
+            let Ok(id) = target.parse::<i64>() else { return Ok(None) };
+            conn.row_opt("SELECT id FROM clusters WHERE id = $1 AND shoot_id = $2", params![id, shoot_id])?
+        }
+        ("album", "person") => {
+            let Ok(person) = target.parse::<i64>() else { return Ok(None) };
+            conn.row_opt(
+                "SELECT id FROM albums WHERE shoot_id = $1 AND album_type = 'player'
+                    AND person_ids IS NOT NULL AND person_ids::jsonb @> to_jsonb(ARRAY[$2::bigint])
+                  ORDER BY id LIMIT 1",
+                params![shoot_id, person],
+            )?
+        }
+        ("album", "persons") => {
+            let mut ids: Vec<i64> = target.split('+').filter_map(|p| p.parse().ok()).collect();
+            ids.sort_unstable();
+            conn.row_opt(
+                "SELECT id FROM albums WHERE shoot_id = $1 AND album_type = 'multiPlayer'
+                    AND person_ids IS NOT NULL
+                    AND (SELECT array_agg(v::bigint ORDER BY v::bigint) FROM jsonb_array_elements_text(person_ids::jsonb) v) = $2::bigint[]
+                  ORDER BY id LIMIT 1",
+                params![shoot_id, ids],
+            )?
+        }
+        ("album", album_type) => conn.row_opt(
+            "SELECT id FROM albums WHERE shoot_id = $1 AND album_type = $2 AND name = $3 ORDER BY id LIMIT 1",
+            params![shoot_id, album_type, target],
+        )?,
+        _ => None,
+    };
+    row.map(|r| super::at(&r, 0)).transpose()
+}
+
+/// Every group assignment as (kind, key, value id, tag, value).
+fn group_assignments(conn: &mut dyn Db, shoot_id: Option<i64>) -> Result<Vec<(String, String, i64, String, String)>> {
+    let prefix = shoot_id.map(|id| format!("shoot:{id}/")).unwrap_or_default();
+    conn.rows(
+        "SELECT a.asset_kind, a.asset_key, v.id AS value_id, t.name AS tag, v.value
+           FROM asset_tags a
+           JOIN tag_values v ON v.id = a.tag_value_id
+           JOIN tags t ON t.id = v.tag_id
+          WHERE a.asset_kind IN ('album', 'cluster')
+            AND ($1 = '' OR a.asset_key LIKE $1 || '%')",
+        params![prefix],
+    )?
+    .iter()
+    .map(|row| {
+        Ok((
+            get(row, "asset_kind")?,
+            get(row, "asset_key")?,
+            get(row, "value_id")?,
+            get(row, "tag")?,
+            get(row, "value")?,
+        ))
+    })
+    .collect()
+}
+
+/// Writes every group's tags onto the files currently in that group.
+///
+/// Membership moves — faces get named, clusters merge, albums are rebuilt —
+/// so this runs after clustering and album generation as well as on demand,
+/// and it only ever adds: a file keeps a tag it was given directly even if
+/// it leaves the group. Answers with how many file assignments were added.
+pub fn propagate_group_tags(conn: &mut dyn Db, shoot_id: Option<i64>) -> Result<usize> {
+    let mut added = 0usize;
+    for (kind, key, _value_id, tag, value) in group_assignments(conn, shoot_id)? {
+        let Some(group_id) = resolve_group_key(conn, &kind, &key)? else { continue };
+        let media: Vec<String> = group_media_ids(conn, &kind, group_id)?
+            .into_iter()
+            .map(|id| id.to_string())
+            .collect();
+        added += assign_many(conn, "media", &media, &tag, &value)?;
+    }
+    Ok(added)
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -513,5 +606,78 @@ mod tests {
         assert!(delete_value(&mut conn, team.values[0].id).unwrap());
         assert!(delete_tag(&mut conn, team.id).unwrap());
         assert_eq!(list(&mut conn).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn group_tags_are_written_onto_the_files_in_the_group() {
+        use crate::models::{MediaType, NewMedia};
+        use crate::repo::{clusters, faces, media, shoots};
+        let db = Database::open_test().unwrap();
+        let mut conn = db.conn().unwrap();
+        let shoot = shoots::create(&mut conn, "S", "C:/s").unwrap();
+        let mut ids = Vec::new();
+        for name in ["a.jpg", "b.jpg", "c.jpg"] {
+            ids.push(
+                media::upsert(
+                    &mut conn,
+                    &NewMedia {
+                        shoot_id: shoot.id,
+                        path: format!("C:/s/{name}"),
+                        filename: name.into(),
+                        media_type: MediaType::Photo,
+                        extension: "jpg".into(),
+                        file_size: 1,
+                        content_key: name.into(),
+                        captured_at: None,
+                        normalized_relative_path: None,
+                    },
+                )
+                .unwrap(),
+            );
+        }
+        // An album keyed by what it is, holding two files.
+        let album_id: i64 = conn
+            .row_one(
+                "INSERT INTO albums (shoot_id, name, album_type, person_ids, generated_at) VALUES ($1, 'Team X', 'team', '[]', 'now') RETURNING id",
+                params![shoot.id],
+            )
+            .unwrap()
+            .get(0);
+        for id in &ids[..2] {
+            conn.exec("INSERT INTO album_media (album_id, media_id) VALUES ($1, $2)", params![album_id, id]).unwrap();
+        }
+        let key = format!("shoot:{}/team:Team X", shoot.id);
+        assign(&mut conn, "album", &key, "Venue", "Arena").unwrap();
+        assert_eq!(resolve_group_key(&mut conn, "album", &key).unwrap(), Some(album_id));
+        assert!(resolve_group_key(&mut conn, "album", "shoot:1/team:Nope").unwrap().is_none());
+        assert!(resolve_group_key(&mut conn, "album", "garbage").unwrap().is_none());
+
+        // A cluster keyed by id, holding the third file through a face.
+        let cluster_id = clusters::create(&mut conn, shoot.id, "Unknown 1").unwrap();
+        let face_id = faces::insert(
+            &mut conn,
+            &crate::models::NewFace {
+                media_id: ids[2],
+                shoot_id: shoot.id,
+                bbox: Default::default(),
+                landmarks: None,
+                detection_confidence: 0.9,
+                embedding: None,
+                quality: None,
+                frame_time: None,
+                crop_path: None,
+                model_key: None,
+            },
+        )
+        .unwrap();
+        faces::set_cluster(&mut conn, face_id, Some(cluster_id)).unwrap();
+        let ckey = format!("shoot:{}/cluster:{cluster_id}", shoot.id);
+        assign(&mut conn, "cluster", &ckey, "Team", "Nebula").unwrap();
+
+        let added = propagate_group_tags(&mut conn, Some(shoot.id)).unwrap();
+        assert_eq!(added, 3);
+        assert_eq!(media_ids_with_value(&mut conn, Some("Venue"), "Arena").unwrap(), ids[..2].to_vec());
+        assert_eq!(media_ids_with_value(&mut conn, None, "Nebula").unwrap(), vec![ids[2]]);
+        assert_eq!(propagate_group_tags(&mut conn, None).unwrap(), 0, "idempotent");
     }
 }

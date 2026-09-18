@@ -1,4 +1,4 @@
-import { useState, type MouseEvent } from 'react'
+import { useEffect, useState, type MouseEvent } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { Media, PersonSummary, TagSummary } from '@skwad/shared-types'
 import * as api from '../api'
@@ -56,6 +56,10 @@ export function TaggedMedia({ onCollect, onAddToExisting, onManagePeople }: { on
   const allVisibleSelected = visible.length > 0 && visible.every(item => selectedIds.has(item.id))
   const someVisibleSelected = visible.some(item => selectedIds.has(item.id))
   const toggleAll = () => setSelectedIds(allVisibleSelected ? new Set() : new Set(visible.map(item => item.id)))
+  // Opening a tag first makes sure group tags have reached their files, so
+  // the list below is never empty for a value that is on a group.
+  const propagated = useQuery({ queryKey: ['propagateGroupTags', openTag], queryFn: () => api.propagateGroupTags(null), enabled: openTag !== null, staleTime: 0 })
+  useEffect(() => { if (propagated.data && propagated.data > 0) void queryClient.invalidateQueries({ queryKey: ['media'] }) }, [propagated.data, queryClient])
 
   if (openTag) return <>
     <nav className="pw-breadcrumb" aria-label="Breadcrumb"><button onClick={() => setOpenTag(null)}>Tag media</button><span>/</span><span aria-current="page">{openTag.tag}: {openTag.value}</span></nav>
@@ -91,6 +95,7 @@ export function TaggedMedia({ onCollect, onAddToExisting, onManagePeople }: { on
     <TaxonomyTagList tags={taxonomy.data ?? []} search={search} onOpen={(tag, value) => setOpenTag({ tag, value })} onCollect={async (tag, value) => {
       setError('')
       try {
+        await api.propagateGroupTags(null).catch(() => 0)
         const tagged = await api.mediaWithTag(tag, value)
         if (tagged.length === 0) throw new Error(`No files carry ${tag}: ${value} yet. Tag a group on Auto tags, or files in the media library, first.`)
         useUi.getState().setPendingCollectionTag({ tag, value })

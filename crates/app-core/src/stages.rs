@@ -475,7 +475,14 @@ pub fn cluster_shoot(db: &Database, shoot_id: i64, settings: &AppSettings) -> Re
 pub fn generate_albums(db: &Database, shoot_id: i64) -> Result<usize> {
     let created = db.transaction(|conn| {
         media_repo::refresh_duplicate_groups(conn, shoot_id, 6)?;
-        albums::regenerate(conn, shoot_id)
+        let created = albums::regenerate(conn, shoot_id)?;
+        // Albums and clusters were just rebuilt; whatever tags their keys
+        // carry belong on the files now in them.
+        let propagated = skwad_database::repo::taxonomy::propagate_group_tags(conn, Some(shoot_id))?;
+        if propagated > 0 {
+            tracing::info!(shoot = shoot_id, propagated, "group tags written onto regrouped files");
+        }
+        Ok(created)
     })?;
 
     let mut conn = db.conn()?;

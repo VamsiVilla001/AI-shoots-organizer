@@ -446,3 +446,5 @@ export const unassignGroupTag = (kind: 'album' | 'cluster', groupId: number, key
   call<AssetTag[]>('unassign_group_tag', { kind, groupId, key, valueId })
 /** Every file carrying a tag value (under one tag, or any when null). */
 export const mediaWithTag = (tag: string | null, value: string) => call<Media[]>('media_with_tag', { tag, value })
+/** Writes every group's tags onto the files now in the group (library-wide, or one collection). */
+export const propagateGroupTags = (shootId?: number | null) => call<number>('propagate_group_tags', { shootId: shootId ?? null })
