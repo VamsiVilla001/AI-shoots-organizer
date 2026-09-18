@@ -3248,3 +3248,113 @@ button {
 .admin-list {
   font-variant-numeric: tabular-nums;
 }
+
+/* --- library database setup ------------------------------------------------
+   Shown in place of the library when startup could not open a database, and
+   embedded in Settings to change it afterwards. Uses the auth shell so the
+   pre-library screens look like one another. */
+
+.db-setup {
+  width: min(620px, 100%);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 28px 30px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.db-setup.embedded {
+  width: 100%;
+  background: none;
+  border: none;
+  padding: 0;
+}
+
+.db-setup h1 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.db-setup-intro {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* The startup failure, verbatim. Pre-formatted because it is written as lines
+   with a checklist in it, and reflowing turns that into a paragraph. */
+.db-setup-problem {
+  margin: 0;
+  padding: 12px 14px;
+  background: var(--danger-soft, rgba(220, 38, 38, 0.08));
+  border: 1px solid var(--danger-border, rgba(220, 38, 38, 0.25));
+  border-radius: 10px;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  max-height: 190px;
+  overflow-y: auto;
+}
+
+.db-setup-grid {
+  display: grid;
+  grid-template-columns: 1fr 120px;
+  gap: 14px 16px;
+}
+
+/* Everything spans both columns except the port, which sits beside the host. */
+.db-setup-grid label {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 13px;
+}
+
+.db-setup-grid label:first-child {
+  grid-column: 1;
+}
+
+.db-setup-grid label.db-setup-narrow {
+  grid-column: 2;
+}
+
+.db-setup-grid label > span {
+  font-weight: 600;
+}
+
+.db-setup-grid small {
+  color: var(--text-muted);
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+
+.db-setup-result {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.db-setup-result.ok {
+  background: var(--success-soft, rgba(22, 163, 74, 0.1));
+  border: 1px solid var(--success-border, rgba(22, 163, 74, 0.3));
+}
+
+.db-setup-result.bad {
+  background: var(--danger-soft, rgba(220, 38, 38, 0.08));
+  border: 1px solid var(--danger-border, rgba(220, 38, 38, 0.25));
+}
+
+.db-setup-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+}

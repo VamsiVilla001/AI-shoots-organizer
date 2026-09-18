@@ -8,6 +8,8 @@
 
 import { invoke } from '@tauri-apps/api/core'
 import type {
+  DatabaseSettings,
+  StartupStatus,
   Album,
   AppInfo,
   AppSettings,
@@ -336,3 +338,22 @@ export const clearAllEmbeddings = () => call<number>('clear_all_embeddings')
 export const clearAllRecognitionData = () => call<void>('clear_all_recognition_data')
 export const clearThumbnailCache = () => call<number>('clear_thumbnail_cache')
 export const clearLog = () => call<void>('clear_log')
+
+// --- library database ------------------------------------------------------
+//
+// These four are the only commands that work when the database could not be
+// opened: there is no application state in that case, so everything else
+// fails. `startupStatus` is what the UI checks before calling anything above.
+
+export const startupStatus = () => call<StartupStatus>('startup_status')
+export const databaseSettings = () => call<DatabaseSettings>('database_settings')
+
+/** Opens and closes a connection, returning what happened in words. */
+export const testDatabaseConnection = (settings: DatabaseSettings, password: string | null) =>
+  call<string>('test_database_connection', { settings, password })
+
+/** Saves the connection — but only if it opens. A blank password keeps the saved one. */
+export const saveDatabaseConnection = (settings: DatabaseSettings, password: string | null) =>
+  call<string>('save_database_connection', { settings, password })
+
+export const restartForDatabaseChange = () => call<void>('restart_for_database_change')

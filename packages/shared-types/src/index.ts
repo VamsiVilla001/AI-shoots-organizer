@@ -847,3 +847,28 @@ export interface NoticeEvent {
   level: 'info' | 'success' | 'warn' | 'error'
   message: string
 }
+
+/**
+ * What startup decided, asked for before anything else.
+ *
+ * When the library database cannot be opened there is no application state, so
+ * every other command would fail; the UI checks this first and shows the
+ * database setup screen instead of the library.
+ */
+export type StartupStatus =
+  | { kind: 'ready' }
+  | { kind: 'needsDatabase'; settings: DatabaseSettings; title: string; detail: string }
+
+/** A library database connection, without the password. */
+export interface DatabaseSettings {
+  host: string
+  port: number
+  database: string
+  user: string
+  /**
+   * Whether a password for this exact server is already in the operating
+   * system's credential store, so the form can offer to keep it rather than
+   * making someone retype it to change a port.
+   */
+  hasSavedPassword: boolean
+}

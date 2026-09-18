@@ -13,6 +13,7 @@ import { AlbumsScreen } from './screens/AlbumsScreen'
 import { ReviewScreen } from './screens/ReviewScreen'
 import { ExportScreen } from './screens/ExportScreen'
 import { SettingsScreen } from './screens/SettingsScreen'
+import { DatabaseSetupScreen } from './screens/DatabaseSetupScreen'
 import { CataloguesScreen } from './screens/CataloguesScreen'
 import { AuthScreen } from './screens/AuthScreen'
 import { ProfileScreen } from './screens/ProfileScreen'
@@ -37,17 +38,49 @@ export default function App() {
     document.documentElement.dataset.theme = theme
   }, [theme])
 
-  const session = useQuery({ queryKey: ['catalogueSession'], queryFn: api.catalogueSessionStatus })
+  // Asked before anything else. When the library database could not be opened
+  // there is no application state, so every other command fails — including the
+  // session check below, which would otherwise land on the sign-in screen and
+  // give no clue that the real problem is the database.
+  const startup = useQuery({
+    queryKey: ['startupStatus'],
+    queryFn: api.startupStatus,
+    staleTime: Infinity,
+    retry: false,
+  })
+  const ready = startup.data?.kind === 'ready'
+
+  const session = useQuery({
+    queryKey: ['catalogueSession'],
+    queryFn: api.catalogueSessionStatus,
+    enabled: ready,
+  })
   const info = useQuery({
     queryKey: ['appInfo'],
     queryFn: api.appInfo,
     staleTime: Infinity,
-    enabled: session.data?.authenticatedOnce === true,
+    enabled: ready && session.data?.authenticatedOnce === true,
   })
 
   useEffect(() => {
     if (info.data) setMediaBase(info.data.mediaUrlBase)
   }, [info.data])
+
+  if (startup.isPending) {
+    return <div className="auth-shell"><div className="auth-loading">Loading SKWAD…</div></div>
+  }
+
+  if (startup.data?.kind === 'needsDatabase') {
+    return (
+      <>
+        <DatabaseSetupScreen
+          initial={startup.data.settings}
+          problem={{ title: startup.data.title, detail: startup.data.detail }}
+        />
+        <Notices />
+      </>
+    )
+  }
 
   if (session.isPending) {
     return <div className="auth-shell"><div className="auth-loading">Loading SKWAD…</div></div>

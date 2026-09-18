@@ -2,6 +2,7 @@
 
 pub mod catalogue;
 pub mod commands;
+pub mod db_setup;
 pub mod events;
 pub mod export;
 pub mod library;
@@ -23,7 +24,6 @@ use std::sync::Arc;
 
 use skwad_database::{Database, DbError, PgConfig};
 use tauri::Manager;
-use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 
 use crate::paths::AppPaths;
 use crate::settings::AppSettings;
@@ -69,27 +69,34 @@ pub fn run() {
             // provide. A Postgres library is reached over TCP, so a shared
             // library is simply a server several machines connect to, and the
             // locking that mode worked around is the server's job.
-            let db_config = PgConfig::resolve(&paths.root);
+            let mut db_config = PgConfig::resolve(&paths.root);
+            // Fills the password from the OS credential store when nothing else
+            // supplied one, which is how a machine set up through the app's own
+            // settings screen gets its credential.
+            db_setup::apply_saved_password(&mut db_config);
             tracing::info!(database = %db_config.describe(), "connecting to the library database");
+
             let db = match Database::connect(db_config.clone()) {
                 Ok(db) => db,
                 Err(error) => {
-                    // Returning `Err` from `setup` makes Tauri exit before any
-                    // window exists, so the message goes only to the log and
-                    // the app looks like it hung for the connect timeout and
-                    // then vanished. Say it to the person's face instead —
-                    // this is the most likely first-run failure now that the
-                    // index lives on a server.
+                    // Not a fatal error any more. Returning `Err` here made
+                    // Tauri exit before a window existed, so the app appeared to
+                    // hang for the connect timeout and then vanish; and even
+                    // with a dialog, the only way forward was to hand-write two
+                    // files. Start anyway and let the window show the setup
+                    // screen — `startup_status` is what the UI checks before it
+                    // calls anything needing a library.
                     let (title, detail) = describe_connection_failure(&error, &db_config, &paths.root);
-                    tracing::error!(%error, "could not open the library database");
-                    app.dialog()
-                        .message(&detail)
-                        .kind(MessageDialogKind::Error)
-                        .title(title)
-                        .blocking_show();
-                    return Err(detail.into());
+                    tracing::error!(%error, "could not open the library database; starting in setup mode");
+                    app.manage(db_setup::StartupStatus::NeedsDatabase {
+                        settings: db_setup::DatabaseSettings::from_config(&db_config),
+                        title: title.to_string(),
+                        detail,
+                    });
+                    return Ok(());
                 }
             };
+            app.manage(db_setup::StartupStatus::Ready);
             let settings = AppSettings::load(&db).unwrap_or_default().sanitised();
 
             let state = Arc::new(AppState::new(db, paths, settings, protocol::url_base()));
@@ -149,6 +156,11 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             // application
+            db_setup::startup_status,
+            db_setup::database_settings,
+            db_setup::test_database_connection,
+            db_setup::save_database_connection,
+            db_setup::restart_for_database_change,
             commands::app_info,
             commands::get_settings,
             commands::update_settings,
@@ -285,56 +297,24 @@ use parking_lot::Mutex;
 /// Named rather than hard-coded into the messages because it differs by
 /// platform, and a message that points at the wrong file is worse than one that
 /// points at none.
-fn pgpass_path() -> std::path::PathBuf {
-    if let Some(explicit) = std::env::var_os("PGPASSFILE") {
-        return std::path::PathBuf::from(explicit);
-    }
-    #[cfg(windows)]
-    {
-        let root = std::env::var_os("APPDATA").unwrap_or_default();
-        std::path::PathBuf::from(root).join("postgresql").join("pgpass.conf")
-    }
-    #[cfg(not(windows))]
-    {
-        let home = std::env::var_os("HOME").unwrap_or_default();
-        std::path::PathBuf::from(home).join(".pgpass")
-    }
-}
-
-/// Turns a connection failure into something the person in front of the machine
-/// can act on.
+/// Turns a connection failure into a heading and a short explanation for the
+/// setup screen.
 ///
-/// The three cases are genuinely different problems with different fixes, and
-/// the raw driver error distinguishes none of them: "connection refused" reads
-/// the same whether the server is off, the firewall is shut, or this machine
-/// was never told where to look.
+/// Deliberately short now. This text sits directly above a form with the very
+/// fields it is about, so it only has to say which of them is wrong — earlier
+/// versions told people which files to hand-edit, which is the problem the
+/// setup screen exists to remove.
 fn describe_connection_failure(
     error: &DbError,
     config: &PgConfig,
-    library_root: &std::path::Path,
+    _library_root: &std::path::Path,
 ) -> (&'static str, String) {
     let where_it_looked = config.describe();
-    let config_file = library_root.join("database.json");
 
-    // Checked before unavailability: a server that answered and then refused
-    // for want of a password looks identical to an unreachable one in the
-    // driver's error, and sending someone to check a firewall that is fine is
-    // worse than saying nothing.
     if error.is_missing_credential() {
         return (
             "SKWAD needs a database password",
-            format!(
-                "A database server answered at {where_it_looked}, but SKWAD has no password for it.\n\n\
-                 The password is read from:\n  {}\n\n\
-                 Add a line for this server — host:port:database:user:password — for example:\n  \
-                   {}:{}:{}:{}:<the password>\n\n\
-                 Details: {error}",
-                pgpass_path().display(),
-                config.host,
-                config.port,
-                config.database,
-                config.user
-            ),
+            format!("A database server answered at {where_it_looked}, but SKWAD has no password for it."),
         );
     }
 
@@ -342,69 +322,34 @@ fn describe_connection_failure(
         return (
             "SKWAD was refused by its library",
             format!(
-                "The database server at {where_it_looked} answered, and refused the connection.\n\n\
-                 Usually one of: the password is wrong, the user does not exist, or the\n\
-                 database does not exist on that server.\n\n\
-                 The password is read from {}.\n\n\
-                 Details: {error}",
-                pgpass_path().display()
+                "The server at {where_it_looked} answered and refused the connection.\n\
+                 Usually the password is wrong, the user does not exist, or the database does \
+                 not exist on that server."
             ),
         );
     }
 
-    // Nothing answered. Which advice is useful depends entirely on whether this
-    // machine is meant to host the library or reach one elsewhere.
-    //
-    // `SKWAD_DATABASE_URL` counts as having been told: it overrides everything,
-    // so pointing at database.json when that is what set the address would send
-    // someone to edit a file that is not being read.
-    let told_by_env = std::env::var_os("SKWAD_DATABASE_URL").is_some();
-    if config.is_local() && !config_file.exists() && !told_by_env {
+    if config.is_local() {
         (
-            "SKWAD has not been told where its library is",
+            "SKWAD cannot find its library",
             format!(
-                "SKWAD could not reach a database, and this machine has not been told where to find one.\n\n\
-                 It looked for {where_it_looked}, which is the default.\n\n\
-                 If the library lives on ANOTHER machine, create:\n  \
-                   {}\n  \
-                 containing that machine's address — see docs/deployment.md.\n\n\
-                 If the library should live on THIS machine, install PostgreSQL 15+ and run\n  \
-                   npm run db:setup\n\n\
-                 Details: {error}",
-                config_file.display()
-            ),
-        )
-    } else if config.is_local() {
-        (
-            "SKWAD cannot reach its library",
-            format!(
-                "SKWAD could not reach its library database at {where_it_looked}.\n\n\
-                 The database server on this machine does not appear to be running.\n\
-                 Start the \"postgresql\" service, then open SKWAD again.\n\n\
-                 Details: {error}"
+                "Nothing answered at {where_it_looked}.\n\
+                 If the library is on another machine, enter its address below. If it should be \
+                 on this one, PostgreSQL needs to be installed and running here."
             ),
         )
     } else {
         (
             "SKWAD cannot reach its library",
             format!(
-                "SKWAD could not reach its library database at {where_it_looked}.\n\n\
-                 That machine is configured in:\n  {}\n\n\
-                 Check, in this order:\n  \
-                   1. that machine is on and its PostgreSQL service is running\n  \
-                   2. its firewall allows TCP {} from this machine\n  \
-                   3. its pg_hba.conf permits this machine's address\n\n\
-                 From this machine, `Test-NetConnection {} -Port {}` should succeed.\n\n\
-                 Details: {error}",
-                config_file.display(),
-                config.port,
-                config.host,
+                "Nothing answered at {where_it_looked}.\n\
+                 Check that machine is on, that its PostgreSQL service is running, and that its \
+                 firewall allows this one to reach port {}.",
                 config.port
             ),
         )
     }
 }
-
 fn init_logging(paths: &AppPaths) {
     use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 

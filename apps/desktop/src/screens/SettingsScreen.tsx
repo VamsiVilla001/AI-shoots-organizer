@@ -10,6 +10,7 @@ import * as api from '../api'
 import { formatBytes } from '../media'
 import { LibraryLocationCard } from '../components/LibraryLocationCard'
 import { RosterImport } from '../components/RosterImport'
+import { DatabaseSetupScreen } from './DatabaseSetupScreen'
 import { useUi } from '../store'
 
 export function SettingsScreen() {
@@ -140,6 +141,8 @@ export function SettingsScreen() {
       </div>
 
       <LibraryLocationCard isAdmin={session.data?.isAdmin === true} />
+
+      <LibraryDatabaseCard />
 
       <div className="card roster-card"><RosterImport /></div>
 
@@ -277,5 +280,30 @@ export function SettingsScreen() {
         </div>
       </div>
     </>
+  )
+}
+
+/**
+ * Changing which database holds the library, after the app is already running.
+ *
+ * The same form the setup screen shows, so there is one place where a
+ * connection is described and one place where it is validated. Loaded from disk
+ * rather than from the running connection: this edits what is stored, which is
+ * what takes effect next launch.
+ */
+function LibraryDatabaseCard() {
+  const settings = useQuery({ queryKey: ['databaseSettings'], queryFn: api.databaseSettings, staleTime: Infinity })
+
+  return (
+    <div className="card">
+      <h2>Library database</h2>
+      <p className="muted" style={{ marginTop: 0 }}>
+        Where the shoot index, players and groups are kept. Changing it needs a restart, and every
+        machine pointed at the same database shares one library.
+      </p>
+      {settings.isPending && <p className="muted">Loading…</p>}
+      {settings.isError && <p className="muted">Could not read the current settings.</p>}
+      {settings.data && <DatabaseSetupScreen initial={settings.data} embedded />}
+    </div>
   )
 }
