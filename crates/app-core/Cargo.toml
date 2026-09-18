@@ -1,0 +1,47 @@
+[package]
+name = "skwad-app-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "SKWAD Media Organiser — the application minus its front door"
+
+[dependencies]
+skwad-clustering.workspace = true
+skwad-catalogue.workspace = true
+skwad-database.workspace = true
+skwad-export-engine.workspace = true
+skwad-face-detection.workspace = true
+skwad-face-recognition.workspace = true
+skwad-media-core.workspace = true
+skwad-video-analysis.workspace = true
+
+blake3 = "1.8"
+chrono = "0.4"
+image = "0.25"
+num_cpus = "1.17"
+parking_lot = "0.12"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+tracing = "0.1"
+uuid = { version = "1.18", features = ["v4"] }
+zeroize = "1.8"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }
+
+[dev-dependencies]
+tempfile = "3.27"
+# `Database::open_test()` — a private, migrated schema per test. See
+# `skwad_database::testing`.
+skwad-database = { workspace = true, features = ["test-support"] }
+
+[features]
+default = []
+# Mirrors the AI crates' provider features so a front end can build the
+# whole core with GPU acceleration in one flag.
+directml = ["skwad-face-detection/directml", "skwad-face-recognition/directml"]
+coreml = ["skwad-face-detection/coreml", "skwad-face-recognition/coreml"]
+cuda = ["skwad-face-detection/cuda", "skwad-face-recognition/cuda"]
+opencv-tracking = ["skwad-video-analysis/opencv-tracking"]

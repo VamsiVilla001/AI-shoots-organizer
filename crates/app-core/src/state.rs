@@ -9,11 +9,24 @@ use std::time::{Duration, Instant};
 use parking_lot::{Mutex, RwLock};
 use serde::Serialize;
 use skwad_database::Database;
+use skwad_catalogue::CatalogueSummary;
 use skwad_media_core::{ThumbnailCache, VideoFrameCache, VideoProxyCache};
+use zeroize::Zeroizing;
 
-use crate::catalogue::LoadedCatalogue;
 use crate::paths::AppPaths;
 use crate::settings::AppSettings;
+
+/// A `.skwad` catalogue somebody opened in this process, kept decrypted in
+/// memory for as long as it is being browsed. Keyed by the front end — the
+/// desktop uses the package id, a server scopes the key by session so one
+/// person's catalogue is never visible to another.
+pub struct LoadedCatalogue {
+    pub package_id: String,
+    pub revision_id: String,
+    pub summary: CatalogueSummary,
+    /// The decrypted portable catalogue bytes. Zeroed on drop.
+    pub catalogue: Zeroizing<Vec<u8>>,
+}
 
 /// A file the Premiere panel should import once it next polls (§ premiere_api).
 #[derive(Debug, Clone, Serialize)]

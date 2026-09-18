@@ -1,0 +1,95 @@
+//! Events pushed from the core to whichever front end is attached.
+//!
+//! Progress is *pushed* rather than polled so the media grid and the progress
+//! panel stay live during a long import without the frontend hammering the
+//! database (§18). Every event goes through a [`ProgressSink`]; the names and
+//! payload shapes here are the contract both the Tauri bridge and the HTTP
+//! server's SSE stream honour.
+
+use serde::Serialize;
+use skwad_database::models::ProcessingProgress;
+
+use crate::progress::ProgressSink;
+
+pub const PROGRESS: &str = "skwad://progress";
+pub const SHOOT_CHANGED: &str = "skwad://shoot-changed";
+pub const LIBRARY_CHANGED: &str = "skwad://library-changed";
+pub const JOB_FAILED: &str = "skwad://job-failed";
+pub const EXPORT_PROGRESS: &str = "skwad://export-progress";
+pub const NOTICE: &str = "skwad://notice";
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProgressEvent {
+    #[serde(flatten)]
+    pub progress: ProcessingProgress,
+    pub paused: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShootChanged {
+    pub shoot_id: i64,
+    /// What changed, so the UI can invalidate only the affected queries.
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobFailed {
+    pub shoot_id: i64,
+    pub kind: String,
+    pub file: Option<String>,
+    pub error: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportProgressEvent {
+    pub export_id: i64,
+    pub shoot_id: i64,
+    pub files_done: usize,
+    pub files_total: usize,
+    pub files_skipped: usize,
+    pub bytes_done: u64,
+    pub finished: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Notice {
+    pub level: String,
+    pub message: String,
+}
+
+/// Emits an event, logging rather than propagating a failure — a UI that has
+/// gone away must never abort background work.
+pub fn emit<T: Serialize>(sink: &dyn ProgressSink, event: &str, payload: T) {
+    match serde_json::to_value(payload) {
+        Ok(value) => sink.emit(event, value),
+        Err(e) => tracing::debug!(event, error = %e, "could not serialise an event payload"),
+    }
+}
+
+pub fn notice(sink: &dyn ProgressSink, level: &str, message: impl Into<String>) {
+    emit(
+        sink,
+        NOTICE,
+        Notice {
+            level: level.to_string(),
+            message: message.into(),
+        },
+    );
+}
+
+pub fn shoot_changed(sink: &dyn ProgressSink, shoot_id: i64, reason: &str) {
+    emit(
+        sink,
+        SHOOT_CHANGED,
+        ShootChanged {
+            shoot_id,
+            reason: reason.to_string(),
+        },
+    );
+}

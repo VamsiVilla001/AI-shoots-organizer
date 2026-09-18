@@ -25,7 +25,7 @@ const SCAN_DB_BATCH_SIZE: usize = 200;
 const MIN_REFERENCE_QUALITY: f64 = 0.55;
 const MAX_REFERENCE_SAMPLES_PER_PERSON: usize = 8;
 /// Also the cap on reference samples kept from an enrollment video (`commands::enroll_person`).
-pub(crate) const MAX_ENROLLMENT_VIDEO_SAMPLES: usize = MAX_REFERENCE_SAMPLES_PER_PERSON;
+pub const MAX_ENROLLMENT_VIDEO_SAMPLES: usize = MAX_REFERENCE_SAMPLES_PER_PERSON;
 
 /// Job priorities. Lower numbers run first, so the queue naturally moves
 /// through indexing, then per-file AI, then the shoot-wide stages.

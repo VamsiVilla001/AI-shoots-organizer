@@ -2080,7 +2080,7 @@ pub fn start_export(
     options: ExportOptions,
 ) -> Result<i64> {
     Ok(crate::export::start(
-        app,
+        crate::events::sink(&app),
         Arc::clone(&state),
         shoot_id,
         PathBuf::from(destination),

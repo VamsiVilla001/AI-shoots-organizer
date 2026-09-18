@@ -1,91 +1,45 @@
-//! Events pushed from the backend to the UI.
+//! The Tauri end of the core's [`ProgressSink`] seam.
 //!
-//! Progress is *pushed* rather than polled so the media grid and the progress
-//! panel stay live during a long import without the frontend hammering the
-//! database (§18).
+//! The core pushes events into a sink; here that sink is the Tauri app
+//! handle, which fans them out to the webview as `skwad://…` events. The
+//! helpers below keep the `events::emit(&app, …)` shape every command already
+//! uses, so the commands did not have to learn the seam exists.
+
+use std::sync::Arc;
 
 use serde::Serialize;
-use skwad_database::models::ProcessingProgress;
+use skwad_app_core::ProgressSink;
 use tauri::{AppHandle, Emitter};
 
-pub const PROGRESS: &str = "skwad://progress";
-pub const SHOOT_CHANGED: &str = "skwad://shoot-changed";
-pub const LIBRARY_CHANGED: &str = "skwad://library-changed";
-pub const JOB_FAILED: &str = "skwad://job-failed";
-pub const EXPORT_PROGRESS: &str = "skwad://export-progress";
-pub const NOTICE: &str = "skwad://notice";
+pub use skwad_app_core::events::*;
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProgressEvent {
-    #[serde(flatten)]
-    pub progress: ProcessingProgress,
-    pub paused: bool,
+/// An [`AppHandle`] as a [`ProgressSink`].
+#[derive(Clone)]
+pub struct TauriSink(pub AppHandle);
+
+impl ProgressSink for TauriSink {
+    fn emit(&self, event: &str, payload: serde_json::Value) {
+        if let Err(e) = self.0.emit(event, payload) {
+            tracing::debug!(event, error = %e, "could not emit event");
+        }
+    }
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ShootChanged {
-    pub shoot_id: i64,
-    /// What changed, so the UI can invalidate only the affected queries.
-    pub reason: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct JobFailed {
-    pub shoot_id: i64,
-    pub kind: String,
-    pub file: Option<String>,
-    pub error: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ExportProgressEvent {
-    pub export_id: i64,
-    pub shoot_id: i64,
-    pub files_done: usize,
-    pub files_total: usize,
-    pub files_skipped: usize,
-    pub bytes_done: u64,
-    pub finished: bool,
-    pub error: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Notice {
-    pub level: String,
-    pub message: String,
+/// The sink the core's workers and export runner are handed.
+pub fn sink(app: &AppHandle) -> Arc<dyn ProgressSink> {
+    Arc::new(TauriSink(app.clone()))
 }
 
 /// Emits an event, logging rather than propagating a failure — a UI that has
 /// gone away must never abort background work.
-pub fn emit<T: Serialize + Clone>(app: &AppHandle, event: &str, payload: T) {
-    if let Err(e) = app.emit(event, payload) {
-        tracing::debug!(event, error = %e, "could not emit event");
-    }
+pub fn emit<T: Serialize>(app: &AppHandle, event: &str, payload: T) {
+    skwad_app_core::events::emit(&TauriSink(app.clone()), event, payload);
 }
 
 pub fn notice(app: &AppHandle, level: &str, message: impl Into<String>) {
-    emit(
-        app,
-        NOTICE,
-        Notice {
-            level: level.to_string(),
-            message: message.into(),
-        },
-    );
+    skwad_app_core::events::notice(&TauriSink(app.clone()), level, message);
 }
 
 pub fn shoot_changed(app: &AppHandle, shoot_id: i64, reason: &str) {
-    emit(
-        app,
-        SHOOT_CHANGED,
-        ShootChanged {
-            shoot_id,
-            reason: reason.to_string(),
-        },
-    );
+    skwad_app_core::events::shoot_changed(&TauriSink(app.clone()), shoot_id, reason);
 }

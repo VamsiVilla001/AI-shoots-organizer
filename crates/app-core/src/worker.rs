@@ -13,9 +13,8 @@ use std::time::{Duration, Instant};
 
 use skwad_database::models::{Job, JobKind, JobState, ProcessingStatus};
 use skwad_database::repo::{jobs, logs, media as media_repo, telemetry};
-use tauri::AppHandle;
-
 use crate::events;
+use crate::progress::ProgressSink;
 use crate::pipeline::{Engine, PipelineError};
 use crate::stages;
 use crate::state::AppState;
@@ -97,7 +96,7 @@ pub struct WorkerPool {
 impl WorkerPool {
     /// One I/O worker and bounded AI slots. Disabled slots stay idle without
     /// loading models, allowing concurrency changes without restarting the app.
-    pub fn start(app: AppHandle, state: Arc<AppState>) -> Self {
+    pub fn start(sink: Arc<dyn ProgressSink>, state: Arc<AppState>) -> Self {
         // Recover anything a previous run *of this machine* left mid-flight.
         // Other machines' running jobs are theirs until their lease lapses.
         match state
@@ -114,7 +113,7 @@ impl WorkerPool {
         let mut handles = Vec::with_capacity(worker_count + 2);
 
         for index in 0..worker_count {
-            let app = app.clone();
+            let app = Arc::clone(&sink);
             let state = Arc::clone(&state);
             let leases = Arc::clone(&leases);
             handles.push(
@@ -134,7 +133,7 @@ impl WorkerPool {
                 .expect("failed to spawn the lease keeper thread"),
         );
 
-        let monitor_app = app.clone();
+        let monitor_app = Arc::clone(&sink);
         let monitor_state = Arc::clone(&state);
         handles.push(
             std::thread::Builder::new()
@@ -193,7 +192,7 @@ fn lease_keeper_loop(state: Arc<AppState>, leases: Arc<HeldLeases>) {
     }
 }
 
-fn worker_loop(index: usize, app: AppHandle, state: Arc<AppState>, leases: Arc<HeldLeases>) {
+fn worker_loop(index: usize, app: Arc<dyn ProgressSink>, state: Arc<AppState>, leases: Arc<HeldLeases>) {
     tracing::debug!(worker = index, "worker started");
 
     // Built on first use: a session that only ever browses an existing shoot
@@ -326,7 +325,7 @@ fn should_announce_blockage() -> bool {
 }
 
 fn run_job(
-    app: &AppHandle,
+    app: &Arc<dyn ProgressSink>,
     state: &Arc<AppState>,
     job: &Job,
     engine: &mut Option<Engine>,
@@ -341,11 +340,11 @@ fn run_job(
     match kind {
         JobKind::Scan => {
             let cancel = state.cancellation(job.shoot_id);
-            let app = app.clone();
+            let app = Arc::clone(app);
             let shoot_id = job.shoot_id;
             match stages::scan_shoot(&state.db, shoot_id, &settings, Some(cancel), move |count| {
                 events::emit(
-                    &app,
+                    app.as_ref(),
                     events::NOTICE,
                     events::Notice {
                         level: "info".into(),
@@ -417,7 +416,7 @@ fn run_job(
 
             match result {
                 Ok(()) => {
-                    events::shoot_changed(app, job.shoot_id, kind.as_str());
+                    events::shoot_changed(app.as_ref(), job.shoot_id, kind.as_str());
                     JobOutcome::Done
                 }
                 Err(e) => JobOutcome::Failed(e.to_string()),
@@ -538,7 +537,7 @@ fn release(state: &Arc<AppState>, leases: &HeldLeases, job: &Job) {
     leases.drop_lease(job.id);
 }
 
-fn finish_job(app: &AppHandle, state: &Arc<AppState>, leases: &HeldLeases, job: &Job, outcome: JobOutcome) {
+fn finish_job(app: &Arc<dyn ProgressSink>, state: &Arc<AppState>, leases: &HeldLeases, job: &Job, outcome: JobOutcome) {
     let Ok(mut conn) = state.db.conn() else {
         leases.drop_lease(job.id);
         return;
@@ -579,7 +578,7 @@ fn finish_job(app: &AppHandle, state: &Arc<AppState>, leases: &HeldLeases, job: 
             // instead of looking like slow work.
             state.record_blockage(job.shoot_id, &job.kind, &reason);
             if should_announce_blockage() {
-                events::notice(app, "warn", format!("Processing paused: {reason}"));
+                events::notice(app.as_ref(), "warn", format!("Processing paused: {reason}"));
             }
             std::thread::sleep(BLOCKED_BACKOFF);
             drop(conn);
@@ -619,7 +618,7 @@ fn finish_job(app: &AppHandle, state: &Arc<AppState>, leases: &HeldLeases, job: 
                     Some(&error),
                 );
                 events::emit(
-                    app,
+                    app.as_ref(),
                     events::JOB_FAILED,
                     events::JobFailed {
                         shoot_id: job.shoot_id,
@@ -645,7 +644,7 @@ fn finish_job(app: &AppHandle, state: &Arc<AppState>, leases: &HeldLeases, job: 
 
 /// Pushes progress for every shoot that currently has work in the queue, and
 /// runs the lease reaper.
-fn monitor_loop(app: AppHandle, state: Arc<AppState>) {
+fn monitor_loop(app: Arc<dyn ProgressSink>, state: Arc<AppState>) {
     let mut last_emit = Instant::now() - PROGRESS_INTERVAL;
     let mut last_resource = Instant::now() - RESOURCE_INTERVAL;
     let mut last_reap = Instant::now();
@@ -752,7 +751,7 @@ fn monitor_loop(app: AppHandle, state: Arc<AppState>) {
                     progress.blocked_reason = Some(blockage.reason);
                 }
                 events::emit(
-                    &app,
+                    app.as_ref(),
                     events::PROGRESS,
                     events::ProgressEvent {
                         progress,

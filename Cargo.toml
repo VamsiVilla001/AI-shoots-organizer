@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "apps/desktop/src-tauri",
+    "crates/app-core",
     "crates/clustering",
     "crates/catalogue",
     "crates/database",
@@ -20,6 +21,7 @@ rust-version = "1.82"
 license = "MIT"
 
 [workspace.dependencies]
+skwad-app-core = { path = "crates/app-core" }
 skwad-clustering = { path = "crates/clustering" }
 skwad-catalogue = { path = "crates/catalogue" }
 skwad-database = { path = "crates/database" }
@@ -44,6 +46,8 @@ strip = true
 [profile.dev.package."*"]
 opt-level = 3
 
+[profile.dev.package.skwad-app-core]
+opt-level = 3
 [profile.dev.package.skwad-clustering]
 opt-level = 3
 [profile.dev.package.skwad-catalogue]

@@ -7,9 +7,8 @@ use std::sync::Arc;
 use skwad_database::models::{AlbumType, ExportStatus, ProjectCollectionSource};
 use skwad_database::repo::{albums, exports, groups as groups_repo, logs, media as media_repo, shoots};
 use skwad_export_engine::{ExportGroup, ExportMode, ExportOptions, ExportPlan, SourceFile};
-use tauri::AppHandle;
-
 use crate::events;
+use crate::progress::ProgressSink;
 use crate::state::AppState;
 
 #[derive(Debug, thiserror::Error)]
@@ -172,7 +171,7 @@ pub fn preview(
 /// Starts an export on a background thread and returns its record id
 /// immediately. Progress arrives as `skwad://export-progress` events.
 pub fn start(
-    app: AppHandle,
+    sink: Arc<dyn ProgressSink>,
     state: Arc<AppState>,
     shoot_id: i64,
     destination: PathBuf,
@@ -202,14 +201,14 @@ pub fn start(
 
     std::thread::Builder::new()
         .name("skwad-export".into())
-        .spawn(move || run(app, state, export_id, shoot_id, destination, plan, options))
+        .spawn(move || run(sink, state, export_id, shoot_id, destination, plan, options))
         .map_err(|e| ExportRunError::Other(format!("could not start the export thread: {e}")))?;
 
     Ok(export_id)
 }
 
 fn run(
-    app: AppHandle,
+    app: Arc<dyn ProgressSink>,
     state: Arc<AppState>,
     export_id: i64,
     shoot_id: i64,
@@ -223,7 +222,7 @@ fn run(
     // earlier run so it does not stop immediately.
     cancel.store(false, std::sync::atomic::Ordering::Relaxed);
 
-    let progress_app = app.clone();
+    let progress_app = Arc::clone(&app);
     let progress_state = Arc::clone(&state);
     let result = skwad_export_engine::execute(
         &plan,
@@ -240,7 +239,7 @@ fn run(
                 );
             }
             events::emit(
-                &progress_app,
+                progress_app.as_ref(),
                 events::EXPORT_PROGRESS,
                 events::ExportProgressEvent {
                     export_id,
@@ -279,7 +278,7 @@ fn run(
     let bytes = result.as_ref().map(|p| p.bytes_done).unwrap_or(0);
 
     events::emit(
-        &app,
+        app.as_ref(),
         events::EXPORT_PROGRESS,
         events::ExportProgressEvent {
             export_id,
@@ -296,10 +295,10 @@ fn run(
     let copying = options.delivery == skwad_export_engine::ExportDelivery::Copy;
     let noun = if copying { "Copy export" } else { "Shortcut export" };
     match error {
-        Some(message) => events::notice(&app, "error", format!("{noun} failed: {message}")),
-        None if status == ExportStatus::Cancelled => events::notice(&app, "warn", format!("{noun} cancelled.")),
+        Some(message) => events::notice(app.as_ref(), "error", format!("{noun} failed: {message}")),
+        None if status == ExportStatus::Cancelled => events::notice(app.as_ref(), "warn", format!("{noun} cancelled.")),
         None => events::notice(
-            &app,
+            app.as_ref(),
             "success",
             match copying {
                 true => format!("Copied {done} file(s) into {}", destination.display()),

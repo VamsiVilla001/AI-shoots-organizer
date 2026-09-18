@@ -4,22 +4,19 @@ pub mod catalogue;
 pub mod commands;
 pub mod db_setup;
 pub mod events;
-pub mod export;
 pub mod library;
-pub mod machine;
 pub mod models;
-pub mod paths;
-pub mod pipeline;
 pub mod premiere_api;
 pub mod premiere_plugin;
 pub mod protocol;
-pub mod resource_monitor;
 pub mod roster;
-pub mod settings;
-pub mod stages;
-pub mod state;
 pub mod storage;
-pub mod worker;
+
+// The application itself lives in `skwad-app-core`, which knows nothing about
+// Tauri. Re-exported under the same module names so the front-door modules
+// above keep their `crate::state::AppState` paths; `events` and `models` are
+// the two that needed a Tauri-flavoured shim.
+pub use skwad_app_core::{export, machine, paths, pipeline, resource_monitor, settings, stages, state, worker};
 
 use std::sync::Arc;
 
@@ -150,7 +147,7 @@ pub fn run() {
 
             // Workers start immediately so an import interrupted by a previous
             // quit resumes without the user having to ask (§18).
-            let pool = worker::WorkerPool::start(app.handle().clone(), Arc::clone(&state));
+            let pool = worker::WorkerPool::start(events::sink(app.handle()), Arc::clone(&state));
             app.manage(Mutex::new(Some(pool)));
 
             Ok(())

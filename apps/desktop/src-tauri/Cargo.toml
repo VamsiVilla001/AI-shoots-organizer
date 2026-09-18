@@ -18,6 +18,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+skwad-app-core = { path = "../../../crates/app-core" }
 skwad-clustering = { path = "../../../crates/clustering" }
 skwad-catalogue = { path = "../../../crates/catalogue" }
 skwad-database = { path = "../../../crates/database" }
@@ -72,7 +73,7 @@ skwad-database = { path = "../../../crates/database", features = ["test-support"
 default = []
 # Mirrors the AI crates' provider features so the whole app can be built with
 # GPU acceleration in one flag.
-directml = ["skwad-face-detection/directml", "skwad-face-recognition/directml"]
-coreml = ["skwad-face-detection/coreml", "skwad-face-recognition/coreml"]
-cuda = ["skwad-face-detection/cuda", "skwad-face-recognition/cuda"]
-opencv-tracking = ["skwad-video-analysis/opencv-tracking"]
+directml = ["skwad-app-core/directml", "skwad-face-detection/directml", "skwad-face-recognition/directml"]
+coreml = ["skwad-app-core/coreml", "skwad-face-detection/coreml", "skwad-face-recognition/coreml"]
+cuda = ["skwad-app-core/cuda", "skwad-face-detection/cuda", "skwad-face-recognition/cuda"]
+opencv-tracking = ["skwad-app-core/opencv-tracking", "skwad-video-analysis/opencv-tracking"]

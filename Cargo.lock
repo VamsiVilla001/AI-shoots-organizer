@@ -5313,6 +5313,33 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
 
 [[package]]
+name = "skwad-app-core"
+version = "2.0.0-alpha.3"
+dependencies = [
+ "blake3",
+ "chrono",
+ "image",
+ "num_cpus",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "skwad-catalogue",
+ "skwad-clustering",
+ "skwad-database",
+ "skwad-export-engine",
+ "skwad-face-detection",
+ "skwad-face-recognition",
+ "skwad-media-core",
+ "skwad-video-analysis",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tracing",
+ "uuid",
+ "windows-sys 0.61.2",
+ "zeroize",
+]
+
+[[package]]
 name = "skwad-backend"
 version = "2.0.0-alpha.3"
 dependencies = [
@@ -5398,6 +5425,7 @@ dependencies = [
  "rpassword",
  "serde",
  "serde_json",
+ "skwad-app-core",
  "skwad-catalogue",
  "skwad-clustering",
  "skwad-database",

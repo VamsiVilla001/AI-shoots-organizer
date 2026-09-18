@@ -28,7 +28,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
     commands::{CommandError, Result},
-    state::AppState,
+    state::{AppState, LoadedCatalogue},
 };
 
 const CREDENTIAL_SERVICE: &str = "com.skwad.mediaorganiser";
@@ -108,13 +108,6 @@ const SEED_USERS: &[(&str, &str, UserRole)] = &[
         UserRole::Admin,
     ),
 ];
-
-pub struct LoadedCatalogue {
-    pub package_id: String,
-    pub revision_id: String,
-    pub summary: CatalogueSummary,
-    catalogue: Zeroizing<Vec<u8>>,
-}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]

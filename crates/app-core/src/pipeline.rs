@@ -61,9 +61,9 @@ pub struct Engine {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct AnalysedFace {
-    pub(crate) detection: Detection,
-    pub(crate) embedding: Option<Embedding>,
+pub struct AnalysedFace {
+    pub detection: Detection,
+    pub embedding: Option<Embedding>,
 }
 
 struct PreviousVideoFrame {
@@ -429,7 +429,7 @@ impl Engine {
     /// or database writes involved — used both by the per-file pipeline above
     /// and by person enrollment, which extracts reference faces from photos
     /// and video frames that are not part of any shoot yet.
-    pub(crate) fn detect_and_embed(&mut self, image: &RgbImage) -> Result<Vec<AnalysedFace>> {
+    pub fn detect_and_embed(&mut self, image: &RgbImage) -> Result<Vec<AnalysedFace>> {
         let detections: Vec<Detection> = self
             .detector
             .detect(image)
