@@ -319,10 +319,25 @@ pub fn resolve_within_roots(requested: &Path, roots: &[PathBuf]) -> Result<PathB
     for root in roots {
         let Ok(root) = std::fs::canonicalize(root) else { continue };
         if canonical.starts_with(&root) {
-            return Ok(canonical);
+            return Ok(without_verbatim_prefix(canonical));
         }
     }
     Err(JailError::Outside(requested.display().to_string()))
+}
+
+/// `canonicalize` on Windows answers with an extended-length path
+/// (`\\?\C:\…`, `\\?\UNC\server\share\…`). That form is what the OS wants,
+/// not what a person or a share mapping does: it goes into shoot rows and
+/// onto screens, so it is turned back into the ordinary spelling.
+pub fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
+    let text = path.to_string_lossy();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = text.strip_prefix(r"\\?\") {
+        return PathBuf::from(rest);
+    }
+    path
 }
 
 #[cfg(test)]
@@ -335,6 +350,19 @@ mod tests {
         assert_eq!(parsed["SKWAD_SERVER_BIND"], "0.0.0.0:8420");
         assert_eq!(parsed["SKWAD_SERVER_MEDIA_ROOTS"], "D:\\shoots;E:\\more");
         assert_eq!(parsed.len(), 2);
+    }
+
+    #[test]
+    fn verbatim_prefixes_are_removed_from_resolved_paths() {
+        assert_eq!(
+            without_verbatim_prefix(PathBuf::from(r"\\?\C:\shoots\day1")),
+            PathBuf::from(r"C:\shoots\day1")
+        );
+        assert_eq!(
+            without_verbatim_prefix(PathBuf::from(r"\\?\UNC\nas\share\day1")),
+            PathBuf::from(r"\\nas\share\day1")
+        );
+        assert_eq!(without_verbatim_prefix(PathBuf::from(r"D:\plain")), PathBuf::from(r"D:\plain"));
     }
 
     #[test]
