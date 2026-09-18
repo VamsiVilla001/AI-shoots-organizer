@@ -114,6 +114,12 @@ impl From<crate::commands::CommandError> for ApiError {
     }
 }
 
+impl From<skwad_app_core::api::ApiError> for ApiError {
+    fn from(e: skwad_app_core::api::ApiError) -> Self {
+        ApiError::Internal(e.message)
+    }
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         match self {
@@ -197,7 +203,7 @@ async fn require_token(request: Request, next: Next) -> Response {
 /// tree — same access rule as the `list_projects` Tauri command, and the same
 /// shape of data the app's own Collections screen navigates.
 async fn list_projects(State(state): State<Arc<AppState>>) -> Result<Json<ProjectsResponse>, ApiError> {
-    let (account_id, email, organisation) = crate::catalogue::current_project_identity(&state)?;
+    let (account_id, email, organisation) = skwad_app_core::api::catalogue::current_project_identity(&crate::commands::headless_ctx(Arc::clone(&state)))?;
     let mut conn = state.db.conn()?;
     let accessible = projects::list_accessible(&mut conn, &account_id, &email, organisation.as_deref())?;
     drop(conn);
@@ -240,7 +246,7 @@ async fn collection_media(
     State(state): State<Arc<AppState>>,
     RoutePath(collection_id): RoutePath<String>,
 ) -> Result<Json<Vec<CollectionFile>>, ApiError> {
-    let (account_id, email, organisation) = crate::catalogue::current_project_identity(&state)?;
+    let (account_id, email, organisation) = skwad_app_core::api::catalogue::current_project_identity(&crate::commands::headless_ctx(Arc::clone(&state)))?;
     let mut conn = state.db.conn()?;
     let accessible = projects::list_accessible(&mut conn, &account_id, &email, organisation.as_deref())?;
     drop(conn);

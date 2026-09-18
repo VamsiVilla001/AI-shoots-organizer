@@ -7,7 +7,6 @@ use skwad_database::Db;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::Arc,
 };
 
 use argon2::{
@@ -22,17 +21,12 @@ use skwad_catalogue::{
     CatalogueManifest, CatalogueMedia, CatalogueSummary, DeviceKeyPair, OpenCredential, PackageLimits, PublishOptions,
     Recipient,
 };
-use tauri::{AppHandle, State};
 use uuid::Uuid;
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
-use crate::{
-    commands::{CommandError, Result},
-    state::{AppState, LoadedCatalogue},
-};
+use crate::api::{ApiError as CommandError, Ctx, Result};
+use crate::state::{AppState, LoadedCatalogue};
 
-const CREDENTIAL_SERVICE: &str = "com.skwad.mediaorganiser";
-const CREDENTIAL_ACCOUNT: &str = "authenticated-device";
 const DEFAULT_BACKEND: &str = "http://127.0.0.1:8787";
 const LOCAL_AUTH_VERSION: u32 = 1;
 const MAX_AUTH_FILE_BYTES: u64 = 1024 * 1024;
@@ -165,25 +159,29 @@ pub struct LoadedCatalogueInfo {
     pub mapped_root: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+/// A signed-in account's device identity: who they are, this device's
+/// catalogue keypair, and the package signing keys it trusts. Kept by an
+/// [`IdentityStore`](crate::api::IdentityStore) — the desktop's is the OS
+/// credential store.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct StoredIdentity {
-    account_id: String,
+pub struct StoredIdentity {
+    pub account_id: String,
     #[serde(default)]
-    email: String,
+    pub email: String,
     #[serde(default)]
-    display_name: String,
+    pub display_name: String,
     #[serde(default)]
-    workspace_id: String,
+    pub workspace_id: String,
     #[serde(default)]
-    access_token: String,
+    pub access_token: String,
     #[serde(default)]
-    refresh_token: String,
-    device_id: String,
-    device_key_id: String,
-    device_private_key: String,
-    device_public_key: String,
-    trusted_signing_keys: HashMap<String, String>,
+    pub refresh_token: String,
+    pub device_id: String,
+    pub device_key_id: String,
+    pub device_private_key: String,
+    pub device_public_key: String,
+    pub trusted_signing_keys: HashMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -268,18 +266,17 @@ struct LocalAccount {
     role: UserRole,
 }
 
-pub(crate) fn current_project_identity(state: &AppState) -> Result<(String, String, Option<String>)> {
-    let identity = load_identity().map_err(|_| command_error("sign in to access projects"))?;
-    let organisation = load_local_profile(state, &identity)
+pub fn current_project_identity(ctx: &Ctx) -> Result<(String, String, Option<String>)> {
+    let identity = ctx.identity.load().map_err(|_| CommandError::unauthorized("sign in to access projects"))?;
+    let organisation = load_local_profile(&ctx.state, &identity)
         .ok()
         .and_then(|profile| profile.organisation);
     Ok((identity.account_id, identity.email, organisation))
 }
 
-#[tauri::command]
-pub fn catalogue_session_status(state: State<'_, Arc<AppState>>) -> Result<SessionStatus> {
-    let active = load_identity().ok().and_then(|identity| {
-        let auth = load_local_auth(&state).ok()?;
+pub fn catalogue_session_status(ctx: &Ctx) -> Result<SessionStatus> {
+    let active = ctx.identity.load().ok().and_then(|identity| {
+        let auth = load_local_auth(&ctx.state).ok()?;
         let role = auth
             .users
             .iter()
@@ -311,11 +308,10 @@ pub fn catalogue_session_status(state: State<'_, Arc<AppState>>) -> Result<Sessi
     }
 }
 
-#[tauri::command]
-pub async fn sign_in_skwad(state: State<'_, Arc<AppState>>, email: String, password: String) -> Result<SessionStatus> {
+pub fn sign_in_skwad(ctx: &Ctx, email: String, password: String) -> Result<SessionStatus> {
     let password = Zeroizing::new(password);
-    let account = authenticate_local(&state, &email, &password)?;
-    let auth = load_local_auth(&state)?;
+    let account = authenticate_local(&ctx.state, &email, &password)?;
+    let auth = load_local_auth(&ctx.state)?;
     let requires_change = ENFORCE_PASSWORD_CHANGE
         && auth
             .users
@@ -331,12 +327,11 @@ pub async fn sign_in_skwad(state: State<'_, Arc<AppState>>, email: String, passw
             device_key_id: None,
         });
     }
-    establish_local_identity(&state, account).await
+    establish_local_identity(ctx, account)
 }
 
-#[tauri::command]
-pub async fn change_initial_password(
-    state: State<'_, Arc<AppState>>,
+pub fn change_initial_password(
+    ctx: &Ctx,
     email: String,
     current_password: String,
     new_password: String,
@@ -351,15 +346,15 @@ pub async fn change_initial_password(
     }
     let current_password = Zeroizing::new(current_password);
     let new_password = Zeroizing::new(new_password);
-    let account = authenticate_local(&state, &email, &current_password)?;
-    update_local_password(&state, &account.email, &new_password)?;
-    establish_local_identity(&state, account).await
+    let account = authenticate_local(&ctx.state, &email, &current_password)?;
+    update_local_password(&ctx.state, &account.email, &new_password)?;
+    establish_local_identity(ctx, account)
 }
 
-async fn establish_local_identity(state: &AppState, account: LocalAccount) -> Result<SessionStatus> {
+fn establish_local_identity(ctx: &Ctx, account: LocalAccount) -> Result<SessionStatus> {
     let account_id = account.id;
     let is_admin = account.role == UserRole::Admin;
-    let existing = load_identity()
+    let existing = ctx.identity.load()
         .ok()
         .filter(|identity| identity.account_id == account_id);
     let (device_id, device_key_id, device_private_key, device_public_key, trusted_signing_keys) = match existing {
@@ -381,8 +376,8 @@ async fn establish_local_identity(state: &AppState, account: LocalAccount) -> Re
             )
         }
     };
-    ensure_local_profile(state, &account_id, &account.email, &account.display_name)?;
-    save_identity(&StoredIdentity {
+    ensure_local_profile(&ctx.state, &account_id, &account.email, &account.display_name)?;
+    ctx.identity.save(&StoredIdentity {
         account_id: account_id.clone(),
         email: account.email.clone(),
         display_name: account.display_name,
@@ -418,15 +413,13 @@ pub fn ensure_local_auth(state: &AppState) {
 // --- user administration --------------------------------------------------
 
 /// Reads the roster for the admin panel. Members never see this list.
-#[tauri::command]
-pub fn list_local_users(state: State<'_, Arc<AppState>>) -> Result<Vec<LocalUser>> {
-    let (auth, _) = require_admin(&state)?;
+pub fn list_local_users(ctx: &Ctx) -> Result<Vec<LocalUser>> {
+    let (auth, _) = require_admin(ctx)?;
     Ok(local_user_rows(&auth))
 }
 
-#[tauri::command]
-pub fn create_local_user(state: State<'_, Arc<AppState>>, user: NewLocalUser) -> Result<Vec<LocalUser>> {
-    let (mut auth, _) = require_admin(&state)?;
+pub fn create_local_user(ctx: &Ctx, user: NewLocalUser) -> Result<Vec<LocalUser>> {
+    let (mut auth, _) = require_admin(ctx)?;
     let email = clean_email(&user.email)?;
     let display_name = clean_display_name(&user.display_name)?;
     if auth
@@ -447,13 +440,12 @@ pub fn create_local_user(state: State<'_, Arc<AppState>>, user: NewLocalUser) ->
         must_change_password: ENFORCE_PASSWORD_CHANGE,
         role: user.role,
     });
-    save_roster(&state, auth)
+    save_roster(&ctx.state, auth)
 }
 
 /// Renames an account, changes its role, or enables and disables it.
-#[tauri::command]
-pub fn update_local_user(state: State<'_, Arc<AppState>>, user: LocalUserUpdate) -> Result<Vec<LocalUser>> {
-    let (mut auth, signed_in) = require_admin(&state)?;
+pub fn update_local_user(ctx: &Ctx, user: LocalUserUpdate) -> Result<Vec<LocalUser>> {
+    let (mut auth, signed_in) = require_admin(ctx)?;
     let email = clean_email(&user.email)?;
     let display_name = clean_display_name(&user.display_name)?;
     let is_self = email.eq_ignore_ascii_case(&signed_in);
@@ -469,18 +461,17 @@ pub fn update_local_user(state: State<'_, Arc<AppState>>, user: LocalUserUpdate)
     record.role = user.role;
     record.enabled = user.enabled;
     require_remaining_admin(&auth)?;
-    save_roster(&state, auth)
+    save_roster(&ctx.state, auth)
 }
 
 /// Sets a new password for another account. The member is not asked to change
 /// it while the testing password policy is muted.
-#[tauri::command]
 pub fn reset_local_user_password(
-    state: State<'_, Arc<AppState>>,
+    ctx: &Ctx,
     email: String,
     password: String,
 ) -> Result<Vec<LocalUser>> {
-    let (mut auth, _) = require_admin(&state)?;
+    let (mut auth, _) = require_admin(ctx)?;
     let email = clean_email(&email)?;
     let password = Zeroizing::new(password);
     check_password(&password)?;
@@ -492,12 +483,11 @@ pub fn reset_local_user_password(
         .ok_or_else(|| command_error("that account no longer exists"))?;
     record.password_hash = hash;
     record.must_change_password = ENFORCE_PASSWORD_CHANGE;
-    save_roster(&state, auth)
+    save_roster(&ctx.state, auth)
 }
 
-#[tauri::command]
-pub fn delete_local_user(state: State<'_, Arc<AppState>>, email: String) -> Result<Vec<LocalUser>> {
-    let (mut auth, signed_in) = require_admin(&state)?;
+pub fn delete_local_user(ctx: &Ctx, email: String) -> Result<Vec<LocalUser>> {
+    let (mut auth, signed_in) = require_admin(ctx)?;
     let email = clean_email(&email)?;
     if email.eq_ignore_ascii_case(&signed_in) {
         return Err(command_error("you cannot remove the account you are signed in with"));
@@ -508,20 +498,20 @@ pub fn delete_local_user(state: State<'_, Arc<AppState>>, email: String) -> Resu
         return Err(command_error("that account no longer exists"));
     }
     require_remaining_admin(&auth)?;
-    save_roster(&state, auth)
+    save_roster(&ctx.state, auth)
 }
 
 /// Loads the roster and confirms the signed-in account may administer it.
 /// Returns the roster and the signed-in email so callers can protect it.
-fn require_admin(state: &AppState) -> Result<(LocalAuthFile, String)> {
-    let identity = load_identity().map_err(|_| command_error("sign in to manage users"))?;
-    let auth = load_local_auth(state)?;
+fn require_admin(ctx: &Ctx) -> Result<(LocalAuthFile, String)> {
+    let identity = ctx.identity.load().map_err(|_| CommandError::unauthorized("sign in to manage users"))?;
+    let auth = load_local_auth(&ctx.state)?;
     let is_admin = auth
         .users
         .iter()
         .any(|user| user.enabled && user.role == UserRole::Admin && user.email.eq_ignore_ascii_case(&identity.email));
     if !is_admin {
-        return Err(command_error("only an administrator can manage users"));
+        return Err(CommandError::forbidden("only an administrator can manage users"));
     }
     Ok((auth, identity.email))
 }
@@ -590,27 +580,22 @@ fn check_password(password: &str) -> Result<()> {
     Ok(())
 }
 
-#[tauri::command]
-pub fn clear_authenticated_session() -> Result<()> {
-    credential_entry()?.delete_credential().map_err(command_error)?;
-    Ok(())
+pub fn clear_authenticated_session(ctx: &Ctx) -> Result<()> {
+    ctx.identity.clear()
 }
 
-#[tauri::command]
-pub fn sign_out_skwad(state: State<'_, Arc<AppState>>) -> Result<()> {
-    state.loaded_catalogues.lock().clear();
-    clear_authenticated_session()
+pub fn sign_out_skwad(ctx: &Ctx) -> Result<()> {
+    ctx.state.loaded_catalogues.lock().clear();
+    clear_authenticated_session(ctx)
 }
 
-#[tauri::command]
-pub fn get_user_profile(state: State<'_, Arc<AppState>>) -> Result<UserProfile> {
-    let identity = load_identity().map_err(|_| command_error("sign in to view your profile"))?;
-    load_local_profile(&state, &identity)
+pub fn get_user_profile(ctx: &Ctx) -> Result<UserProfile> {
+    let identity = ctx.identity.load().map_err(|_| command_error("sign in to view your profile"))?;
+    load_local_profile(&ctx.state, &identity)
 }
 
-#[tauri::command]
-pub fn update_user_profile(state: State<'_, Arc<AppState>>, update: ProfileUpdate) -> Result<UserProfile> {
-    let identity = load_identity().map_err(|_| command_error("sign in to update your profile"))?;
+pub fn update_user_profile(ctx: &Ctx, update: ProfileUpdate) -> Result<UserProfile> {
+    let identity = ctx.identity.load().map_err(|_| command_error("sign in to update your profile"))?;
 
     let display_name = update.display_name.trim().to_owned();
     if display_name.is_empty() || display_name.chars().count() > 80 {
@@ -623,7 +608,7 @@ pub fn update_user_profile(state: State<'_, Arc<AppState>>, update: ProfileUpdat
             return Err(command_error("avatar URL must use HTTPS or HTTP"));
         }
     }
-    let previous = load_local_profile(&state, &identity)?;
+    let previous = load_local_profile(&ctx.state, &identity)?;
     let profile = UserProfile {
         user_id: identity.account_id.clone(),
         email: identity.email.clone(),
@@ -636,29 +621,28 @@ pub fn update_user_profile(state: State<'_, Arc<AppState>>, update: ProfileUpdat
         created_at: previous.created_at,
         updated_at: chrono::Utc::now().to_rfc3339(),
     };
-    save_local_profile(&state, &profile)?;
+    save_local_profile(&ctx.state, &profile)?;
     Ok(profile)
 }
 
-#[tauri::command]
-pub async fn publish_skwad(
-    state: State<'_, Arc<AppState>>,
+pub fn publish_skwad(
+    ctx: &Ctx,
     shoot_id: i64,
     destination: String,
     passphrase: String,
 ) -> Result<PublishResult> {
     let mut identity =
-        load_identity().map_err(|_| command_error("sign in once before publishing a SKWAD catalogue"))?;
-    let keys = fetch_backend_keys().await?;
+        ctx.identity.load().map_err(|_| command_error("sign in once before publishing a SKWAD catalogue"))?;
+    let keys = fetch_backend_keys()?;
     identity
         .trusted_signing_keys
         .insert(keys.signing_key_id.clone(), keys.signing_public_key.clone());
-    save_identity(&identity)?;
+    ctx.identity.save(&identity)?;
     let device = identity.device_key()?;
     let backend_public = B64.decode(&keys.wrapping_public_key).map_err(command_error)?;
     let package_id = Uuid::new_v4();
     let revision_id = Uuid::new_v4();
-    let db = state.db.clone();
+    let db = ctx.state.db.clone();
     let passphrase = Zeroizing::new(passphrase);
     let own_recipient = Recipient {
         key_id: device.key_id.clone(),
@@ -670,7 +654,7 @@ pub async fn publish_skwad(
     };
     let signing_key_id = keys.signing_key_id;
     let unsigned =
-        tauri::async_runtime::spawn_blocking(move || -> Result<(Vec<u8>, u64, i64, String, String, String)> {
+        (move || -> Result<(Vec<u8>, u64, i64, String, String, String)> {
             let mut conn = db.conn().map_err(command_error)?;
             let revision_number: i64 = conn
                 .row_one(
@@ -723,32 +707,29 @@ pub async fn publish_skwad(
                 stable_shoot_id,
                 shoot_name,
             ))
-        })
-        .await
-        .map_err(command_error)??;
+        })()?;
 
-    let signed = reqwest::Client::new()
+    let signed = reqwest::blocking::Client::new()
         .post(format!("{}/v1/packages/sign", backend_url()))
         .bearer_auth(backend_auth_token()?)
         .header("x-skwad-workspace-id", &identity.workspace_id)
         .header(reqwest::header::CONTENT_TYPE, "application/vnd.skwad.catalogue")
         .body(unsigned.0)
         .send()
-        .await
         .map_err(command_error)?;
     if !signed.status().is_success() {
         return Err(command_error(format!(
             "backend refused publication: {}",
-            signed.text().await.unwrap_or_default()
+            signed.text().unwrap_or_default()
         )));
     }
-    let package = signed.bytes().await.map_err(command_error)?;
+    let package = signed.bytes().map_err(command_error)?;
     let destination = package_destination(&destination);
     if let Some(parent) = destination.parent() {
         std::fs::create_dir_all(parent).map_err(command_error)?;
     }
     std::fs::write(&destination, &package).map_err(command_error)?;
-    let mut conn = state.db.conn().map_err(command_error)?;
+    let mut conn = ctx.state.db.conn().map_err(command_error)?;
     conn.exec("INSERT INTO catalogue_revisions(revision_id,package_id,shoot_id,revision_number,state,manifest_hash,created_at,published_at) VALUES($1,$2,$3,$4,'published',$5,$6,$6)", skwad_database::params![revision_id.to_string(), package_id.to_string(), shoot_id, unsigned.2, blake3::hash(&package).to_hex().to_string(), chrono::Utc::now().to_rfc3339()]).map_err(command_error)?;
     Ok(PublishResult {
         package_id: package_id.to_string(),
@@ -758,13 +739,12 @@ pub async fn publish_skwad(
     })
 }
 
-#[tauri::command]
-pub async fn load_skwad(
-    state: State<'_, Arc<AppState>>,
+pub fn load_skwad(
+    ctx: &Ctx,
     path: String,
     passphrase: Option<String>,
 ) -> Result<LoadedCatalogueInfo> {
-    let identity = load_identity()
+    let identity = ctx.identity.load()
         .map_err(|_| command_error("this computer must sign in to a SKWAD account once before loading catalogues"))?;
     let metadata = std::fs::metadata(&path).map_err(command_error)?;
     if metadata.len() > 513 * 1024 * 1024 {
@@ -802,12 +782,12 @@ pub async fn load_skwad(
         Err(error) => return Err(command_error(error)),
     };
     let summary = catalogue_summary(&decoded.catalogue).map_err(command_error)?;
-    state.db.conn().map_err(command_error)?.exec("INSERT INTO imported_catalogues(package_id,revision_id,library_id,shoot_id,catalogue_hash,imported_at) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(package_id,revision_id) DO UPDATE SET imported_at=excluded.imported_at", skwad_database::params![header.authenticated.package_id.to_string(), header.authenticated.revision_id.to_string(), summary.library_id, summary.shoot_id, blake3::hash(&package).to_hex().to_string(), chrono::Utc::now().to_rfc3339()]).map_err(command_error)?;
+    ctx.state.db.conn().map_err(command_error)?.exec("INSERT INTO imported_catalogues(package_id,revision_id,library_id,shoot_id,catalogue_hash,imported_at) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(package_id,revision_id) DO UPDATE SET imported_at=excluded.imported_at", skwad_database::params![header.authenticated.package_id.to_string(), header.authenticated.revision_id.to_string(), summary.library_id, summary.shoot_id, blake3::hash(&package).to_hex().to_string(), chrono::Utc::now().to_rfc3339()]).map_err(command_error)?;
     let key = catalogue_key(
         &header.authenticated.package_id.to_string(),
         &header.authenticated.revision_id.to_string(),
     );
-    state.loaded_catalogues.lock().insert(
+    ctx.state.loaded_catalogues.lock().insert(
         key,
         LoadedCatalogue {
             package_id: header.authenticated.package_id.to_string(),
@@ -817,16 +797,15 @@ pub async fn load_skwad(
         },
     );
     loaded_info(
-        &state,
+        &ctx.state,
         &header.authenticated.package_id.to_string(),
         &header.authenticated.revision_id.to_string(),
         summary,
     )
 }
 
-#[tauri::command]
 pub fn approve_catalogue_library(
-    state: State<'_, Arc<AppState>>,
+    ctx: &Ctx,
     package_id: String,
     revision_id: String,
     root: String,
@@ -836,24 +815,23 @@ pub fn approve_catalogue_library(
         return Err(command_error("choose an existing NAS library folder"));
     }
     let key = catalogue_key(&package_id, &revision_id);
-    let loaded = state.loaded_catalogues.lock();
+    let loaded = ctx.state.loaded_catalogues.lock();
     let catalogue = loaded
         .get(&key)
         .ok_or_else(|| command_error("load the catalogue before mapping its library"))?;
     let now = chrono::Utc::now().to_rfc3339();
-    state.db.conn().map_err(command_error)?.exec("INSERT INTO library_mappings(library_id,label,local_root,approved_at,updated_at) VALUES($1,$2,$3,$4,$4) ON CONFLICT(library_id) DO UPDATE SET local_root=excluded.local_root,updated_at=excluded.updated_at", skwad_database::params![catalogue.summary.library_id, catalogue.summary.shoot_name, path.to_string_lossy(), now]).map_err(command_error)?;
-    loaded_info(&state, &package_id, &revision_id, catalogue.summary.clone())
+    ctx.state.db.conn().map_err(command_error)?.exec("INSERT INTO library_mappings(library_id,label,local_root,approved_at,updated_at) VALUES($1,$2,$3,$4,$4) ON CONFLICT(library_id) DO UPDATE SET local_root=excluded.local_root,updated_at=excluded.updated_at", skwad_database::params![catalogue.summary.library_id, catalogue.summary.shoot_name, path.to_string_lossy(), now]).map_err(command_error)?;
+    loaded_info(&ctx.state, &package_id, &revision_id, catalogue.summary.clone())
 }
 
-#[tauri::command]
-pub fn list_loaded_catalogues(state: State<'_, Arc<AppState>>) -> Result<Vec<LoadedCatalogueInfo>> {
-    state
+pub fn list_loaded_catalogues(ctx: &Ctx) -> Result<Vec<LoadedCatalogueInfo>> {
+    ctx.state
         .loaded_catalogues
         .lock()
         .values()
         .map(|catalogue| {
             loaded_info(
-                &state,
+                &ctx.state,
                 &catalogue.package_id,
                 &catalogue.revision_id,
                 catalogue.summary.clone(),
@@ -862,43 +840,41 @@ pub fn list_loaded_catalogues(state: State<'_, Arc<AppState>>) -> Result<Vec<Loa
         .collect()
 }
 
-#[tauri::command]
 pub fn list_catalogue_groups(
-    state: State<'_, Arc<AppState>>,
+    ctx: &Ctx,
     package_id: String,
     revision_id: String,
 ) -> Result<Vec<CatalogueGroup>> {
-    let loaded = state.loaded_catalogues.lock();
+    let loaded = ctx.state.loaded_catalogues.lock();
     let catalogue = loaded
         .get(&catalogue_key(&package_id, &revision_id))
         .ok_or_else(|| command_error("catalogue is not loaded"))?;
     catalogue_groups(&catalogue.catalogue).map_err(command_error)
 }
 
-#[tauri::command]
 pub fn list_catalogue_media(
-    state: State<'_, Arc<AppState>>,
+    ctx: &Ctx,
     package_id: String,
     revision_id: String,
     group_id: Option<i64>,
 ) -> Result<Vec<CatalogueMedia>> {
-    let loaded = state.loaded_catalogues.lock();
+    let loaded = ctx.state.loaded_catalogues.lock();
     let catalogue = loaded
         .get(&catalogue_key(&package_id, &revision_id))
         .ok_or_else(|| command_error("catalogue is not loaded"))?;
     catalogue_media(&catalogue.catalogue, group_id).map_err(command_error)
 }
 
-#[tauri::command]
-pub fn open_catalogue_media(
-    app: AppHandle,
-    state: State<'_, Arc<AppState>>,
+/// Resolves one catalogue media reference to a file under the approved local
+/// root, checking it cannot escape that root. Opening it is the front end's
+/// job — this is the machine-specific half a headless server cannot do.
+pub fn resolve_catalogue_media(
+    ctx: &Ctx,
     package_id: String,
     revision_id: String,
     media_id: i64,
-) -> Result<()> {
-    use tauri_plugin_opener::OpenerExt;
-    let loaded = state.loaded_catalogues.lock();
+) -> Result<String> {
+    let loaded = ctx.state.loaded_catalogues.lock();
     let catalogue = loaded
         .get(&catalogue_key(&package_id, &revision_id))
         .ok_or_else(|| command_error("catalogue is not loaded"))?;
@@ -907,7 +883,7 @@ pub fn open_catalogue_media(
         .into_iter()
         .find(|item| item.id == media_id)
         .ok_or_else(|| command_error("media reference is missing"))?;
-    let root: String = state
+    let root: String = ctx.state
         .db
         .conn()
         .map_err(command_error)?
@@ -925,9 +901,7 @@ pub fn open_catalogue_media(
     if !canonical_target.starts_with(&canonical_root) {
         return Err(command_error("media reference resolves outside the approved NAS root"));
     }
-    app.opener()
-        .open_path(canonical_target.to_string_lossy().into_owned(), None::<&str>)
-        .map_err(command_error)
+    Ok(canonical_target.to_string_lossy().into_owned())
 }
 
 fn loaded_info(
@@ -1196,16 +1170,14 @@ fn clean_optional(value: Option<String>, max: usize, label: &str) -> Result<Opti
     Ok(Some(value.to_owned()))
 }
 
-async fn fetch_backend_keys() -> Result<BackendKeys> {
-    reqwest::Client::new()
+fn fetch_backend_keys() -> Result<BackendKeys> {
+    reqwest::blocking::Client::new()
         .get(format!("{}/v1/crypto/public-keys", backend_url()))
         .send()
-        .await
         .map_err(command_error)?
         .error_for_status()
         .map_err(command_error)?
         .json()
-        .await
         .map_err(command_error)
 }
 
@@ -1236,29 +1208,12 @@ fn package_destination(value: &str) -> PathBuf {
 fn catalogue_key(package_id: &str, revision_id: &str) -> String {
     format!("{package_id}:{revision_id}")
 }
-fn credential_entry() -> Result<keyring::Entry> {
-    keyring::Entry::new(CREDENTIAL_SERVICE, CREDENTIAL_ACCOUNT).map_err(command_error)
-}
-fn load_identity() -> Result<StoredIdentity> {
-    let mut value = credential_entry()?.get_password().map_err(command_error)?;
-    let result = serde_json::from_str(&value).map_err(command_error);
-    value.zeroize();
-    result
-}
-fn save_identity(identity: &StoredIdentity) -> Result<()> {
-    let mut value = serde_json::to_string(identity).map_err(command_error)?;
-    let result = credential_entry()?.set_password(&value).map_err(command_error);
-    value.zeroize();
-    result
-}
 fn command_error(error: impl std::fmt::Display) -> CommandError {
-    CommandError {
-        message: error.to_string(),
-    }
+    CommandError::bad_request(error.to_string())
 }
 
 impl StoredIdentity {
-    fn device_key(&self) -> Result<DeviceKeyPair> {
+    pub fn device_key(&self) -> Result<DeviceKeyPair> {
         DeviceKeyPair::from_bytes(
             &self.device_key_id,
             B64.decode(&self.device_private_key).map_err(command_error)?,
@@ -1266,7 +1221,7 @@ impl StoredIdentity {
         )
         .map_err(command_error)
     }
-    fn verifying_key(&self, id: &str) -> Result<[u8; 32]> {
+    pub fn verifying_key(&self, id: &str) -> Result<[u8; 32]> {
         B64.decode(
             self.trusted_signing_keys
                 .get(id)

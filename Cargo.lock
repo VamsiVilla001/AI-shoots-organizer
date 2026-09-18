@@ -4663,7 +4663,9 @@ checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
  "base64 0.22.1",
  "bytes",
+ "futures-channel",
  "futures-core",
+ "futures-util",
  "http",
  "http-body",
  "http-body-util",
@@ -5316,11 +5318,14 @@ checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
 name = "skwad-app-core"
 version = "2.0.0-alpha.3"
 dependencies = [
+ "argon2",
+ "base64 0.22.1",
  "blake3",
  "chrono",
  "image",
  "num_cpus",
  "parking_lot",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "skwad-catalogue",

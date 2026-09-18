@@ -1,16 +1,14 @@
 //! SKWAD Media Organiser — application wiring.
 
-pub mod catalogue;
 pub mod commands;
 pub mod db_setup;
 pub mod events;
 pub mod library;
 pub mod models;
+pub mod native;
 pub mod premiere_api;
 pub mod premiere_plugin;
 pub mod protocol;
-pub mod roster;
-pub mod storage;
 
 // The application itself lives in `skwad-app-core`, which knows nothing about
 // Tauri. Re-exported under the same module names so the front-door modules
@@ -116,7 +114,7 @@ pub fn run() {
 
             // The roster lives in the library folder, so it is prepared once the
             // library is open and before anyone reaches the sign-in screen.
-            catalogue::ensure_local_auth(&state);
+            skwad_app_core::api::catalogue::ensure_local_auth(&state);
 
             // Lets an external process (the Premiere Pro panel) read Collections
             // over loopback HTTP — see premiere_api.rs for why that's necessary.
@@ -183,35 +181,35 @@ pub fn run() {
             commands::save_project,
             commands::delete_project,
             commands::replace_project_members,
-            catalogue::catalogue_session_status,
-            catalogue::sign_in_skwad,
-            catalogue::change_initial_password,
-            catalogue::list_local_users,
-            catalogue::create_local_user,
-            catalogue::update_local_user,
-            catalogue::reset_local_user_password,
-            catalogue::delete_local_user,
+            commands::catalogue_session_status,
+            commands::sign_in_skwad,
+            commands::change_initial_password,
+            commands::list_local_users,
+            commands::create_local_user,
+            commands::update_local_user,
+            commands::reset_local_user_password,
+            commands::delete_local_user,
             library::get_library_location,
             library::set_library_location,
             library::restart_for_library_change,
-            roster::preview_roster_file,
-            roster::import_roster,
-            roster::roster_summary,
-            roster::list_roster,
-            roster::search_roster,
-            roster::resolve_roster_name,
-            roster::clear_roster,
-            catalogue::sign_out_skwad,
-            catalogue::clear_authenticated_session,
-            catalogue::get_user_profile,
-            catalogue::update_user_profile,
-            catalogue::publish_skwad,
-            catalogue::load_skwad,
-            catalogue::approve_catalogue_library,
-            catalogue::list_loaded_catalogues,
-            catalogue::list_catalogue_groups,
-            catalogue::list_catalogue_media,
-            catalogue::open_catalogue_media,
+            commands::preview_roster_file,
+            commands::import_roster,
+            commands::roster_summary,
+            commands::list_roster,
+            commands::search_roster,
+            commands::resolve_roster_name,
+            commands::clear_roster,
+            commands::sign_out_skwad,
+            commands::clear_authenticated_session,
+            commands::get_user_profile,
+            commands::update_user_profile,
+            commands::publish_skwad,
+            commands::load_skwad,
+            commands::approve_catalogue_library,
+            commands::list_loaded_catalogues,
+            commands::list_catalogue_groups,
+            commands::list_catalogue_media,
+            native::open_catalogue_media,
             // shoots
             commands::list_shoots,
             commands::get_shoot,
@@ -226,15 +224,15 @@ pub fn run() {
             commands::reanalyse_shoot,
             commands::get_progress,
             commands::get_shoot_telemetry,
-            storage::get_shoot_storage,
+            commands::get_shoot_storage,
             commands::list_failed_jobs,
             // media
             commands::list_media,
             commands::get_media,
             commands::media_faces,
             commands::set_media_editorial,
-            commands::reveal_in_folder,
-            commands::open_path,
+            native::reveal_in_folder,
+            native::open_path,
             // players
             commands::list_people,
             commands::list_enrolled_people,

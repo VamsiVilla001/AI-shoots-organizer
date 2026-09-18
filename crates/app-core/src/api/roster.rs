@@ -8,16 +8,12 @@
 //!
 //! Both CSV and JSON are accepted because both are what people actually have.
 
-use std::{path::Path, sync::Arc};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use skwad_database::repo::roster::{self, RosterEntry};
-use tauri::State;
 
-use crate::{
-    commands::{CommandError, Result},
-    state::AppState,
-};
+use crate::api::{ApiError as CommandError, Ctx, Result};
 
 /// A roster file larger than this is not a roster.
 const MAX_ROSTER_BYTES: u64 = 8 * 1024 * 1024;
@@ -69,8 +65,7 @@ struct RawEntry {
 
 /// Reads a roster file and reports what is in it. Nothing is saved yet, so the
 /// user can look at the teams before committing to them.
-#[tauri::command]
-pub fn preview_roster_file(path: String) -> Result<RosterPreview> {
+pub fn preview_roster_file(_ctx: &Ctx, path: String) -> Result<RosterPreview> {
     let path = Path::new(&path);
     let size = std::fs::metadata(path)
         .map_err(|error| command_error(format!("could not open that file: {error}")))?
@@ -109,9 +104,8 @@ pub fn preview_roster_file(path: String) -> Result<RosterPreview> {
 }
 
 /// Saves a previewed roster, replacing whatever the same file gave last time.
-#[tauri::command]
 pub fn import_roster(
-    state: State<'_, Arc<AppState>>,
+    ctx: &Ctx,
     source: String,
     entries: Vec<RosterEntry>,
 ) -> Result<RosterSummary> {
@@ -125,42 +119,37 @@ pub fn import_roster(
     if entries.len() > MAX_ENTRIES {
         return Err(command_error("that roster has more rows than SKWAD will import"));
     }
-    let mut conn = state.db.conn().map_err(command_error)?;
+    let mut conn = ctx.state.db.conn().map_err(command_error)?;
     roster::replace_source(&mut conn, &source, &entries).map_err(command_error)?;
     summary(&mut conn)
 }
 
-#[tauri::command]
-pub fn roster_summary(state: State<'_, Arc<AppState>>) -> Result<RosterSummary> {
-    let mut conn = state.db.conn().map_err(command_error)?;
+pub fn roster_summary(ctx: &Ctx) -> Result<RosterSummary> {
+    let mut conn = ctx.state.db.conn().map_err(command_error)?;
     summary(&mut conn)
 }
 
-#[tauri::command]
-pub fn list_roster(state: State<'_, Arc<AppState>>) -> Result<Vec<RosterEntry>> {
-    let mut conn = state.db.conn().map_err(command_error)?;
+pub fn list_roster(ctx: &Ctx) -> Result<Vec<RosterEntry>> {
+    let mut conn = ctx.state.db.conn().map_err(command_error)?;
     roster::list(&mut conn).map_err(command_error)
 }
 
 /// Suggestions for a half-typed name. This is what turns "naresh" into
 /// "iQOOS8ULNaresh · iQOO Soul" in the naming field.
-#[tauri::command]
-pub fn search_roster(state: State<'_, Arc<AppState>>, query: String, limit: Option<usize>) -> Result<Vec<RosterEntry>> {
-    let mut conn = state.db.conn().map_err(command_error)?;
+pub fn search_roster(ctx: &Ctx, query: String, limit: Option<usize>) -> Result<Vec<RosterEntry>> {
+    let mut conn = ctx.state.db.conn().map_err(command_error)?;
     roster::search(&mut conn, &query, limit.unwrap_or(8).clamp(1, 50)).map_err(command_error)
 }
 
 /// The team a typed name belongs to, or nothing when the roster cannot say for
 /// certain. Callers treat `None` as "leave the team alone".
-#[tauri::command]
-pub fn resolve_roster_name(state: State<'_, Arc<AppState>>, name: String) -> Result<Option<RosterEntry>> {
-    let mut conn = state.db.conn().map_err(command_error)?;
+pub fn resolve_roster_name(ctx: &Ctx, name: String) -> Result<Option<RosterEntry>> {
+    let mut conn = ctx.state.db.conn().map_err(command_error)?;
     roster::resolve(&mut conn, &name).map_err(command_error)
 }
 
-#[tauri::command]
-pub fn clear_roster(state: State<'_, Arc<AppState>>, source: Option<String>) -> Result<RosterSummary> {
-    let mut conn = state.db.conn().map_err(command_error)?;
+pub fn clear_roster(ctx: &Ctx, source: Option<String>) -> Result<RosterSummary> {
+    let mut conn = ctx.state.db.conn().map_err(command_error)?;
     roster::clear(&mut conn, source.as_deref()).map_err(command_error)?;
     summary(&mut conn)
 }
@@ -385,9 +374,7 @@ fn dedupe(entries: Vec<RosterEntry>, problems: &mut Vec<String>) -> Vec<RosterEn
 }
 
 fn command_error(error: impl std::fmt::Display) -> CommandError {
-    CommandError {
-        message: error.to_string(),
-    }
+    CommandError::bad_request(error.to_string())
 }
 
 #[cfg(test)]

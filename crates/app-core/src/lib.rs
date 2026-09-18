@@ -20,6 +20,7 @@
 //! one model pair, inference threads capped, lazy load and idle unload — is
 //! deliberate and documented in [`worker`]. It is not a tuning knob.
 
+pub mod api;
 pub mod events;
 pub mod export;
 pub mod machine;

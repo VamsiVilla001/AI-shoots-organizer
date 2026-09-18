@@ -1,7 +1,6 @@
-use crate::{commands::Result, state::AppState};
+use crate::api::{Ctx, Result};
 use serde::Serialize;
-use std::{collections::HashSet, path::PathBuf, sync::Arc};
-use tauri::State;
+use std::{collections::HashSet, path::PathBuf};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -11,13 +10,12 @@ pub struct ShootStorage {
 }
 
 /// Kept separate from frequent progress events: file metadata can be slow.
-#[tauri::command]
-pub async fn get_shoot_storage(state: State<'_, Arc<AppState>>, shoot_id: i64) -> Result<ShootStorage> {
-    let state = Arc::clone(state.inner());
-    tauri::async_runtime::spawn_blocking(move || -> Result<ShootStorage> {
+pub fn get_shoot_storage(ctx: &Ctx, shoot_id: i64) -> Result<ShootStorage> {
+    #[allow(clippy::redundant_closure_call)]
+    (move || -> Result<ShootStorage> {
         let (record_bytes, paths) = {
             use skwad_database::{params, Db};
-            let mut conn = state.db.conn()?;
+            let mut conn = ctx.state.db.conn()?;
             let record_bytes = skwad_database::repo::storage::shoot_record_bytes(&mut conn, shoot_id)?;
             let mut paths = HashSet::<PathBuf>::new();
             for row in conn.rows(
@@ -31,7 +29,7 @@ pub async fn get_shoot_storage(state: State<'_, Arc<AppState>>, shoot_id: i64) -
                 "SELECT DISTINCT content_key FROM media WHERE shoot_id = $1 AND media_type = 'video'",
                 params![shoot_id],
             )? {
-                paths.insert(state.proxies.path_for(&row.get::<_, String>(0)));
+                paths.insert(ctx.state.proxies.path_for(&row.get::<_, String>(0)));
             }
             (record_bytes, paths)
         };
@@ -48,6 +46,5 @@ pub async fn get_shoot_storage(state: State<'_, Arc<AppState>>, shoot_id: i64) -
             record_bytes,
             preview_bytes,
         })
-    })
-    .await?
+    })()
 }
