@@ -39,7 +39,7 @@ const CREDENTIAL_SERVICE: &str = "com.skwad.mediaorganiser";
 /// when the database is unavailable there is no [`AppState`] and every other
 /// command would fail.
 #[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase", tag = "kind")]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind")]
 pub enum StartupStatus {
     /// The library opened; the app proper can render.
     Ready,

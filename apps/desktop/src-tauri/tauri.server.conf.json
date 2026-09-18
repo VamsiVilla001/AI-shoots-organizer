@@ -3,7 +3,7 @@
   "bundle": {
     "resources": {
       "resources/premiere-panel/*": "resources/premiere-panel/",
-      "../../../models/*.onnx": "models/"
+      "binaries/*": "server/"
     }
   }
 }

@@ -2,9 +2,10 @@
 // resources, so the installer ships the server next to the app (under
 // `server/` in the install folder). `npm run stage:server` builds it first.
 //
-// The folder is a resource rather than a Tauri sidecar on purpose: a sidecar
-// must exist at compile time of the desktop crate, which would break every
-// `cargo check` on a machine that has not built the server yet.
+// The folder is declared in `tauri.server.conf.json`, an overlay the build
+// scripts pass, rather than in `tauri.conf.json`: Tauri checks that a
+// resource exists at compile time of the desktop crate, and a plain
+// `cargo check` on a machine that has not built the server must keep working.
 
 import { copyFileSync, existsSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
