@@ -1,6 +1,7 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { pickFiles, pickFolder, pickSavePath } from '../pickers'
+import { hasLocalFileDialogs, pickFiles, pickFolder, pickSavePath } from '../pickers'
+import { transport, type HttpTransport } from '../transport'
 import * as api from '../api'
 import { useUi } from '../store'
 
@@ -11,6 +12,10 @@ export function CataloguesScreen() {
   const [passphrase, setPassphrase] = useState('')
   const [selected, setSelected] = useState<{ packageId: string; revisionId: string } | null>(null)
   const [groupId, setGroupId] = useState<number | null>(null)
+  // On a client: the file input that stands in for a native dialog, and the
+  // download the server offers once a catalogue is published there.
+  const uploadInput = useRef<HTMLInputElement | null>(null)
+  const [download, setDownload] = useState<string | null>(null)
 
   const session = useQuery({ queryKey: ['catalogueSession'], queryFn: api.catalogueSessionStatus })
   const loaded = useQuery({ queryKey: ['loadedCatalogues'], queryFn: api.listLoadedCatalogues })
@@ -34,21 +39,50 @@ export function CataloguesScreen() {
       pushNotice({ level: 'warn', message: 'Use an offline passphrase of at least 12 characters.' })
       return
     }
-    const destination = await pickSavePath({ title: 'Publish encrypted SKWAD catalogue', defaultPath: 'shoot.skwad', filters: [{ name: 'SKWAD catalogue', extensions: ['skwad'] }] })
-    if (!destination) return
+    // With a local file dialog the person picks where the package goes. On a
+    // client the server writes it to its outbox and hands back a download.
+    let destination = ''
+    if (hasLocalFileDialogs()) {
+      const picked = await pickSavePath({ title: 'Publish encrypted SKWAD catalogue', defaultPath: 'shoot.skwad', filters: [{ name: 'SKWAD catalogue', extensions: ['skwad'] }] })
+      if (!picked) return
+      destination = picked
+    }
     try {
       const result = await api.publishSkwad(activeShootId, destination, passphrase)
       setPassphrase('')
       pushNotice({ level: 'success', message: `Published ${result.mediaCount} encrypted references.` })
+      const active = transport()
+      if (active.kind === 'http') setDownload((active as HttpTransport).downloadUrl(result.path))
+    } catch (error) {
+      pushNotice({ level: 'error', message: String(error) })
+    }
+  }
+
+  // A client has no dialog into the server's disk: the file is uploaded
+  // first and loaded from where the server put it.
+  const loadUploaded = async (file: File) => {
+    const active = transport()
+    if (active.kind !== 'http') return
+    try {
+      const path = await (active as HttpTransport).upload(file.name, file)
+      await loadPath(path)
     } catch (error) {
       pushNotice({ level: 'error', message: String(error) })
     }
   }
 
   const load = async () => {
+    if (!hasLocalFileDialogs()) {
+      uploadInput.current?.click()
+      return
+    }
     const paths = await pickFiles({ title: 'Choose a SKWAD catalogue', multiple: false, filters: [{ name: 'SKWAD catalogue', extensions: ['skwad'] }] })
     const path = paths?.[0]
     if (!path) return
+    await loadPath(path)
+  }
+
+  const loadPath = async (path: string) => {
     try {
       const result = await api.loadSkwad(path, passphrase || null)
       setPassphrase('')
@@ -77,7 +111,7 @@ export function CataloguesScreen() {
   return <>
     <div className="workspace-header">
       <div><h1>Shared Catalogues</h1><p>Encrypted metadata only. Originals, thumbnails, face crops and embeddings stay local.</p></div>
-      <div className="actions"><button onClick={load}>Load .skwad</button><button className="primary" onClick={publish} disabled={activeShootId === null || !session.data?.authenticatedOnce}>Publish current shoot</button></div>
+      <div className="actions"><button onClick={load}>Load .skwad</button><input ref={uploadInput} type="file" accept=".skwad" style={{ display: 'none' }} onChange={(e) => { const file = e.target.files?.[0]; e.target.value = ''; if (file) void loadUploaded(file) }} />{download && <a className="button" href={download} download>Download published catalogue</a>}<button className="primary" onClick={publish} disabled={activeShootId === null || !session.data?.authenticatedOnce}>Publish current shoot</button></div>
     </div>
     <div className="settings-grid">
       <section className="card">

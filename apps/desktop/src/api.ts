@@ -386,3 +386,24 @@ export const forgetMachineEnrolment = () => call<WorkerStatus>('forget_machine_e
 export const setWorkerEnabled = (enabled: boolean) => call<WorkerStatus>('set_worker_enabled', { enabled })
 export const updateWorkerSettings = (settings: MachineSettings) =>
   call<WorkerStatus>('update_worker_settings', { settings })
+
+// --- this machine's view of a file -----------------------------------------
+
+/**
+ * Where a media file is *from here*. On the machine that owns the library it
+ * is the indexed path. On a client it is the shoot's share mapping joined
+ * with the file's relative path — when the administrator has set one — and
+ * otherwise the server's own path, which Explorer will not find.
+ */
+export async function localPathFor(item: Pick<Media, 'path' | 'shootId' | 'normalizedRelativePath'>): Promise<string> {
+  if (transport().kind === 'tauri' || !item.normalizedRelativePath) return item.path
+  const shoot = await getShoot(item.shootId).catch(() => null)
+  const share = shoot?.sharePath?.replace(/[\\/]+$/, '')
+  if (!share) return item.path
+  const separator = share.includes('\\') ? '\\' : '/'
+  return `${share}${separator}${item.normalizedRelativePath.split('/').join(separator)}`
+}
+
+/** "Show in folder" for a media row, translated for this machine first. */
+export const revealMedia = async (item: Pick<Media, 'path' | 'shootId' | 'normalizedRelativePath'>) =>
+  revealInFolder(await localPathFor(item))

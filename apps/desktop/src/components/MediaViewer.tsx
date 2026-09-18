@@ -348,7 +348,7 @@ export function MediaViewer(props: { mediaId: number; preferVideoFaces?: boolean
               )}
             </>
           )}
-          <button className="small" onClick={() => api.revealInFolder(item.path)}>
+          <button className="small" onClick={() => void api.revealMedia(item)}>
             Show in folder
           </button>
           <button className="small" onClick={closeViewer}>
@@ -535,7 +535,7 @@ export function MediaViewer(props: { mediaId: number; preferVideoFaces?: boolean
           x={menuAt.x}
           y={menuAt.y}
           onClose={() => setMenuAt(null)}
-          onShowFolder={() => api.revealInFolder(item.path)}
+          onShowFolder={() => void api.revealMedia(item)}
           onEditorial={(args) => setEditorial.mutate({ mediaIds: [item.id], ...args })}
         />
       )}

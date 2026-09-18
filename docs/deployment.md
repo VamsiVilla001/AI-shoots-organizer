@@ -389,3 +389,76 @@ If updates get frequent enough to be annoying, Tauri's updater plugin can be
 added — it needs a signing key pair, `createUpdaterArtifacts` turned on, and a
 static JSON endpoint (GitHub Releases is fine). Worth it once other people
 depend on the app; unnecessary while it is one or two editors.
+
+## One server, many clients
+
+A studio no longer has to point every machine at the same PostgreSQL. One
+machine — the one with the library folder, the GPU and the database — runs
+`skwad-server`; every other machine is a *client* that holds nothing but the
+server's address. Clients sign in with their usual account, see the same
+library, and can lend their own GPU back to the server. The design is in
+[server-client-architecture.md](server-client-architecture.md); this section is
+the operator's view.
+
+### The server
+
+1. Install PostgreSQL and run `npm run db:setup` on the server machine, as for
+   a single edit bay.
+2. Put the settings in `%PROGRAMDATA%\SKWAD\server.env` (or pass flags):
+
+   | Key | Meaning |
+   | --- | --- |
+   | `SKWAD_SERVER_BIND` | `0.0.0.0:8420` to listen on the LAN |
+   | `SKWAD_SERVER_LIBRARY` | the library folder (models, auth, caches) |
+   | `SKWAD_DATABASE_URL` | `postgres://user:pass@host:5432/skwad` |
+   | `SKWAD_SERVER_MEDIA_ROOTS` | folders shoots may live under — the folder browser clients see |
+   | `SKWAD_SERVER_TLS_CERT` / `_KEY` | PEM pair; use TLS beyond a trusted LAN |
+   | `SKWAD_SERVER_LOCAL_ANALYSIS` | `false` on a server with no GPU: it scans, indexes and finishes, and leaves every analysis to enrolled workers |
+
+3. `skwad-server create-user --email … --admin` for the first administrator,
+   `skwad-server doctor` to check the box, `skwad-server install` to register the
+   `SkwadServer` Windows service, `skwad-server start`.
+4. `GET /health` says what is wrong, without a session.
+
+Shoots live under the media roots. For clients to open originals (double-click,
+"show in folder", worker mode reading from the share instead of downloading),
+give each shoot a **share path** — the UNC path clients reach the same folder
+by — in the shoot's settings.
+
+### A client
+
+Install the desktop app as usual. On the database screen choose **Or use a
+SKWAD server**, enter `https://server:8420`, restart. From then on the machine
+keeps only `client.json` in its app data (`SKWAD_SERVER_URL` overrides it) and
+talks HTTP; there is no database, no library folder and no local queue. A
+client that cannot reach its server at launch shows a retry screen with the
+address, and can go back to a local library from there.
+
+What a client cannot do: install the Premiere Pro panel (the panel's loopback
+bridge needs the library), and pick files with a native dialog for things that
+live on the server — shoot folders come from the server's folder browser, a
+`.skwad` catalogue is uploaded, a published one is downloaded.
+
+### Worker mode
+
+A client with a GPU can analyse for the server:
+
+1. Signed in as an administrator on the client, open **Settings → Worker
+   mode** and **Enrol this machine**. The server records the machine and hands
+   the client a token it keeps in `client.json`; the roster under **Worker
+   machines** shows it to everyone.
+2. **Start contributing.** The client fetches the server's model pair by
+   content hash (downloading what it lacks), then claims analysis jobs over
+   `/api/work/*`, runs them with its own accelerator and worker count (set in
+   the same card — they are this machine's, not the server's), and posts the
+   results back. The server applies them exactly as its own. Files are read
+   from the shoot's share path when it resolves on the client, and downloaded
+   from the server otherwise.
+3. A job the client holds is leased and heartbeated; close the laptop lid and
+   the server's reaper hands the job to someone else within a lease. Cancel or
+   pause on the server and the client stops the file it is on.
+4. **Revoke** from the roster stops a machine at its next claim. The client
+   can also **Forget enrolment** on its side.
+
+Worker traffic uses the machine token, never a person's session, so a laptop
+keeps contributing after its owner signs out.

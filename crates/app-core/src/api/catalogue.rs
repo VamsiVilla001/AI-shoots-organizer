@@ -791,7 +791,17 @@ pub fn publish_skwad(
         )));
     }
     let package = signed.bytes().map_err(command_error)?;
-    let destination = package_destination(&destination);
+    // A client has no dialog into this disk: an empty destination means the
+    // library's own outbox, which the server hands back as a download.
+    let destination = if destination.trim().is_empty() {
+        ctx.state.paths.root.join("catalogues").join("outbox").join(format!(
+            "{}-{}.skwad",
+            package_id.to_string().chars().take(8).collect::<String>(),
+            chrono::Utc::now().format("%Y%m%d-%H%M%S")
+        ))
+    } else {
+        package_destination(&destination)
+    };
     if let Some(parent) = destination.parent() {
         std::fs::create_dir_all(parent).map_err(command_error)?;
     }

@@ -190,7 +190,7 @@ export function MediaGrid(props: {
         y={menu.y}
         onClose={() => setMenu(null)}
         onOpen={() => openMedia(menuItem)}
-        onShowFolder={() => void api.revealInFolder(menuItem.path)}
+        onShowFolder={() => void api.revealMedia(menuItem)}
         onEditorial={props.onEditorial ? (args) => props.onEditorial!({ mediaIds: [menuItem.id], ...args }) : undefined}
         onClipboard={props.onClipboard ? (mode) => props.onClipboard!(mode, clipboardTargets(menuItem)) : undefined}
         canCut={props.canCut}

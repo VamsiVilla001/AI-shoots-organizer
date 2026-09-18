@@ -213,6 +213,10 @@ export interface HttpTransport extends Transport {
    * this machine's own events (its worker) go there. Absent in a browser.
    */
   readonly local?: Transport
+  /** Puts a file on the server (a `.skwad` to load); answers with the server path. */
+  upload(name: string, bytes: Blob): Promise<string>
+  /** A URL the browser can download a published catalogue from. */
+  downloadUrl(serverPath: string): string
   close(): void
 }
 
@@ -329,6 +333,24 @@ export function createHttpTransport(initial: HttpConnection, local?: Transport):
     browse: {
       roots: () => getJson<FsRoot[]>('/api/fs/roots'),
       list: (path: string) => getJson<FsListing>(`/api/fs/list?path=${encodeURIComponent(path)}`),
+    },
+
+    async upload(name: string, bytes: Blob) {
+      const response = await fetch(url(`/api/catalogues/upload?name=${encodeURIComponent(name)}`), {
+        method: 'POST',
+        headers: { ...headersFor(false), 'Content-Type': 'application/octet-stream' },
+        credentials: 'include',
+        body: bytes,
+      })
+      if (!response.ok) throw await failure(response)
+      const answer = (await response.json()) as { path: string }
+      return answer.path
+    },
+
+    downloadUrl(serverPath: string) {
+      const query = [`path=${encodeURIComponent(serverPath)}`]
+      if (connection.tokenInUrl && connection.token) query.push(`token=${encodeURIComponent(connection.token)}`)
+      return url(`/api/catalogues/download?${query.join('&')}`)
     },
 
     async listen<T>(event: string, handler: (payload: T) => void) {

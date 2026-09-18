@@ -23,6 +23,7 @@
 //! it speaks.
 
 pub mod auth;
+pub mod catalogues;
 pub mod config;
 pub mod error;
 pub mod fsbrowse;
@@ -371,6 +372,8 @@ pub fn router(state: Arc<ServerState>) -> Router {
         .route("/api/events", get(sse::stream))
         .route("/api/fs/roots", get(fsbrowse::roots))
         .route("/api/fs/list", get(fsbrowse::list))
+        .route("/api/catalogues/upload", post(catalogues::upload))
+        .route("/api/catalogues/download", get(catalogues::download))
         .route_layer(middleware::from_fn(require_session));
 
     // `invoke` is what a signed-out client calls to sign in, so it cannot sit
@@ -403,7 +406,7 @@ pub fn router(state: Arc<ServerState>) -> Router {
         .route("/health", get(health::health))
         .merge(media)
         .merge(api)
-        .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
+        .layer(DefaultBodyLimit::max(catalogues::MAX_UPLOAD_BYTES + 1024))
         .layer(middleware::from_fn_with_state(Arc::clone(&state), attach_session));
 
     if let Some(dir) = state.config.web_dir.clone().filter(|dir| dir.is_dir()) {

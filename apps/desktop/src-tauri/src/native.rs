@@ -22,6 +22,11 @@ fn err(message: impl Into<String>) -> CommandError {
 /// Reveals a file in Explorer or Finder.
 #[tauri::command]
 pub fn reveal_in_folder(app: AppHandle, path: String) -> Result<()> {
+    if !std::path::Path::new(&path).exists() {
+        return Err(err(format!(
+            "{path} is not reachable from this machine. If the library is on a server, set the shoot's share path so files can be found here."
+        )));
+    }
     app.opener()
         .reveal_item_in_dir(&path)
         .map_err(|e| err(format!("could not open {path}: {e}")))
