@@ -8,7 +8,7 @@ import { useUi } from '../store'
 
 const PAGE_SIZE = 120
 
-export function MediaBrowser({ shootId, excludeShootId, groupId, personId, onCollect, onAddToExisting }: { shootId?: number; excludeShootId?: number; groupId?: number; personId?: number; onCollect?: (media: Media[]) => void; onAddToExisting?: (media: Media[]) => void }) {
+export function MediaBrowser({ shootId, excludeShootId, groupId, personId, fixedTag, onCollect, onAddToExisting }: { shootId?: number; excludeShootId?: number; groupId?: number; personId?: number; /** Pins the browser to one tag value; the filter control is hidden. */ fixedTag?: { tag: string | null; value: string }; onCollect?: (media: Media[]) => void; onAddToExisting?: (media: Media[]) => void }) {
   const [search, setSearch] = useState('')
   const [query, setQuery] = useState('')
   const [type, setType] = useState('all')
@@ -23,7 +23,7 @@ export function MediaBrowser({ shootId, excludeShootId, groupId, personId, onCol
   // A tag value to filter by, typed with suggestions from the taxonomy;
   // the tag name is remembered when a suggestion is picked so "Final" under
   // Stage does not also match "Final" under some other tag.
-  const [tagFilter, setTagFilter] = useState<{ tag: string; value: string }>({ tag: '', value: '' })
+  const [tagFilter, setTagFilter] = useState<{ tag: string; value: string }>(fixedTag ? { tag: fixedTag.tag ?? '', value: fixedTag.value } : { tag: '', value: '' })
   const [bulkTag, setBulkTag] = useState(false)
   const client = useQueryClient()
   const notice = useUi(s => s.pushNotice)
@@ -91,7 +91,7 @@ export function MediaBrowser({ shootId, excludeShootId, groupId, personId, onCol
         <button type="button" role="tab" aria-pressed={type === 'video'} onClick={() => filter(() => setType('video'))}>Videos</button>
       </div>
       {personId === undefined && <label><span className="sr-only">Find a person</span><select value={person} onChange={e => filter(() => setPerson(e.target.value))}><option value="all">Find a person</option><option value="unknown">Unidentified people</option>{people.data?.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></label>}
-      <TagFilter tag={tagFilter.tag} value={tagFilter.value} onChange={next => filter(() => setTagFilter(next))} compact />
+      {!fixedTag && <TagFilter tag={tagFilter.tag} value={tagFilter.value} onChange={next => filter(() => setTagFilter(next))} compact />}
       <button aria-expanded={advanced} onClick={() => setAdvanced(!advanced)}>More filters</button>
     </div>
     {advanced && <div className="pw-toolbar pw-filter-details"><label>Quality <select value={quality} onChange={e => filter(() => setQuality(e.target.value))}><option value="all">All media</option><option value="best">Best shots</option><option value="duplicates">Duplicates</option></select></label><label>Rating <select value={rating} onChange={e => filter(() => setRating(Number(e.target.value)))}><option value={0}>Any rating</option>{[1, 2, 3, 4, 5].map(n => <option key={n} value={n}>{n}+ stars</option>)}</select></label><label>Flag <select value={pickState} onChange={e => filter(() => setPickState(e.target.value as typeof pickState))}><option value="all">Any flag</option><option value="pick">Picks</option><option value="reject">Rejects</option><option value="none">Unflagged</option></select></label><label>Sort <select value={sort} onChange={e => filter(() => setSort(e.target.value as typeof sort))}><option value="capturedAt">Date captured</option><option value="filename">Filename</option><option value="quality">Quality</option><option value="rating">Rating</option></select></label></div>}

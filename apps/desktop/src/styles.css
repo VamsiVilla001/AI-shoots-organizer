@@ -3518,3 +3518,5 @@ dialog.modal-backdrop::backdrop {
 .pw-tag-collect { align-items: center; }
 
 .pw-add-by-tag { align-items: center; margin-top: 8px; }
+
+.pw-taxonomy-tagged { margin-top: 28px; }
