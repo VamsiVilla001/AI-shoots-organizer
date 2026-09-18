@@ -18,15 +18,44 @@ import { FaceCrop } from '../components/FaceCrop'
 import { MediaGrid } from '../components/MediaGrid'
 import { ProgressPanel } from '../components/ProgressPanel'
 import { Modal } from '../components/Modal'
+import { TagNamesDatalist, TagPicker } from '../components/TagPicker'
 import { useUi } from '../store'
 
-export function AlbumsScreen({ onAddToCollection }: { onAddToCollection?: (album: Album) => void } = {}) {
+/**
+ * `withTags` is the Auto tags view: every automatic group carries a tag
+ * picker, and the groups are split into "Identified" (recognised people,
+ * pairings, teams) and "Needs review" (unnamed face groups) so a tag put on
+ * one collection's review pile never looks like part of another's.
+ */
+export function AlbumsScreen({ onAddToCollection, withTags = false }: { onAddToCollection?: (album: Album) => void; withTags?: boolean } = {}) {
   const shootId = useUi((s) => s.activeShootId)
   if (shootId === null) return <div className="empty-state">Open a shoot first.</div>
-  return <AlbumsBody shootId={shootId} onAddToCollection={onAddToCollection} />
+  return <AlbumsBody shootId={shootId} onAddToCollection={onAddToCollection} withTags={withTags} />
 }
 
-function AlbumsBody({ shootId, onAddToCollection }: { shootId: number; onAddToCollection?: (album: Album) => void }) {
+/**
+ * The key an automatic group's tags are stored under. Albums are rebuilt
+ * with new ids after every analysis, so the key names what the group *is*
+ * within its collection — the person, the pairing, the team, the bucket —
+ * and the tags survive a rebuild. Clusters keep their id until the shoot is
+ * re-analysed, which also discards them.
+ */
+export function albumTagKey(album: Album): string {
+  switch (album.albumType) {
+    case 'player':
+      return `shoot:${album.shootId}/person:${album.personIds[0] ?? album.name}`
+    case 'multiPlayer':
+      return `shoot:${album.shootId}/persons:${[...album.personIds].sort((a, b) => a - b).join('+')}`
+    default:
+      return `shoot:${album.shootId}/${album.albumType}:${album.name}`
+  }
+}
+
+export function clusterTagKey(cluster: ClusterSummary): string {
+  return `shoot:${cluster.shootId}/cluster:${cluster.id}`
+}
+
+function AlbumsBody({ shootId, onAddToCollection, withTags = false }: { shootId: number; onAddToCollection?: (album: Album) => void; withTags?: boolean }) {
   const [groupingChoice, setGroupingChoice] = useState<'face' | 'size'>('face')
   const [appliedGrouping, setAppliedGrouping] = useState<'face' | 'size'>('face')
   const [openAlbum, setOpenAlbum] = useState<Album | null>(null)
@@ -155,7 +184,8 @@ function AlbumsBody({ shootId, onAddToCollection }: { shootId: number; onAddToCo
   }
 
   return (
-    <>
+    <div className={withTags ? 'album-sections' : undefined}>
+      {withTags && <TagNamesDatalist />}
       <div className="workspace-header">
         <h1>{shoot.data?.name ?? 'AI Albums'}</h1>
         <div className="actions">
@@ -226,6 +256,7 @@ function AlbumsBody({ shootId, onAddToCollection }: { shootId: number; onAddToCo
         <>
           {/* While searching, a section with no matches is noise rather than
               information — the count above already says what was filtered out. */}
+          {withTags && <h2 className="album-super">Identified</h2>}
           {(grouped.players.length > 0 || query === '') && (
           <Section title="Players">
             {grouped.players.length === 0 && (
@@ -266,6 +297,7 @@ function AlbumsBody({ shootId, onAddToCollection }: { shootId: number; onAddToCo
                     selected={personId !== undefined && validSelectedPersonIds.includes(personId)}
                     onToggle={personId === undefined ? undefined : () => togglePerson(personId)}
                     onAddToCollection={onAddToCollection}
+                    withTags={withTags}
                   />
                 )
               })}
@@ -277,7 +309,7 @@ function AlbumsBody({ shootId, onAddToCollection }: { shootId: number; onAddToCo
             <Section title="Multiple Players">
               <div className="card-grid">
                 {grouped.multi.map((album) => (
-                  <AlbumCard key={album.id} album={album} onOpen={() => setOpenAlbum(album)} onAddToCollection={onAddToCollection} />
+                  <AlbumCard key={album.id} album={album} onOpen={() => setOpenAlbum(album)} onAddToCollection={onAddToCollection} withTags={withTags} />
                 ))}
               </div>
             </Section>
@@ -287,12 +319,13 @@ function AlbumsBody({ shootId, onAddToCollection }: { shootId: number; onAddToCo
             <Section title="Teams">
               <div className="card-grid">
                 {grouped.teams.map((album) => (
-                  <AlbumCard key={album.id} album={album} onOpen={() => setOpenAlbum(album)} onAddToCollection={onAddToCollection} />
+                  <AlbumCard key={album.id} album={album} onOpen={() => setOpenAlbum(album)} onAddToCollection={onAddToCollection} withTags={withTags} />
                 ))}
               </div>
             </Section>
           )}
 
+          {withTags && <h2 className="album-super">Needs review</h2>}
           {(visibleClusters.length + grouped.unidentified.length > 0 || query === '') && (
           <Section title="Needs Review">
             {visibleClusters.length === 0 && grouped.unidentified.length === 0 && (
@@ -304,10 +337,11 @@ function AlbumsBody({ shootId, onAddToCollection }: { shootId: number; onAddToCo
                   key={cluster.id}
                   cluster={cluster}
                   onName={() => setNamingCluster(cluster)}
+                  withTags={withTags}
                 />
               ))}
               {grouped.unidentified.map((album) => (
-                <AlbumCard key={album.id} album={album} onOpen={() => setOpenAlbum(album)} onAddToCollection={onAddToCollection} />
+                <AlbumCard key={album.id} album={album} onOpen={() => setOpenAlbum(album)} onAddToCollection={onAddToCollection} withTags={withTags} />
               ))}
             </div>
           </Section>
@@ -320,7 +354,7 @@ function AlbumsBody({ shootId, onAddToCollection }: { shootId: number; onAddToCo
           </div>
           <div className="card-grid">
             {grouped.groupSize.map((album) => (
-              <AlbumCard key={album.id} album={album} onOpen={() => setOpenAlbum(album)} onAddToCollection={onAddToCollection} />
+              <AlbumCard key={album.id} album={album} onOpen={() => setOpenAlbum(album)} onAddToCollection={onAddToCollection} withTags={withTags} />
             ))}
           </div>
         </Section>
@@ -329,7 +363,7 @@ function AlbumsBody({ shootId, onAddToCollection }: { shootId: number; onAddToCo
       {namingCluster && (
         <NameClusterModal cluster={namingCluster} onClose={() => setNamingCluster(null)} />
       )}
-    </>
+    </div>
   )
 }
 
@@ -348,12 +382,14 @@ function AlbumCard({
   selected = false,
   onToggle,
   onAddToCollection,
+  withTags = false,
 }: {
   album: Album
   onOpen: () => void
   selected?: boolean
   onToggle?: () => void
   onAddToCollection?: (album: Album) => void
+  withTags?: boolean
 }) {
   const queryClient = useQueryClient()
   const pushNotice = useUi((s) => s.pushNotice)
@@ -397,6 +433,7 @@ function AlbumCard({
           {formatCount(album.photoCount)} photos · {formatCount(album.videoCount)} videos
         </span>
       </div>
+      {withTags && <TagPicker kind="album" assetKey={albumTagKey(album)} compact />}
       <div style={{ marginTop: 10 }} onClick={(e) => e.stopPropagation()}>
         {onAddToCollection ? <button className="small primary" onClick={() => onAddToCollection(album)}>Add to collection</button> : <button className="small" disabled={toGroup.isPending} onClick={() => toGroup.mutate()}>{toGroup.isPending ? 'Adding…' : 'Make this a group'}</button>}
       </div>
@@ -404,7 +441,7 @@ function AlbumCard({
   )
 }
 
-function ClusterCard({ cluster, onName }: { cluster: ClusterSummary; onName: () => void }) {
+function ClusterCard({ cluster, onName, withTags = false }: { cluster: ClusterSummary; onName: () => void; withTags?: boolean }) {
   return (
     <div className="card shoot-card" onClick={onName}>
       {cluster.coverMediaId != null && (
@@ -421,6 +458,7 @@ function ClusterCard({ cluster, onName }: { cluster: ClusterSummary; onName: () 
           {formatCount(cluster.mediaCount)} media · {formatCount(cluster.faceCount)} faces
         </span>
       </div>
+      {withTags && <TagPicker kind="cluster" assetKey={clusterTagKey(cluster)} compact />}
       <div style={{ marginTop: 10 }} onClick={(e) => e.stopPropagation()}>
         <button className="small primary" onClick={onName}>
           Name this person

@@ -14,6 +14,12 @@ import type {
   MachineRosterEntry,
   MachineSettings,
   WorkerStatus,
+  AssetTag,
+  TagAssetKind,
+  TagSuggestion,
+  TagSummary,
+  TaxonomyImportSummary,
+  TaxonomyPreview,
   Album,
   AppInfo,
   AppSettings,
@@ -410,3 +416,27 @@ export const revealMedia = async (item: Pick<Media, 'path' | 'shootId' | 'normal
 
 /** The network spelling of a path on a mapped drive, or null when it is not on one (desktop only). */
 export const networkPath = (path: string) => call<string | null>('network_path', { path })
+
+// --- taxonomy ----------------------------------------------------------------
+
+export const listTags = () => call<TagSummary[]>('list_tags')
+export const saveTag = (name: string, values: string[]) => call<TagSummary>('save_tag', { name, values })
+export const renameTag = (tagId: number, name: string) => call<TagSummary>('rename_tag', { tagId, name })
+export const deleteTag = (tagId: number) => call<boolean>('delete_tag', { tagId })
+export const deleteTagValue = (valueId: number) => call<boolean>('delete_tag_value', { valueId })
+export const assetTags = (kind: TagAssetKind, key: string) => call<AssetTag[]>('asset_tags', { kind, key })
+export const assetsTags = (kind: TagAssetKind, keys: string[]) =>
+  call<Record<string, AssetTag[]>>('assets_tags', { kind, keys })
+export const assignTag = (kind: TagAssetKind, key: string, tag: string, value: string) =>
+  call<AssetTag[]>('assign_tag', { kind, key, tag, value })
+export const assignTagToMany = (kind: TagAssetKind, keys: string[], tag: string, value: string) =>
+  call<number>('assign_tag_to_many', { kind, keys, tag, value })
+export const unassignTag = (kind: TagAssetKind, key: string, valueId: number) =>
+  call<AssetTag[]>('unassign_tag', { kind, key, valueId })
+export const suggestTagValues = (tag: string | null, query: string, limit?: number) =>
+  call<TagSuggestion[]>('suggest_tag_values', { tag, query, limit: limit ?? null })
+export const previewTaxonomyText = (source: string, text: string) =>
+  call<TaxonomyPreview>('preview_taxonomy_text', { source, text })
+export const importTaxonomyText = (source: string, text: string) =>
+  call<TaxonomyImportSummary>('import_taxonomy_text', { source, text })
+export const exportTaxonomy = (format: 'csv' | 'json') => call<string>('export_taxonomy', { format })

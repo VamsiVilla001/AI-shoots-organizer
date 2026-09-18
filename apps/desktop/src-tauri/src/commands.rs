@@ -138,6 +138,8 @@ mod generated {
     use skwad_app_core::api::machines::*;
     use skwad_app_core::api::roster::*;
     use skwad_app_core::api::storage::*;
+    use skwad_app_core::api::taxonomy::*;
+    use std::collections::HashMap;
     use skwad_app_core::models::ModelStatus;
     use skwad_app_core::settings::AppSettings;
     use skwad_catalogue::{CatalogueGroup, CatalogueMedia};

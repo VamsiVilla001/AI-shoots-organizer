@@ -9,6 +9,7 @@ import { ExportCollectionDialog } from './exportCollection'
 import { WorkspaceDialog } from './WorkspaceDialog'
 import { RosterImport } from '../components/RosterImport'
 import { MediaBrowser } from './mediaBrowser'
+import { TagNamesDatalist, TagPicker } from '../components/TagPicker'
 import {
   createProjectDraft,
   PROJECT_TYPES,
@@ -302,7 +303,7 @@ function CollectionMedia({ collection, onExport }: { collection: ProjectCollecti
   // The source picker only chooses what to *browse*; exporting always takes
   // the whole collection, which is what "export this collection" means to
   // someone handing the folder on.
-  return <><div className="pw-toolbar">{collection.sources.length > 1 && <label>Media source <select value={index} onChange={event => setIndex(Number(event.target.value))}>{collection.sources.map((item, sourceIndex) => <option key={`${item.shootId}-${item.groupId}`} value={sourceIndex}>{shoots.data?.find(shoot => shoot.id === item.shootId)?.name ?? `Source ${sourceIndex + 1}`}</option>)}</select></label>}<button className="primary" onClick={onExport}>Export collection</button></div><MediaBrowser key={`${source.shootId}-${source.groupId}`} shootId={source.shootId} groupId={source.groupId} /></>
+  return <><div className="pw-toolbar">{collection.sources.length > 1 && <label>Media source <select value={index} onChange={event => setIndex(Number(event.target.value))}>{collection.sources.map((item, sourceIndex) => <option key={`${item.shootId}-${item.groupId}`} value={sourceIndex}>{shoots.data?.find(shoot => shoot.id === item.shootId)?.name ?? `Source ${sourceIndex + 1}`}</option>)}</select></label>}<button className="primary" onClick={onExport}>Export collection</button></div><div className="card collection-tags"><TagNamesDatalist /><TagPicker kind="collection" assetKey={collection.id} compact label="Collection tags" /></div><MediaBrowser key={`${source.shootId}-${source.groupId}`} shootId={source.shootId} groupId={source.groupId} /></>
 }
 
 function ProjectDialog({ project, canManageAccess = true, onClose, onSave, onDelete }: { project?: Project; canManageAccess?: boolean; onClose: () => void; onSave: (name: string, kind: string, visibility: ProjectVisibility) => void; onDelete?: () => void }) {

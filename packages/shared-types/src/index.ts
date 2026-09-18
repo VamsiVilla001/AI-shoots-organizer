@@ -676,6 +676,9 @@ export interface MediaQuery {
   onlyDuplicates?: boolean
   minRating?: number | null
   pickState?: MediaPickState | null
+  /** Only media carrying this tag value; `tagName` narrows it to one tag. */
+  tagValue?: string | null
+  tagName?: string | null
   sort?: 'capturedAt' | 'quality' | 'rating' | 'filename' | null
   limit?: number | null
   offset?: number | null
@@ -964,4 +967,62 @@ export interface WorkerStatus {
   lastError: string | null
   remote: RemoteStatus | null
   machineSettings: MachineSettings
+}
+
+// ---------------------------------------------------------------------------
+// Taxonomy: tags, their values, and what they are attached to
+// ---------------------------------------------------------------------------
+
+/** What a tag value may be attached to. */
+export type TagAssetKind = 'media' | 'album' | 'cluster' | 'collection'
+
+export interface TagValue {
+  id: number
+  value: string
+  /** How many assets carry this value. */
+  uses: number
+}
+
+/** One tag with every value it has been given. */
+export interface TagSummary {
+  id: number
+  name: string
+  values: TagValue[]
+  createdAt: string
+  updatedAt: string
+}
+
+/** One assignment as an asset sees it. */
+export interface AssetTag {
+  tagId: number
+  tag: string
+  valueId: number
+  value: string
+}
+
+/** A value offered while someone types. */
+export interface TagSuggestion {
+  tagId: number
+  tag: string
+  valueId: number
+  value: string
+  uses: number
+}
+
+/** One row of a taxonomy file: a tag and its values. */
+export interface TaxonomyEntry {
+  name: string
+  values: string[]
+}
+
+export interface TaxonomyPreview {
+  entries: TaxonomyEntry[]
+  problems: string[]
+}
+
+export interface TaxonomyImportSummary {
+  tagsCreated: number
+  valuesCreated: number
+  tagsSeen: number
+  valuesSeen: number
 }

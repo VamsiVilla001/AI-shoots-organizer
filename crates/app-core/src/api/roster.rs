@@ -291,7 +291,7 @@ fn parse_csv(text: &str) -> Result<(Vec<RosterEntry>, Vec<String>)> {
 
 /// Splits CSV text into rows of cells, honouring quoted fields that contain
 /// commas, quotes and line breaks — a team called `Soul, Inc.` is one cell.
-fn split_rows(text: &str) -> Vec<Vec<String>> {
+pub(crate) fn split_rows(text: &str) -> Vec<Vec<String>> {
     // Spreadsheets in several European locales export with semicolons; pick
     // whichever separator the first line actually uses.
     let first_line = text.lines().next().unwrap_or("");

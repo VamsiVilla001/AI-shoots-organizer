@@ -21,6 +21,7 @@ pub mod roster;
 pub mod settings;
 pub mod shoots;
 pub mod storage;
+pub mod taxonomy;
 pub mod telemetry;
 pub mod video;
 

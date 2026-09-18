@@ -689,6 +689,10 @@ pub struct MediaQuery {
     pub min_rating: Option<i64>,
     /// none | pick | reject. `None` does not filter.
     pub pick_state: Option<String>,
+    /// Only media carrying this tag value (`tag_name` narrows it to one tag;
+    /// otherwise the value is matched under any tag).
+    pub tag_value: Option<String>,
+    pub tag_name: Option<String>,
     /// capturedAt (default) | quality | rating | filename.
     pub sort: Option<String>,
     pub limit: Option<i64>,

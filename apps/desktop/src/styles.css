@@ -3461,3 +3461,52 @@ dialog.modal-backdrop {
 dialog.modal-backdrop::backdrop {
   background: rgba(5, 6, 10, 0.7);
 }
+
+/* --- taxonomy: tag chips, pickers and the manager ------------------------- */
+
+.tag-picker { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.tag-picker-label { font-size: 11px; color: var(--muted-foreground); text-transform: uppercase; letter-spacing: 0.04em; }
+.tag-chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.tag-group { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.tag-group-name { font-size: 11px; color: var(--muted-foreground); margin-right: 2px; }
+.tag-chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 6px 3px 10px; border-radius: 14px; background: var(--secondary, var(--bg-raised)); border: 1px solid var(--border); font-size: 12px; line-height: 1.4; }
+.tag-chip small { color: var(--muted-foreground); font-size: 10px; }
+.tag-chip button { min-height: 0 !important; width: 18px; height: 18px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: var(--muted-foreground); font-size: 13px; line-height: 1; cursor: pointer; }
+.tag-chip button:hover { background: var(--border); color: var(--error, #e66); }
+.tag-pair-editor { display: flex; gap: 6px; align-items: flex-start; flex-wrap: wrap; }
+.tag-pair-editor > input { flex: 0 1 130px; min-width: 100px; }
+.tag-pair-editor .tag-value-input { flex: 1 1 160px; min-width: 120px; }
+.tag-value-input { position: relative; }
+.tag-value-input input { width: 100%; }
+.tag-value-input.inline { flex: 1 1 180px; min-width: 140px; }
+.tag-suggestions { position: absolute; z-index: 40; left: 0; right: 0; top: calc(100% + 2px); margin: 0; padding: 4px 0; list-style: none; background: var(--bg-raised); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35); max-height: 220px; overflow-y: auto; }
+.tag-suggestions li { display: flex; justify-content: space-between; gap: 10px; padding: 6px 10px; font-size: 13px; cursor: pointer; }
+.tag-suggestions li small { color: var(--muted-foreground); }
+.tag-suggestions li.active, .tag-suggestions li:hover { background: var(--secondary, var(--border)); }
+.tag-add, .tag-done { align-self: flex-start; }
+.tag-picker.compact { margin-top: 6px; }
+
+.taxonomy-manager { display: flex; flex-direction: column; gap: 12px; }
+.taxonomy-new { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.taxonomy-new input { flex: 1 1 180px; }
+.taxonomy-list { display: flex; flex-direction: column; gap: 10px; }
+.taxonomy-row { padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-raised); display: flex; flex-direction: column; gap: 8px; }
+.taxonomy-row-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.taxonomy-row-head strong { font-size: 14px; cursor: text; }
+.taxonomy-row-head .hint { margin-right: auto; }
+.taxonomy-preview { display: flex; flex-direction: column; gap: 6px; max-height: 40vh; overflow-y: auto; }
+.taxonomy-preview-row { display: grid; grid-template-columns: minmax(100px, 160px) 1fr; gap: 10px; font-size: 13px; }
+.taxonomy-preview-row span { color: var(--muted-foreground); }
+.taxonomy-problems { color: var(--error, #e66); }
+.taxonomy-preview-backdrop { z-index: 140; }
+.album-sections h2.album-super { margin: 18px 0 4px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted-foreground); }
+
+.viewer-tags { padding: 0 18px 8px; }
+.viewer-tags .tag-picker { margin-top: 0; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 8px; }
+.taxonomy-toolbar { margin-bottom: 8px; }
+.taxonomy-card { margin-bottom: 12px; }
+
+.pw-tag-filter { display: inline-flex; align-items: center; gap: 8px; min-width: 220px; }
+.pw-tag-filter .tag-value-input { min-width: 200px; }
+.pw-bulk-tag { align-items: center; }
+.collection-tags { margin-bottom: 12px; }

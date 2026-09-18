@@ -15,6 +15,7 @@ import type { BoundingBox } from '@skwad/shared-types'
 import * as api from '../api'
 import { FaceTagger } from './FaceTagger'
 import { MediaContextMenu } from './MediaContextMenu'
+import { TagNamesDatalist, TagPicker } from './TagPicker'
 import { formatConfidence, formatCount, formatTime, fullUrl, videoFrameUrl, videoUrl } from '../media'
 import { useUi } from '../store'
 
@@ -355,6 +356,11 @@ export function MediaViewer(props: { mediaId: number; preferVideoFaces?: boolean
             Close (Esc)
           </button>
         </div>
+      </div>
+
+      <div className="viewer-tags">
+        <TagNamesDatalist />
+        <TagPicker kind="media" assetKey={String(item.id)} compact label="Tags" />
       </div>
 
       {item.mediaType === 'photo' && drawingFace && (
