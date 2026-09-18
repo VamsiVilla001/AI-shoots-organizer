@@ -160,3 +160,13 @@
 @media (max-width: 760px) { .pw-shell { flex-direction: column; } .pw-sidebar { width: 100%; padding: 14px 18px; border-right: 0; border-bottom: 1px solid var(--border); gap: 12px; } .pw-brand { padding: 0; } .pw-brand .wordmark-label, .pw-profile, .pw-mode > span { display: none; } .pw-sidebar nav { flex-direction: row; flex-wrap: wrap; } .pw-sidebar nav button { padding: 0 12px; } .pw-sidebar-bottom { position: absolute; right: 18px; top: 10px; padding: 0; } .pw-mode { padding: 0; border: 0; } .pw-main { padding: 28px 20px; } .pw-heading, .pw-library-callout { flex-direction: column; align-items: flex-start; gap: 18px; } .pw-heading h1 { font-size: 27px; } .pw-search { max-width: none; } }
 @media (max-width: 760px) { .pw-tag-heading { flex-direction: column; align-items: flex-start; } .pw-tag-row { align-items: stretch; flex-direction: column; padding-bottom: 12px; } .pw-tag-open { grid-template-columns: 1fr auto; width: 100%; } .pw-tag-open > span:last-child { display: none; } .pw-tag-row > button:last-child { margin: 0 12px; } }
 @media (max-width: 760px) { .pw-job-progress { grid-template-columns: 1fr; } .pw-share-add, .pw-member-list > div { grid-template-columns: 1fr; align-items: stretch; } .pw-project-tabs { gap: 14px; } }
+
+/* Tag media: the header row with the select-all box, and the per-row bin. */
+.pw-tag-header { background: var(--secondary); border-bottom: 1px solid var(--border); }
+.pw-tag-header-cells { min-height: 44px; padding-top: 8px; padding-bottom: 8px; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted-foreground); }
+.pw-tag-header-cells:hover { background: transparent; }
+.pw-tag-header-actions { flex-shrink: 0; margin-right: 16px; font-size: 11px; color: var(--muted-foreground); white-space: nowrap; }
+.pw-tag-row > .pw-tag-delete { flex-shrink: 0; margin: 0 12px 0 0; min-height: 34px !important; width: 34px; padding: 0; display: inline-flex; align-items: center; justify-content: center; color: var(--muted-foreground); }
+.pw-tag-row > .pw-tag-delete:hover { color: var(--error, #e66); border-color: var(--error, #e66); }
+.pw-tag-row > .pw-tag-delete svg { width: 16px; height: 16px; }
+.pw-tag-row > button:nth-last-child(2) { flex-shrink: 0; margin-right: 8px; }
