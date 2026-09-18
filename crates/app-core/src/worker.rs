@@ -7,13 +7,13 @@
 //! the reaper and picked up again. Nothing here blocks the UI thread.
 
 use skwad_database::Db;
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use skwad_database::models::{Job, JobKind, JobState, ProcessingStatus};
 use skwad_database::repo::{jobs, logs, media as media_repo, telemetry};
 use crate::events;
+use crate::job_source::{JobSource, LocalJobSource, Settled};
 use crate::progress::ProgressSink;
 use crate::pipeline::{Engine, PipelineError};
 use crate::stages;
@@ -40,55 +40,6 @@ const RESOURCE_INTERVAL: Duration = Duration::from_secs(2);
 /// one's jobs are back within a lease of dying.
 const REAP_INTERVAL: Duration = Duration::from_secs(15);
 
-/// The jobs this process currently holds a lease on, keyed by job id with the
-/// fencing token each claim issued.
-///
-/// The lease keeper thread heartbeats every entry on its own schedule, so a
-/// job's duration never interacts with the lease TTL: a twenty-minute video
-/// analysis is heartbeated throughout without the worker thread doing
-/// anything. A heartbeat that comes back [`jobs::Heartbeat::Cancelled`] or
-/// [`jobs::Heartbeat::LeaseLost`] sets the shoot's cancellation flag, which is
-/// how the stage running on the worker thread finds out.
-#[derive(Default)]
-pub struct HeldLeases {
-    held: parking_lot::Mutex<HashMap<i64, HeldLease>>,
-}
-
-struct HeldLease {
-    token: String,
-    shoot_id: i64,
-}
-
-impl HeldLeases {
-    fn hold(&self, job: &Job) {
-        if let Some(token) = job.token() {
-            self.held.lock().insert(
-                job.id,
-                HeldLease {
-                    token: token.to_string(),
-                    shoot_id: job.shoot_id,
-                },
-            );
-        }
-    }
-
-    fn drop_lease(&self, job_id: i64) {
-        self.held.lock().remove(&job_id);
-    }
-
-    fn snapshot(&self) -> Vec<(i64, String, i64)> {
-        self.held
-            .lock()
-            .iter()
-            .map(|(id, lease)| (*id, lease.token.clone(), lease.shoot_id))
-            .collect()
-    }
-
-    pub fn count(&self) -> usize {
-        self.held.lock().len()
-    }
-}
-
 pub struct WorkerPool {
     handles: Vec<std::thread::JoinHandle<()>>,
 }
@@ -108,18 +59,20 @@ impl WorkerPool {
             Ok(_) => {}
             Err(e) => tracing::error!(error = %e, "could not recover interrupted jobs"),
         }
-        let leases = Arc::new(HeldLeases::default());
+        let local = LocalJobSource::new(Arc::clone(&state));
+        let leases = Arc::clone(local.leases());
+        let source: Arc<dyn JobSource> = Arc::new(local);
         let worker_count = crate::settings::MAX_AI_WORKERS + 1;
         let mut handles = Vec::with_capacity(worker_count + 2);
 
         for index in 0..worker_count {
             let app = Arc::clone(&sink);
             let state = Arc::clone(&state);
-            let leases = Arc::clone(&leases);
+            let source = Arc::clone(&source);
             handles.push(
                 std::thread::Builder::new()
                     .name(format!("skwad-worker-{index}"))
-                    .spawn(move || worker_loop(index, app, state, leases))
+                    .spawn(move || worker_loop(index, app, state, source))
                     .expect("failed to spawn worker thread"),
             );
         }
@@ -129,7 +82,7 @@ impl WorkerPool {
         handles.push(
             std::thread::Builder::new()
                 .name("skwad-lease-keeper".into())
-                .spawn(move || lease_keeper_loop(keeper_state, keeper_leases))
+                .spawn(move || LocalJobSource::keeper_loop(keeper_state, keeper_leases))
                 .expect("failed to spawn the lease keeper thread"),
         );
 
@@ -153,46 +106,7 @@ impl WorkerPool {
     }
 }
 
-/// Heartbeats every lease this process holds, on its own thread so job
-/// duration and heartbeat cadence are independent.
-fn lease_keeper_loop(state: Arc<AppState>, leases: Arc<HeldLeases>) {
-    // Sleep in short steps so shutdown is noticed promptly, but only beat on
-    // the heartbeat interval.
-    let mut last_beat = Instant::now();
-    while !state.is_shutting_down() {
-        std::thread::sleep(IDLE_POLL);
-        if last_beat.elapsed() < jobs::HEARTBEAT_INTERVAL {
-            continue;
-        }
-        last_beat = Instant::now();
-        let held = leases.snapshot();
-        if held.is_empty() {
-            continue;
-        }
-        let Ok(mut conn) = state.db.conn() else { continue };
-        for (job_id, token, shoot_id) in held {
-            match jobs::heartbeat(&mut conn, job_id, &token) {
-                Ok(jobs::Heartbeat::Alive { .. }) => {}
-                Ok(jobs::Heartbeat::Cancelled) => {
-                    tracing::info!(job = job_id, shoot = shoot_id, "job cancelled while running; stopping it");
-                    state.cancel_shoot(shoot_id);
-                    leases.drop_lease(job_id);
-                }
-                Ok(jobs::Heartbeat::LeaseLost) => {
-                    // Someone else may hold this job now. The stage is told to
-                    // stop via the shoot flag; its results are refused by the
-                    // token gate regardless.
-                    tracing::warn!(job = job_id, shoot = shoot_id, "lease lost while running; abandoning the job");
-                    state.cancel_shoot(shoot_id);
-                    leases.drop_lease(job_id);
-                }
-                Err(error) => tracing::warn!(job = job_id, %error, "could not heartbeat a lease"),
-            }
-        }
-    }
-}
-
-fn worker_loop(index: usize, app: Arc<dyn ProgressSink>, state: Arc<AppState>, leases: Arc<HeldLeases>) {
+fn worker_loop(index: usize, app: Arc<dyn ProgressSink>, state: Arc<AppState>, source: Arc<dyn JobSource>) {
     tracing::debug!(worker = index, "worker started");
 
     // Built on first use: a session that only ever browses an existing shoot
@@ -202,8 +116,8 @@ fn worker_loop(index: usize, app: Arc<dyn ProgressSink>, state: Arc<AppState>, l
     let mut engine_version: u64 = 0;
     // FFmpeg is resolved per worker so thumbnail jobs never need the engine —
     // indexing works with no models installed.
-    let mut tools_version = state.settings_version();
-    let mut ffmpeg = crate::pipeline::discover_ffmpeg(&state.settings());
+    let mut tools_version = source.settings_version();
+    let mut ffmpeg = crate::pipeline::discover_ffmpeg(&source.settings());
     let lane = if index == 0 {
         jobs::WorkerLane::Io
     } else {
@@ -211,20 +125,20 @@ fn worker_loop(index: usize, app: Arc<dyn ProgressSink>, state: Arc<AppState>, l
     };
 
     while !state.is_shutting_down() {
-        if index > state.settings().ai_workers.clamp(1, crate::settings::MAX_AI_WORKERS) {
+        if index > source.settings().ai_workers.clamp(1, crate::settings::MAX_AI_WORKERS) {
             engine = None;
             engine_last_used = None;
             std::thread::sleep(IDLE_POLL);
             continue;
         }
-        if state.is_paused() {
+        if source.is_paused() {
             std::thread::sleep(IDLE_POLL);
             continue;
         }
 
         // Each AI worker owns its model pair. A shared scheduler distributes
         // distinct media fairly and holds finishing stages behind all analyses.
-        let claimed = match state.db.conn().and_then(|mut conn| state.claim_job(&mut conn, lane)) {
+        let claimed = match source.claim(lane) {
             Ok(job) => job,
             Err(e) => {
                 tracing::error!(worker = index, error = %e, "could not claim a job");
@@ -242,34 +156,32 @@ fn worker_loop(index: usize, app: Arc<dyn ProgressSink>, state: Arc<AppState>, l
             std::thread::sleep(IDLE_POLL);
             continue;
         };
-        leases.hold(&job);
+        source.hold(&job);
 
         // A pause can arrive just after an atomic claim. Give the job back
         // without consuming an attempt; already executing files finish safely.
-        if state.is_shoot_paused(job.shoot_id) {
-            release(&state, &leases, &job);
+        if source.is_shoot_paused(job.shoot_id) {
+            source.release(&job);
             continue;
         }
 
         // A cancelled shoot's remaining jobs are dropped rather than run.
-        if state.is_cancelled(job.shoot_id) {
-            if let Ok(mut conn) = state.db.conn() {
-                let _ = jobs::cancel_for_shoot(&mut conn, job.shoot_id);
-            }
-            leases.drop_lease(job.id);
+        if source.is_cancelled(job.shoot_id) {
+            source.cancel_shoot_jobs(job.shoot_id);
+            source.drop_lease(job.id);
             continue;
         }
 
         // Settings changed since these were built: rebuild so new thresholds,
         // accelerator choices and the FFmpeg path apply immediately.
-        if tools_version != state.settings_version() {
+        if tools_version != source.settings_version() {
             if engine.is_some() {
                 tracing::info!(worker = index, "settings changed; reloading models");
                 engine = None;
                 engine_last_used = None;
             }
-            ffmpeg = crate::pipeline::discover_ffmpeg(&state.settings());
-            tools_version = state.settings_version();
+            ffmpeg = crate::pipeline::discover_ffmpeg(&source.settings());
+            tools_version = source.settings_version();
         }
 
         if let Ok(mut conn) = state.db.conn() {
@@ -278,14 +190,14 @@ fn worker_loop(index: usize, app: Arc<dyn ProgressSink>, state: Arc<AppState>, l
             }
         }
 
-        let outcome = run_job(&app, &state, &job, &mut engine, &mut engine_version, ffmpeg.as_ref());
+        let outcome = run_job(&app, &state, source.as_ref(), &job, &mut engine, &mut engine_version, ffmpeg.as_ref());
         if matches!(
             JobKind::parse(&job.kind),
             Some(JobKind::AnalysePhoto | JobKind::AnalyseVideo)
         ) {
             engine_last_used = Some(Instant::now());
         }
-        finish_job(&app, &state, &leases, &job, outcome);
+        finish_job(&app, &state, source.as_ref(), &job, outcome);
     }
 
     tracing::debug!(worker = index, "worker stopped");
@@ -327,6 +239,7 @@ fn should_announce_blockage() -> bool {
 fn run_job(
     app: &Arc<dyn ProgressSink>,
     state: &Arc<AppState>,
+    source: &dyn JobSource,
     job: &Job,
     engine: &mut Option<Engine>,
     engine_version: &mut u64,
@@ -335,11 +248,11 @@ fn run_job(
     let Some(kind) = JobKind::parse(&job.kind) else {
         return JobOutcome::Failed(format!("unknown job kind '{}'", job.kind));
     };
-    let settings = state.settings();
+    let settings = source.settings();
 
     match kind {
         JobKind::Scan => {
-            let cancel = state.cancellation(job.shoot_id);
+            let cancel = source.cancel_flag(job.shoot_id);
             let app = Arc::clone(app);
             let shoot_id = job.shoot_id;
             match stages::scan_shoot(&state.db, shoot_id, &settings, Some(cancel), move |count| {
@@ -380,7 +293,7 @@ fn run_job(
         JobKind::Proxy => JobOutcome::Done,
 
         JobKind::AnalysePhoto | JobKind::AnalyseVideo => {
-            run_media_job(state, job, engine, engine_version, |engine, db, item| {
+            run_media_job(state, source, job, engine, engine_version, |engine, db, item| {
                 engine.analyse(db, item).map(|_| ())
             })
         }
@@ -445,6 +358,7 @@ fn load_media(state: &Arc<AppState>, job: &Job) -> std::result::Result<skwad_dat
 /// sure an engine exists, run the closure.
 fn run_media_job(
     state: &Arc<AppState>,
+    source: &dyn JobSource,
     job: &Job,
     engine: &mut Option<Engine>,
     engine_version: &mut u64,
@@ -470,8 +384,8 @@ fn run_media_job(
     }
 
     if engine.is_none() {
-        let version = state.settings_version();
-        match Engine::new(&state.paths, &state.settings()) {
+        let version = source.settings_version();
+        match Engine::new(&state.paths, &source.settings()) {
             Ok(built) => {
                 tracing::info!(
                     detector = built.detector_name(),
@@ -519,38 +433,19 @@ fn analysis_outstanding(state: &Arc<AppState>, shoot_id: i64) -> bool {
     outstanding > 0
 }
 
-/// The token a claimed job carries. A job without one cannot have come from a
-/// claim, so this is an invariant violation rather than a runtime condition.
-fn token_of(job: &Job) -> &str {
-    job.token().unwrap_or_default()
-}
-
-/// Returns a job to the queue without charging it an attempt.
-fn release(state: &Arc<AppState>, leases: &HeldLeases, job: &Job) {
-    if let Ok(mut conn) = state.db.conn() {
-        match jobs::release(&mut conn, job.id, token_of(job)) {
-            Ok(true) => {}
-            Ok(false) => tracing::debug!(job = job.id, "lease was already gone when releasing"),
-            Err(error) => tracing::warn!(job = job.id, %error, "could not release a job"),
-        }
-    }
-    leases.drop_lease(job.id);
-}
-
-fn finish_job(app: &Arc<dyn ProgressSink>, state: &Arc<AppState>, leases: &HeldLeases, job: &Job, outcome: JobOutcome) {
+fn finish_job(app: &Arc<dyn ProgressSink>, state: &Arc<AppState>, source: &dyn JobSource, job: &Job, outcome: JobOutcome) {
     let Ok(mut conn) = state.db.conn() else {
-        leases.drop_lease(job.id);
+        source.drop_lease(job.id);
         return;
     };
-    let token = token_of(job);
 
     let mut settled = false;
     let mut succeeded = false;
 
     match outcome {
         JobOutcome::Done => {
-            match jobs::complete(&mut conn, job.id, token) {
-                Ok(true) => {
+            match source.complete(job) {
+                Settled::Done => {
                     settled = true;
                     succeeded = true;
                 }
@@ -558,8 +453,7 @@ fn finish_job(app: &Arc<dyn ProgressSink>, state: &Arc<AppState>, leases: &HeldL
                 // stage ran. Whatever it wrote is either already superseded
                 // by a newer holder's run or belongs to a cancelled shoot;
                 // either way this job is not ours to settle.
-                Ok(false) => tracing::warn!(job = job.id, kind = %job.kind, "job finished after its lease was lost; result not recorded"),
-                Err(error) => tracing::warn!(job = job.id, %error, "could not mark a job done"),
+                Settled::LeaseLost => tracing::warn!(job = job.id, kind = %job.kind, "job finished after its lease was lost; result not recorded"),
             }
         }
         JobOutcome::Deferred => {
@@ -567,7 +461,7 @@ fn finish_job(app: &Arc<dyn ProgressSink>, state: &Arc<AppState>, leases: &HeldL
             // same row, and do not let waiting count against the retry budget.
             std::thread::sleep(IDLE_POLL);
             drop(conn);
-            release(state, leases, job);
+            source.release(job);
             return;
         }
         JobOutcome::Blocked(reason) => {
@@ -576,29 +470,22 @@ fn finish_job(app: &Arc<dyn ProgressSink>, state: &Arc<AppState>, leases: &HeldL
             tracing::warn!(job = job.id, kind = %job.kind, reason = %reason, "processing is blocked");
             // The progress panel reads this so a stalled queue explains itself
             // instead of looking like slow work.
-            state.record_blockage(job.shoot_id, &job.kind, &reason);
+            source.record_blockage(job.shoot_id, &job.kind, &reason);
             if should_announce_blockage() {
                 events::notice(app.as_ref(), "warn", format!("Processing paused: {reason}"));
             }
             std::thread::sleep(BLOCKED_BACKOFF);
             drop(conn);
-            release(state, leases, job);
+            source.release(job);
             return;
         }
         JobOutcome::Failed(error) => {
             tracing::warn!(job = job.id, kind = %job.kind, error = %error, "job failed");
 
-            let state_after = match jobs::fail(&mut conn, job.id, token, &error) {
-                Ok(Some(state)) => Some(state),
-                Ok(None) => {
-                    tracing::warn!(job = job.id, "job failed after its lease was lost; failure not recorded");
-                    None
-                }
-                Err(db_error) => {
-                    tracing::warn!(job = job.id, error = %db_error, "could not record a job failure");
-                    Some(JobState::Failed)
-                }
-            };
+            let state_after = source.fail(job, &error);
+            if state_after.is_none() {
+                tracing::warn!(job = job.id, "job failed after its lease was lost; failure not recorded");
+            }
             if state_after == Some(JobState::Failed) {
                 settled = true;
                 if let Some(media_id) = job.media_id {
@@ -630,7 +517,7 @@ fn finish_job(app: &Arc<dyn ProgressSink>, state: &Arc<AppState>, leases: &HeldL
             }
         }
     }
-    leases.drop_lease(job.id);
+    source.drop_lease(job.id);
 
     if settled {
         if let Err(error) = telemetry::mark_stage_settled(&mut conn, job.shoot_id, &job.kind, succeeded) {
@@ -909,28 +796,4 @@ mod tests {
         assert!(!indexing_incomplete(&after));
     }
 
-    /// The lease keeper's bookkeeping: a held job is heartbeated, a finished
-    /// one is not.
-    #[test]
-    fn held_leases_track_only_jobs_in_flight() {
-        let db = Database::open_test().unwrap();
-        let mut conn = db.conn().unwrap();
-        let shoot = shoots::create(&mut conn, "S", "C:\\s").unwrap();
-        jobs::enqueue(&mut conn, shoot.id, JobKind::Albums, None, 500, None).unwrap();
-        let job = jobs::claim_next(&mut conn, None, "test").unwrap().unwrap();
-
-        let leases = HeldLeases::default();
-        leases.hold(&job);
-        assert_eq!(leases.count(), 1);
-        let (id, token, shoot_id) = leases.snapshot().remove(0);
-        assert_eq!((id, shoot_id), (job.id, shoot.id));
-        assert!(matches!(
-            jobs::heartbeat(&mut conn, id, &token).unwrap(),
-            jobs::Heartbeat::Alive { .. }
-        ));
-
-        leases.drop_lease(job.id);
-        assert_eq!(leases.count(), 0);
-        assert!(leases.snapshot().is_empty());
-    }
 }

@@ -1,0 +1,46 @@
+[package]
+name = "skwad-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "SKWAD Media Organiser — the headless server front door"
+
+[lib]
+name = "skwad_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "skwad-server"
+path = "src/main.rs"
+
+[dependencies]
+skwad-app-core.workspace = true
+skwad-database.workspace = true
+skwad-media-core.workspace = true
+
+axum = { version = "0.8", features = ["http2", "macros"] }
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["cors", "fs", "trace", "limit"] }
+
+anyhow = "1.0"
+blake3 = "1.8"
+chrono = "0.4"
+parking_lot = "0.12"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+uuid = { version = "1.18", features = ["v4"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.7"
+
+[dev-dependencies]
+tempfile = "3.27"
+http-body-util = "0.1"
+skwad-database = { workspace = true, features = ["test-support"] }

@@ -87,6 +87,11 @@ pub struct AppState {
     blockages: Mutex<HashMap<i64, Blockage>>,
     /// Global pause for the worker pool.
     paused: AtomicBool,
+    /// Whether seeded and reset accounts must change their password before
+    /// they can sign in. Off for a local app operating on its own library —
+    /// the testing posture it always had — and turned on by the server, where
+    /// a seeded shared password on a LAN listener would be a security bug.
+    enforce_password_change: AtomicBool,
     scheduler: Mutex<Scheduler>,
     shutdown: Arc<AtomicBool>,
     pub loaded_catalogues: Mutex<HashMap<String, LoadedCatalogue>>,
@@ -135,6 +140,7 @@ impl AppState {
             cancellations: Mutex::new(HashMap::new()),
             blockages: Mutex::new(HashMap::new()),
             paused: AtomicBool::new(false),
+            enforce_password_change: AtomicBool::new(false),
             scheduler: Mutex::new(Scheduler::default()),
             shutdown: Arc::new(AtomicBool::new(false)),
             loaded_catalogues: Mutex::new(HashMap::new()),
@@ -196,6 +202,14 @@ impl AppState {
 
     pub fn is_paused(&self) -> bool {
         self.paused.load(Ordering::Relaxed)
+    }
+
+    pub fn enforce_password_change(&self) -> bool {
+        self.enforce_password_change.load(Ordering::Relaxed)
+    }
+
+    pub fn set_enforce_password_change(&self, enforce: bool) {
+        self.enforce_password_change.store(enforce, Ordering::Relaxed);
     }
 
     pub fn set_paused(&self, paused: bool) {

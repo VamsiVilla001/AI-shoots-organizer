@@ -79,8 +79,21 @@ pub fn preview_roster_file(_ctx: &Ctx, path: String) -> Result<RosterPreview> {
         .file_name()
         .map(|name| name.to_string_lossy().to_string())
         .unwrap_or_else(|| "roster".to_owned());
+    preview_roster_text(_ctx, source, text)
+}
 
-    let is_json = path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+/// Reads a roster the client already has in hand — a file it read itself and
+/// posted, which is the shape a remote client uses: the file is in someone's
+/// Downloads, not on a share the server can see.
+pub fn preview_roster_text(_ctx: &Ctx, source: String, text: String) -> Result<RosterPreview> {
+    if text.len() as u64 > MAX_ROSTER_BYTES {
+        return Err(command_error("that file is too large to be a roster"));
+    }
+    let source = source.trim().to_owned();
+    let source = if source.is_empty() { "roster".to_owned() } else { source };
+    let is_json = Path::new(&source)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
         || text.trim_start().starts_with(['{', '[']);
     let (entries, problems) = if is_json { parse_json(&text)? } else { parse_csv(&text)? };
 

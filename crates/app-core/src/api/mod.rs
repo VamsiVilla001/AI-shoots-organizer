@@ -108,6 +108,10 @@ pub type Result<T> = std::result::Result<T, ApiError>;
 #[derive(Debug, Clone, Default)]
 pub struct Session {
     pub user: Option<SessionUser>,
+    /// Keeps one caller's in-memory state — the catalogues they opened —
+    /// apart from everyone else's on a shared server. `None` on the desktop,
+    /// where one process is one person.
+    pub scope: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -218,6 +222,7 @@ macro_rules! command_registry {
             resolve_catalogue_media(package_id: String, revision_id: String, media_id: i64) -> String = $crate::api::catalogue::resolve_catalogue_media;
             // --- team rosters --------------------------------------------
             preview_roster_file(path: String) -> RosterPreview = $crate::api::roster::preview_roster_file;
+            preview_roster_text(source: String, text: String) -> RosterPreview = $crate::api::roster::preview_roster_text;
             import_roster(source: String, entries: Vec<RosterEntry>) -> RosterSummary = $crate::api::roster::import_roster;
             roster_summary() -> RosterSummary = $crate::api::roster::roster_summary;
             list_roster() -> Vec<RosterEntry> = $crate::api::roster::list_roster;

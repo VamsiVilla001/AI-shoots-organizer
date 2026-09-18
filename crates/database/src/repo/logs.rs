@@ -29,6 +29,9 @@ pub const EVENT_GROUP_DELETED: &str = "group_deleted";
 pub const EVENT_GROUP_ASSIGNMENT: &str = "group_assignment";
 pub const EVENT_EXPORT: &str = "export";
 pub const EVENT_RECOGNITION_DATA_CLEARED: &str = "recognition_data_cleared";
+/// A maintenance command run through a front door that gates them on the
+/// administrator role; `detail` names who ran what.
+pub const EVENT_ADMIN_ACTION: &str = "admin_action";
 
 fn map(row: &Row) -> Result<LogEntry> {
     Ok(LogEntry {

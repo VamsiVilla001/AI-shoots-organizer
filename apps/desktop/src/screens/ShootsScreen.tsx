@@ -5,7 +5,7 @@
 
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { open } from '@tauri-apps/plugin-dialog'
+import { pickFolder as pickFolderDialog } from '../pickers'
 import type { ShootSummary } from '@skwad/shared-types'
 import * as api from '../api'
 import { formatCount, formatDate } from '../media'
@@ -259,8 +259,8 @@ function NewShootModal({ onClose }: { onClose: () => void }) {
   const queryClient = useQueryClient()
 
   const pickFolder = async () => {
-    const picked = await open({ directory: true, multiple: false, title: 'Choose the shoot folder' })
-    if (typeof picked === 'string') {
+    const picked = await pickFolderDialog('Choose the shoot folder')
+    if (picked !== null) {
       setFolder(picked)
       if (!name.trim()) {
         // Suggest the folder name; "BGMS_Final_Shoot" → "BGMS Final Shoot".

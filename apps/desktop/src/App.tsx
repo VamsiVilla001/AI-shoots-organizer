@@ -1,7 +1,10 @@
 import { useEffect, useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { startEventBridge } from './eventBridge'
 import * as api from './api'
 import { setMediaBase } from './media'
+import { transportReady } from './transport'
+import { ServerConnectScreen } from './screens/ServerConnectScreen'
 import { useUi } from './store'
 import { Sidebar } from './components/Sidebar'
 import { Notices } from './components/Notices'
@@ -20,8 +23,27 @@ import { ProfileScreen } from './screens/ProfileScreen'
 import { AdminScreen } from './screens/AdminScreen'
 import { ProjectWorkspace } from './projectWorkspace/ProjectWorkspace'
 import { ExportProgressCard } from './projectWorkspace/exportProgressCard'
+import { FolderBrowserHost } from './components/FolderBrowser'
 
 export default function App() {
+  // A browser build with no server chosen yet has nothing to talk to; the
+  // connect screen picks one and the rest of the app boots from there.
+  const [connected, setConnected] = useState(transportReady())
+  const queryClient = useQueryClient()
+  if (!connected) {
+    return (
+      <ServerConnectScreen
+        onConnected={() => {
+          setConnected(true)
+          startEventBridge(queryClient).catch((e) => console.error('event bridge failed to start', e))
+        }}
+      />
+    )
+  }
+  return <ConnectedApp />
+}
+
+function ConnectedApp() {
   const [experience, setExperience] = useState<'classic' | 'projects'>(() => {
     try { return localStorage.getItem('skwad.experience') === 'classic' ? 'classic' : 'projects' } catch { return 'projects' }
   })
@@ -93,7 +115,7 @@ export default function App() {
   if (experience === 'projects') {
     const accountId = session.data.accountId ?? session.data.email ?? 'local'
     return <><ProjectWorkspace key={accountId} accountId={accountId} onClassic={() => switchExperience('classic')} />
-      {viewerMediaId !== null && <MediaViewer mediaId={viewerMediaId} preferVideoFaces={viewerPreferVideoFaces} />}<ExportProgressCard /><Notices /></>
+      {viewerMediaId !== null && <MediaViewer mediaId={viewerMediaId} preferVideoFaces={viewerPreferVideoFaces} />}<ExportProgressCard /><FolderBrowserHost /><Notices /></>
   }
 
   return (
@@ -114,6 +136,7 @@ export default function App() {
       </main>
       {viewerMediaId !== null && <MediaViewer mediaId={viewerMediaId} preferVideoFaces={viewerPreferVideoFaces} />}
       <ExportProgressCard />
+      <FolderBrowserHost />
       <Notices />
     </div>
   )

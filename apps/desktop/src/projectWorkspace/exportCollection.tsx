@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { open } from '@tauri-apps/plugin-dialog'
+import { pickFolder } from '../pickers'
 import type { ExportOptions } from '@skwad/shared-types'
 import * as api from '../api'
 import { formatBytes, formatCount } from '../media'
@@ -87,8 +87,8 @@ export function ExportCollectionDialog({ collection, onClose }: { collection: Pr
 
   const pickDestination = async () => {
     try {
-      const picked = await open({ directory: true, multiple: false })
-      if (typeof picked === 'string') setDestination(picked)
+      const picked = await pickFolder('Choose the destination folder')
+      if (picked !== null) setDestination(picked)
     } catch (e) {
       setError(String(e))
     }

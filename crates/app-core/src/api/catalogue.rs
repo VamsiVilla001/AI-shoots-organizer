@@ -31,9 +31,9 @@ const DEFAULT_BACKEND: &str = "http://127.0.0.1:8787";
 const LOCAL_AUTH_VERSION: u32 = 1;
 const MAX_AUTH_FILE_BYTES: u64 = 1024 * 1024;
 const PROFILE_KEY_PREFIX: &str = "local_user_profile:";
-/// Testing build: SKWAD accepts the seeded password and never forces a change
-/// on first sign-in. Flip to `true` to restore the temporary-password flow.
-const ENFORCE_PASSWORD_CHANGE: bool = false;
+// Whether seeded and reset accounts must change their password is a runtime
+// decision now — see `AppState::enforce_password_change`: off for the local
+// app, on for the server.
 /// Password every seeded account starts with while the team tests the build.
 const SEED_PASSWORD: &str = "Tess@123";
 /// The team roster written to a fresh credential file on first launch.
@@ -282,7 +282,7 @@ pub fn catalogue_session_status(ctx: &Ctx) -> Result<SessionStatus> {
             .iter()
             .find(|user| {
                 user.enabled
-                    && (!ENFORCE_PASSWORD_CHANGE || !user.must_change_password)
+                    && (!ctx.state.enforce_password_change() || !user.must_change_password)
                     && user.email.eq_ignore_ascii_case(&identity.email)
             })
             .map(|user| user.role)?;
@@ -312,7 +312,7 @@ pub fn sign_in_skwad(ctx: &Ctx, email: String, password: String) -> Result<Sessi
     let password = Zeroizing::new(password);
     let account = authenticate_local(&ctx.state, &email, &password)?;
     let auth = load_local_auth(&ctx.state)?;
-    let requires_change = ENFORCE_PASSWORD_CHANGE
+    let requires_change = ctx.state.enforce_password_change()
         && auth
             .users
             .iter()
@@ -437,7 +437,7 @@ pub fn create_local_user(ctx: &Ctx, user: NewLocalUser) -> Result<Vec<LocalUser>
         display_name,
         password_hash: hash_password(&password)?,
         enabled: true,
-        must_change_password: ENFORCE_PASSWORD_CHANGE,
+        must_change_password: ctx.state.enforce_password_change(),
         role: user.role,
     });
     save_roster(&ctx.state, auth)
@@ -482,7 +482,7 @@ pub fn reset_local_user_password(
         .find(|record| record.email.eq_ignore_ascii_case(&email))
         .ok_or_else(|| command_error("that account no longer exists"))?;
     record.password_hash = hash;
-    record.must_change_password = ENFORCE_PASSWORD_CHANGE;
+    record.must_change_password = ctx.state.enforce_password_change();
     save_roster(&ctx.state, auth)
 }
 
@@ -514,6 +514,65 @@ fn require_admin(ctx: &Ctx) -> Result<(LocalAuthFile, String)> {
         return Err(CommandError::forbidden("only an administrator can manage users"));
     }
     Ok((auth, identity.email))
+}
+
+/// Whether the calling session's account is an enabled administrator. A
+/// front door that gates maintenance commands asks this; the desktop, which
+/// operates on its own library, does not.
+pub fn session_is_admin(ctx: &Ctx) -> Result<bool> {
+    let Some(user) = ctx.session.user.as_ref() else {
+        return Ok(false);
+    };
+    let auth = load_local_auth(&ctx.state)?;
+    Ok(auth
+        .users
+        .iter()
+        .any(|record| record.enabled && record.role == UserRole::Admin && record.email.eq_ignore_ascii_case(&user.email)))
+}
+
+/// Creates or replaces an account directly in the credential file — what a
+/// headless server needs to get its first administrator without a window.
+/// Returns the account's id.
+pub fn upsert_user(auth_path: &Path, email: &str, display_name: &str, password: &str, role: UserRole) -> Result<String> {
+    let email = clean_email(email)?;
+    let display_name = clean_display_name(display_name)?;
+    check_password(password)?;
+    if !auth_path.exists() {
+        seed_local_auth(auth_path, false)?;
+    }
+    let bytes = std::fs::read(auth_path).map_err(command_error)?;
+    let mut auth: LocalAuthFile = serde_json::from_slice(&bytes)
+        .map_err(|error| command_error(format!("local credential file is invalid: {error}")))?;
+    let hash = hash_password(password)?;
+    let id = match auth
+        .users
+        .iter_mut()
+        .find(|record| record.email.eq_ignore_ascii_case(&email))
+    {
+        Some(existing) => {
+            existing.display_name = display_name;
+            existing.password_hash = hash;
+            existing.role = role;
+            existing.enabled = true;
+            existing.must_change_password = false;
+            credential_id(existing)
+        }
+        None => {
+            let id = Uuid::new_v4().to_string();
+            auth.users.push(LocalCredential {
+                id: Some(id.clone()),
+                email,
+                display_name,
+                password_hash: hash,
+                enabled: true,
+                must_change_password: false,
+                role,
+            });
+            id
+        }
+    };
+    write_local_auth(auth_path, &auth)?;
+    Ok(id)
 }
 
 fn require_remaining_admin(auth: &LocalAuthFile) -> Result<()> {
@@ -585,7 +644,15 @@ pub fn clear_authenticated_session(ctx: &Ctx) -> Result<()> {
 }
 
 pub fn sign_out_skwad(ctx: &Ctx) -> Result<()> {
-    ctx.state.loaded_catalogues.lock().clear();
+    // Only this caller's catalogues; on a shared server everyone else keeps
+    // theirs.
+    match ctx.session.scope.as_deref() {
+        Some(scope) => {
+            let prefix = format!("{scope}|");
+            ctx.state.loaded_catalogues.lock().retain(|key, _| !key.starts_with(&prefix));
+        }
+        None => ctx.state.loaded_catalogues.lock().clear(),
+    }
     clear_authenticated_session(ctx)
 }
 
@@ -784,6 +851,7 @@ pub fn load_skwad(
     let summary = catalogue_summary(&decoded.catalogue).map_err(command_error)?;
     ctx.state.db.conn().map_err(command_error)?.exec("INSERT INTO imported_catalogues(package_id,revision_id,library_id,shoot_id,catalogue_hash,imported_at) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(package_id,revision_id) DO UPDATE SET imported_at=excluded.imported_at", skwad_database::params![header.authenticated.package_id.to_string(), header.authenticated.revision_id.to_string(), summary.library_id, summary.shoot_id, blake3::hash(&package).to_hex().to_string(), chrono::Utc::now().to_rfc3339()]).map_err(command_error)?;
     let key = catalogue_key(
+        ctx,
         &header.authenticated.package_id.to_string(),
         &header.authenticated.revision_id.to_string(),
     );
@@ -814,7 +882,7 @@ pub fn approve_catalogue_library(
     if !path.is_dir() {
         return Err(command_error("choose an existing NAS library folder"));
     }
-    let key = catalogue_key(&package_id, &revision_id);
+    let key = catalogue_key(ctx, &package_id, &revision_id);
     let loaded = ctx.state.loaded_catalogues.lock();
     let catalogue = loaded
         .get(&key)
@@ -847,7 +915,7 @@ pub fn list_catalogue_groups(
 ) -> Result<Vec<CatalogueGroup>> {
     let loaded = ctx.state.loaded_catalogues.lock();
     let catalogue = loaded
-        .get(&catalogue_key(&package_id, &revision_id))
+        .get(&catalogue_key(ctx, &package_id, &revision_id))
         .ok_or_else(|| command_error("catalogue is not loaded"))?;
     catalogue_groups(&catalogue.catalogue).map_err(command_error)
 }
@@ -860,7 +928,7 @@ pub fn list_catalogue_media(
 ) -> Result<Vec<CatalogueMedia>> {
     let loaded = ctx.state.loaded_catalogues.lock();
     let catalogue = loaded
-        .get(&catalogue_key(&package_id, &revision_id))
+        .get(&catalogue_key(ctx, &package_id, &revision_id))
         .ok_or_else(|| command_error("catalogue is not loaded"))?;
     catalogue_media(&catalogue.catalogue, group_id).map_err(command_error)
 }
@@ -876,7 +944,7 @@ pub fn resolve_catalogue_media(
 ) -> Result<String> {
     let loaded = ctx.state.loaded_catalogues.lock();
     let catalogue = loaded
-        .get(&catalogue_key(&package_id, &revision_id))
+        .get(&catalogue_key(ctx, &package_id, &revision_id))
         .ok_or_else(|| command_error("catalogue is not loaded"))?;
     let media = catalogue_media(&catalogue.catalogue, None)
         .map_err(command_error)?
@@ -929,7 +997,7 @@ fn loaded_info(
     })
 }
 
-fn auth_file_path(state: &AppState) -> PathBuf {
+pub fn auth_file_path(state: &AppState) -> PathBuf {
     std::env::var_os("SKWAD_AUTH_FILE")
         .map(PathBuf::from)
         .unwrap_or_else(|| state.paths.root.join("auth").join("credentials.json"))
@@ -938,7 +1006,7 @@ fn auth_file_path(state: &AppState) -> PathBuf {
 fn load_local_auth(state: &AppState) -> Result<LocalAuthFile> {
     let path = auth_file_path(state);
     if !path.exists() {
-        seed_local_auth(&path)?;
+        seed_local_auth(&path, state.enforce_password_change())?;
     }
     let metadata = std::fs::metadata(&path).map_err(|_| {
         command_error(format!(
@@ -961,7 +1029,7 @@ fn load_local_auth(state: &AppState) -> Result<LocalAuthFile> {
     // A file written before roles existed has nobody who can open the admin
     // panel, so the roster is adopted once. After that the panel owns the file
     // and accounts an administrator removed stay removed.
-    if !auth.users.iter().any(|user| user.role == UserRole::Admin) && adopt_seed_roster(&mut auth)? {
+    if !auth.users.iter().any(|user| user.role == UserRole::Admin) && adopt_seed_roster(&mut auth, state.enforce_password_change())? {
         write_local_auth(&path, &auth)?;
     }
     Ok(auth)
@@ -970,7 +1038,7 @@ fn load_local_auth(state: &AppState) -> Result<LocalAuthFile> {
 /// Adds the seeded roster to a credential file that predates roles, keeping
 /// the passwords of accounts that are already there. Answers whether anything
 /// changed.
-fn adopt_seed_roster(auth: &mut LocalAuthFile) -> Result<bool> {
+fn adopt_seed_roster(auth: &mut LocalAuthFile, enforce_password_change: bool) -> Result<bool> {
     let mut changed = false;
     for (email, display_name, role) in SEED_USERS {
         match auth
@@ -979,9 +1047,9 @@ fn adopt_seed_roster(auth: &mut LocalAuthFile) -> Result<bool> {
             .find(|user| user.email.eq_ignore_ascii_case(email))
         {
             Some(existing) => {
-                if existing.role != *role || existing.must_change_password != ENFORCE_PASSWORD_CHANGE {
+                if existing.role != *role || existing.must_change_password != enforce_password_change {
                     existing.role = *role;
-                    existing.must_change_password = ENFORCE_PASSWORD_CHANGE;
+                    existing.must_change_password = enforce_password_change;
                     changed = true;
                 }
             }
@@ -992,7 +1060,7 @@ fn adopt_seed_roster(auth: &mut LocalAuthFile) -> Result<bool> {
                     display_name: (*display_name).to_owned(),
                     password_hash: hash_password(SEED_PASSWORD)?,
                     enabled: true,
-                    must_change_password: ENFORCE_PASSWORD_CHANGE,
+                    must_change_password: enforce_password_change,
                     role: *role,
                 });
                 changed = true;
@@ -1076,7 +1144,7 @@ fn hash_password(password: &str) -> Result<String> {
 
 /// Writes the team roster the first time the app runs on a machine, so the
 /// build is testable without running the provisioning binary by hand.
-fn seed_local_auth(path: &Path) -> Result<()> {
+fn seed_local_auth(path: &Path, enforce_password_change: bool) -> Result<()> {
     let users = SEED_USERS
         .iter()
         .map(|(email, display_name, role)| {
@@ -1086,7 +1154,7 @@ fn seed_local_auth(path: &Path) -> Result<()> {
                 display_name: (*display_name).to_owned(),
                 password_hash: hash_password(SEED_PASSWORD)?,
                 enabled: true,
-                must_change_password: ENFORCE_PASSWORD_CHANGE,
+                must_change_password: enforce_password_change,
                 role: *role,
             })
         })
@@ -1205,8 +1273,13 @@ fn package_destination(value: &str) -> PathBuf {
     }
     path
 }
-fn catalogue_key(package_id: &str, revision_id: &str) -> String {
-    format!("{package_id}:{revision_id}")
+/// Loaded catalogues are held in one process-wide map; the session scope keeps
+/// one person's catalogue invisible to another on a shared server.
+fn catalogue_key(ctx: &Ctx, package_id: &str, revision_id: &str) -> String {
+    match ctx.session.scope.as_deref() {
+        Some(scope) => format!("{scope}|{package_id}:{revision_id}"),
+        None => format!("{package_id}:{revision_id}"),
+    }
 }
 fn command_error(error: impl std::fmt::Display) -> CommandError {
     CommandError::bad_request(error.to_string())

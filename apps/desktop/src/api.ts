@@ -6,7 +6,7 @@
  * match in `commands.rs`.
  */
 
-import { invoke } from '@tauri-apps/api/core'
+import { transport } from './transport'
 import type {
   DatabaseSettings,
   StartupStatus,
@@ -62,17 +62,13 @@ import type {
   ProjectMember,
 } from '@skwad/shared-types'
 
-/** Backend errors arrive as `{ message }`; normalise to a throwable Error. */
-async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
-  try {
-    return await invoke<T>(command, args)
-  } catch (raw) {
-    const message =
-      typeof raw === 'object' && raw !== null && 'message' in raw
-        ? String((raw as { message: unknown }).message)
-        : String(raw)
-    throw new Error(message)
-  }
+/**
+ * Runs a backend command over whichever transport was chosen at boot — Tauri
+ * IPC inside the desktop window, HTTP against `skwad-server` otherwise. Errors
+ * arrive as a plain message either way.
+ */
+function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  return transport().call<T>(command, args)
 }
 
 // --- application -----------------------------------------------------------
@@ -108,6 +104,8 @@ export const restartForLibraryChange = () => call<void>('restart_for_library_cha
 // --- team rosters ----------------------------------------------------------
 
 export const previewRosterFile = (path: string) => call<RosterPreview>('preview_roster_file', { path })
+export const previewRosterText = (source: string, text: string) =>
+  call<RosterPreview>('preview_roster_text', { source, text })
 export const importRoster = (source: string, entries: RosterEntry[]) =>
   call<RosterSummary>('import_roster', { source, entries })
 export const rosterSummary = () => call<RosterSummary>('roster_summary')

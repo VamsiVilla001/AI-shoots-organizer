@@ -8,11 +8,11 @@
  * Groups, which belong to a shoot rather than to a project.
  */
 
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { open } from '@tauri-apps/plugin-dialog'
 import type { RosterPreview } from '@skwad/shared-types'
 import * as api from '../api'
+import { hasLocalFileDialogs, pickFiles } from '../pickers'
 import { Icon } from './Icon'
 import { useUi } from '../store'
 
@@ -20,6 +20,10 @@ export function RosterImport({ compact = false }: { compact?: boolean }) {
   const queryClient = useQueryClient()
   const pushNotice = useUi((state) => state.pushNotice)
   const [preview, setPreview] = useState<RosterPreview | null>(null)
+  // A roster is a file the person has in Downloads, not one on a share the
+  // server can see — so against a server the browser reads it and posts the
+  // text, while the desktop hands the backend a path as before.
+  const upload = useRef<HTMLInputElement>(null)
 
   const summary = useQuery({ queryKey: ['rosterSummary'], queryFn: api.rosterSummary })
 
@@ -31,14 +35,26 @@ export function RosterImport({ compact = false }: { compact?: boolean }) {
 
   const choose = useMutation({
     mutationFn: async () => {
-      const picked = await open({
+      if (!hasLocalFileDialogs()) {
+        upload.current?.click()
+        return null
+      }
+      const picked = await pickFiles({
         multiple: false,
         title: 'Choose a roster file',
         filters: [{ name: 'Roster', extensions: ['csv', 'json', 'txt'] }],
       })
-      if (typeof picked !== 'string') return null
-      return api.previewRosterFile(picked)
+      if (!picked?.[0]) return null
+      return api.previewRosterFile(picked[0])
     },
+    onSuccess: (result) => {
+      if (result) setPreview(result)
+    },
+    onError: (error) => pushNotice({ level: 'error', message: error instanceof Error ? error.message : String(error) }),
+  })
+
+  const chooseUploaded = useMutation({
+    mutationFn: async (file: File) => api.previewRosterText(file.name, await file.text()),
     onSuccess: (result) => setPreview(result),
     onError: (error) => pushNotice({ level: 'error', message: error instanceof Error ? error.message : String(error) }),
   })
@@ -110,9 +126,20 @@ export function RosterImport({ compact = false }: { compact?: boolean }) {
     </div>}
 
     {!preview && <div className="actions">
-      <button type="button" disabled={choose.isPending} onClick={() => choose.mutate()}>
-        <Icon name="folder" />{choose.isPending ? 'Reading…' : loaded && loaded.entries > 0 ? 'Import another roster' : 'Choose a roster file'}
+      <button type="button" disabled={choose.isPending || chooseUploaded.isPending} onClick={() => choose.mutate()}>
+        <Icon name="folder" />{choose.isPending || chooseUploaded.isPending ? 'Reading…' : loaded && loaded.entries > 0 ? 'Import another roster' : 'Choose a roster file'}
       </button>
+      <input
+        ref={upload}
+        type="file"
+        accept=".csv,.json,.txt,text/csv,application/json,text/plain"
+        style={{ display: 'none' }}
+        onChange={(event) => {
+          const file = event.target.files?.[0]
+          event.target.value = ''
+          if (file) chooseUploaded.mutate(file)
+        }}
+      />
     </div>}
 
     <details className="roster-format">

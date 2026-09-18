@@ -1,5 +1,5 @@
 import { useState, type MouseEvent } from 'react'
-import { open } from '@tauri-apps/plugin-dialog'
+import { pickFiles, pickFolder as pickFolderDialog } from '../pickers'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { EnrollDirectoryResult, Media, PersonSummary } from '@skwad/shared-types'
 import * as api from '../api'
@@ -110,8 +110,8 @@ export function PreProcess({ onCollect, onAddToExisting }: { onCollect: (media: 
   const pickFolder = async () => {
     setFolderError(''); setFolderResult(null)
     try {
-      const picked = await open({ directory: true, multiple: false })
-      if (typeof picked !== 'string') return
+      const picked = await pickFolderDialog('Choose the reference folder')
+      if (picked === null) return
       setFolderPath(picked)
     } catch (e) {
       setFolderError(String(e))
@@ -121,9 +121,8 @@ export function PreProcess({ onCollect, onAddToExisting }: { onCollect: (media: 
   const addPhotos = async () => {
     setPickerError('')
     try {
-      const picked = await open({ multiple: true, filters: [{ name: 'Images', extensions: PHOTO_EXTENSIONS }] })
-      if (!picked) return
-      const paths = Array.isArray(picked) ? picked : [picked]
+      const paths = await pickFiles({ title: 'Choose reference photos', multiple: true, filters: [{ name: 'Images', extensions: PHOTO_EXTENSIONS }] })
+      if (!paths) return
       setMode('photos')
       setVideoPath(null)
       setPhotoPaths(prev => Array.from(new Set([...prev, ...paths])))
@@ -135,8 +134,8 @@ export function PreProcess({ onCollect, onAddToExisting }: { onCollect: (media: 
   const pickVideo = async () => {
     setPickerError('')
     try {
-      const picked = await open({ multiple: false, filters: [{ name: 'Video', extensions: VIDEO_EXTENSIONS }] })
-      if (typeof picked !== 'string') return
+      const picked = (await pickFiles({ title: 'Choose a reference video', multiple: false, filters: [{ name: 'Video', extensions: VIDEO_EXTENSIONS }] }))?.[0]
+      if (!picked) return
       setMode('video')
       setPhotoPaths([])
       setVideoPath(picked)

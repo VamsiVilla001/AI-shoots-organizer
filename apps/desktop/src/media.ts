@@ -1,19 +1,36 @@
 /**
- * URLs for the skwadmedia:// protocol, plus a few formatting helpers.
+ * URLs for media bytes — `skwadmedia://` in the desktop window, `/media` on a
+ * server — plus a few formatting helpers. The route shape is the same on both.
  */
 
+import { transport, transportReady } from './transport'
+
 let base = 'http://skwadmedia.localhost'
+/** Query the transport needs on every media URL (a token when a cookie cannot travel). */
+let auth = ''
 
 /** Called once at startup with `AppInfo.mediaUrlBase`. */
 export function setMediaBase(urlBase: string) {
-  base = urlBase
+  if (transportReady()) {
+    const resolved = transport().mediaBase(urlBase)
+    base = resolved.base
+    auth = resolved.query
+  } else {
+    base = urlBase
+    auth = ''
+  }
 }
 
-export const thumbUrl = (mediaId: number) => `${base}/thumb/${mediaId}`
-export const fullUrl = (mediaId: number) => `${base}/full/${mediaId}`
-export const videoUrl = (mediaId: number) => `${base}/video/${mediaId}`
+const withAuth = (path: string, query = '') => {
+  const parts = [query, auth].filter(Boolean)
+  return parts.length ? `${base}${path}?${parts.join('&')}` : `${base}${path}`
+}
+
+export const thumbUrl = (mediaId: number) => withAuth(`/thumb/${mediaId}`)
+export const fullUrl = (mediaId: number) => withAuth(`/full/${mediaId}`)
+export const videoUrl = (mediaId: number) => withAuth(`/video/${mediaId}`)
 export const videoFrameUrl = (mediaId: number, timestamp: number) =>
-  `${base}/frame/${mediaId}?t=${timestamp.toFixed(3)}`
+  withAuth(`/frame/${mediaId}`, `t=${timestamp.toFixed(3)}`)
 
 export function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) return '—'

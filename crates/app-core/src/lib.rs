@@ -23,7 +23,9 @@
 pub mod api;
 pub mod events;
 pub mod export;
+pub mod job_source;
 pub mod machine;
+pub mod media;
 pub mod models;
 pub mod paths;
 pub mod pipeline;
@@ -37,5 +39,6 @@ pub mod worker;
 pub use paths::AppPaths;
 pub use progress::{null_sink, NullProgressSink, ProgressSink, RecordingProgressSink};
 pub use settings::{AppSettings, LibrarySettings, MachineSettings};
+pub use job_source::{JobSource, LocalJobSource};
 pub use state::AppState;
 pub use worker::WorkerPool;

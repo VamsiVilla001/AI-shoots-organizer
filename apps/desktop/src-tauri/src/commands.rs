@@ -109,7 +109,7 @@ fn headless_ctx_with_sink(state: Arc<AppState>, sink: Arc<dyn skwad_app_core::Pr
     Ctx {
         state,
         sink,
-        session: Session { user },
+        session: Session { user, scope: None },
         identity,
     }
 }

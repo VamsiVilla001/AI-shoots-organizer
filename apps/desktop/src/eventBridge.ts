@@ -5,8 +5,8 @@
  * invalidates, so screens refresh without polling (§18).
  */
 
-import { listen } from '@tauri-apps/api/event'
 import type { QueryClient } from '@tanstack/react-query'
+import { transport } from './transport'
 import type {
   ExportProgressEvent,
   JobFailedEvent,
@@ -18,6 +18,9 @@ import { useUi } from './store'
 import { LIBRARY_CHANGE_KEYS, SHOOT_COMPLETE_KEYS, invalidateKeys } from './queryKeys'
 
 export async function startEventBridge(queryClient: QueryClient): Promise<() => void> {
+  // Same handler shape as Tauri's `listen`, over whichever transport is active.
+  const listen = <T,>(event: string, handler: (event: { payload: T }) => void) =>
+    transport().listen<T>(event, (payload) => handler({ payload }))
   const disposers = await Promise.all([
     listen<ProgressEvent>('skwad://progress', ({ payload }) => {
       useUi.getState().setProgress(payload)

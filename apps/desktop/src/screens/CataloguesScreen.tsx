@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { open, save } from '@tauri-apps/plugin-dialog'
+import { pickFiles, pickFolder, pickSavePath } from '../pickers'
 import * as api from '../api'
 import { useUi } from '../store'
 
@@ -34,7 +34,7 @@ export function CataloguesScreen() {
       pushNotice({ level: 'warn', message: 'Use an offline passphrase of at least 12 characters.' })
       return
     }
-    const destination = await save({ title: 'Publish encrypted SKWAD catalogue', defaultPath: 'shoot.skwad', filters: [{ name: 'SKWAD catalogue', extensions: ['skwad'] }] })
+    const destination = await pickSavePath({ title: 'Publish encrypted SKWAD catalogue', defaultPath: 'shoot.skwad', filters: [{ name: 'SKWAD catalogue', extensions: ['skwad'] }] })
     if (!destination) return
     try {
       const result = await api.publishSkwad(activeShootId, destination, passphrase)
@@ -46,8 +46,9 @@ export function CataloguesScreen() {
   }
 
   const load = async () => {
-    const path = await open({ multiple: false, filters: [{ name: 'SKWAD catalogue', extensions: ['skwad'] }] })
-    if (typeof path !== 'string') return
+    const paths = await pickFiles({ title: 'Choose a SKWAD catalogue', multiple: false, filters: [{ name: 'SKWAD catalogue', extensions: ['skwad'] }] })
+    const path = paths?.[0]
+    if (!path) return
     try {
       const result = await api.loadSkwad(path, passphrase || null)
       setPassphrase('')
@@ -61,8 +62,8 @@ export function CataloguesScreen() {
 
   const mapLibrary = async () => {
     if (!selected) return
-    const root = await open({ directory: true, multiple: false, title: 'Map this catalogue to its NAS root' })
-    if (typeof root !== 'string') return
+    const root = await pickFolder('Map this catalogue to its NAS root')
+    if (root === null) return
     try {
       await api.approveCatalogueLibrary(selected.packageId, selected.revisionId, root)
       await queryClient.invalidateQueries({ queryKey: ['loadedCatalogues'] })

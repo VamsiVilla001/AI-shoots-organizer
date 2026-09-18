@@ -10,7 +10,7 @@
 
 import { useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { open } from '@tauri-apps/plugin-dialog'
+import { pickFolder } from '../pickers'
 import type { ExportOptions, ExportPreview } from '@skwad/shared-types'
 import * as api from '../api'
 import { folderNameFor } from '../folders'
@@ -78,8 +78,8 @@ function ExportBody({ shootId, initialGroupIds }: { shootId: number; initialGrou
   }, [exportProgress])
 
   const pickDestination = async () => {
-    const picked = await open({ directory: true, multiple: false, title: 'Choose the destination folder' })
-    if (typeof picked === 'string') setDestination(picked)
+    const picked = await pickFolder('Choose the destination folder')
+    if (picked !== null) setDestination(picked)
   }
 
   const start = async () => {

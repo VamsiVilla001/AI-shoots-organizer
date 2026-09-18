@@ -1,6 +1,6 @@
 import { useEffect, useState, type MouseEvent } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { open } from '@tauri-apps/plugin-dialog'
+import { pickFolder } from '../pickers'
 import type { Album, Media, ShootSummary } from '@skwad/shared-types'
 import * as api from '../api'
 import { thumbUrl } from '../media'
@@ -161,7 +161,7 @@ function ImportMedia({ onClose, onCreated }: { onClose: () => void; onCreated: (
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const client = useQueryClient()
-  const browse = async () => { try { const result = await open({ directory: true, multiple: false, title: 'Choose a media folder' }); if (typeof result === 'string') { setFolder(result); if (!name) setName(result.replaceAll('\\', '/').split('/').filter(Boolean).pop() ?? '') } } catch (e) { setError(String(e)) } }
+  const browse = async () => { try { const result = await pickFolder('Choose a media folder'); if (result !== null) { setFolder(result); if (!name) setName(result.replaceAll('\\', '/').split('/').filter(Boolean).pop() ?? '') } } catch (e) { setError(String(e)) } }
   return <WorkspaceDialog title="Add media" onClose={() => { if (!busy) onClose() }}><form onSubmit={async e => { e.preventDefault(); setBusy(true); setError(''); try { const result = await api.createShoot(name.trim(), folder.trim()); await client.invalidateQueries({ queryKey: ['shoots'] }); onCreated(result.id) } catch (e) { setError(String(e)) } finally { setBusy(false) } }}>
     <p>Choose a folder of photos and videos. Files stay in their original location while SKWAD analyses them.</p>
     <label className="field">Media folder<div className="actions"><input required autoFocus value={folder} disabled={busy} onChange={e => setFolder(e.target.value)} placeholder="Select or enter a folder path" /><button type="button" disabled={busy} onClick={() => void browse()}>Browse</button></div></label>
