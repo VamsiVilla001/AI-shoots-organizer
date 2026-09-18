@@ -1,5 +1,6 @@
 //! SKWAD Media Organiser — application wiring.
 
+pub mod client;
 pub mod commands;
 pub mod db_setup;
 pub mod events;
@@ -39,6 +40,12 @@ pub fn run() {
                 .app_data_dir()
                 .map_err(|e| format!("could not resolve the application data directory: {e}"))?;
             let migration = paths::migrate_legacy_data_dir(&data_dir)?;
+
+            // A client installation holds a server address instead of a
+            // library: nothing below about databases applies to it.
+            if let Some(server_url) = client::resolve_server(&data_dir) {
+                return boot_client(app, data_dir, server_url);
+            }
 
             // A team shares one library folder over the network; until an
             // administrator points this machine at one, it is this machine's
@@ -162,6 +169,9 @@ pub fn run() {
                         pool.join();
                     }
                 }
+                if let Some(mode) = window.app_handle().try_state::<Arc<client::ClientMode>>() {
+                    mode.stop_worker();
+                }
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -171,6 +181,16 @@ pub fn run() {
             db_setup::test_database_connection,
             db_setup::save_database_connection,
             db_setup::restart_for_database_change,
+            client::client_status,
+            client::set_server_url,
+            client::restart_for_client_change,
+            client::store_machine_enrolment,
+            client::forget_machine_enrolment,
+            client::set_worker_enabled,
+            client::update_worker_settings,
+            commands::list_machines,
+            commands::enrol_machine,
+            commands::revoke_machine,
             commands::app_info,
             commands::get_settings,
             commands::update_settings,
@@ -301,6 +321,54 @@ pub fn run() {
 }
 
 use parking_lot::Mutex;
+
+/// Starts the app as a client of `server_url`: no database, no library folder,
+/// no local job queue. The webview talks to the server over HTTP; the only
+/// thing this process may run is the worker, when the machine is enrolled
+/// and the person has switched it on.
+fn boot_client(app: &mut tauri::App, data_dir: std::path::PathBuf, server_url: String) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let paths = AppPaths::create(&data_dir)?;
+    init_logging(&paths);
+    let config = client::load(&data_dir);
+    let machine_id = machine::load_or_create(&data_dir);
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        server = %server_url,
+        machine = %machine_id,
+        enrolled = config.machine_token.is_some(),
+        worker = config.worker_enabled,
+        "starting as a client"
+    );
+    app.manage(db_setup::StartupStatus::Client {
+        server_url: server_url.clone(),
+        machine_id: machine_id.clone(),
+        machine_name: config.machine_name.clone(),
+        worker_enabled: config.worker_enabled,
+    });
+    let mode = Arc::new(client::ClientMode::new(data_dir, paths, machine_id, config.clone()));
+    app.manage(Arc::clone(&mode));
+
+    // Bundled models go into this machine's own folder so the worker has
+    // them without a download when they match the server's pair.
+    let seed_handle = app.handle().clone();
+    let models_dir = mode.paths.models.clone();
+    std::thread::Builder::new()
+        .name("skwad-models-seed".into())
+        .spawn(move || {
+            let installed = models::seed_from_bundle(&seed_handle, &models_dir);
+            if !installed.is_empty() {
+                tracing::info!(models = ?installed, "installed bundled models");
+            }
+        })
+        .ok();
+
+    if config.worker_enabled && config.machine_token.is_some() {
+        if let Err(error) = mode.start_worker(events::sink(app.handle())) {
+            tracing::warn!(error = %error.message, "worker mode did not start");
+        }
+    }
+    Ok(())
+}
 
 /// Logs to a rolling file in the app data directory, and to the console during
 /// development. Kept lightweight, as §25 asks.

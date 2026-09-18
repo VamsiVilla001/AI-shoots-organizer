@@ -3393,3 +3393,47 @@ button {
   background: var(--bg-hover, rgba(255, 255, 255, 0.05));
   border-color: var(--border);
 }
+
+/* --- worker roster (Settings) ------------------------------------------- */
+
+.machine-row {
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) 2fr 1fr auto;
+  gap: 12px;
+  align-items: center;
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+}
+
+.machine-row.revoked {
+  opacity: 0.55;
+}
+
+.machine-main {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+
+.db-setup-server {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.db-setup-server h2 {
+  margin: 0 0 4px;
+  font-size: 1rem;
+}
+
+.db-setup-actions input {
+  flex: 1;
+  min-width: 220px;
+}
+
+.field.checkbox {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}

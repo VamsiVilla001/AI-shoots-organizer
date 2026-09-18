@@ -10,6 +10,9 @@ import * as api from '../api'
 import { formatBytes } from '../media'
 import { LibraryLocationCard } from '../components/LibraryLocationCard'
 import { RosterImport } from '../components/RosterImport'
+import { WorkerCard } from '../components/WorkerCard'
+import { MachinesCard } from '../components/MachinesCard'
+import { transport } from '../transport'
 import { DatabaseSetupScreen } from './DatabaseSetupScreen'
 import { useUi } from '../store'
 
@@ -20,6 +23,13 @@ export function SettingsScreen() {
   const session = useQuery({ queryKey: ['catalogueSession'], queryFn: api.catalogueSessionStatus })
   const settingsQuery = useQuery({ queryKey: ['settings'], queryFn: api.getSettings })
   const panel = useQuery({ queryKey: ['premierePanel'], queryFn: api.premierePanelStatus })
+  // Which front door this is. A desktop with its own library shows the
+  // library cards; a client installation shows worker mode instead; a
+  // browser shows neither.
+  const desktopLibrary = transport().kind === 'tauri'
+  const client = useQuery({ queryKey: ['clientStatus'], queryFn: api.clientStatus, retry: false, enabled: !desktopLibrary })
+  const isClient = client.data?.serverUrl != null
+  const isAdmin = session.data?.isAdmin === true
   const [draft, setDraft] = useState<AppSettings | null>(null)
 
   useEffect(() => {
@@ -150,16 +160,24 @@ export function SettingsScreen() {
         </div>
       </div>
 
-      <LibraryLocationCard isAdmin={session.data?.isAdmin === true} />
+      {desktopLibrary && <LibraryLocationCard isAdmin={isAdmin} />}
 
-      <LibraryDatabaseCard />
+      {desktopLibrary && <LibraryDatabaseCard />}
+
+      {isClient && <WorkerCard isAdmin={isAdmin} />}
+
+      <MachinesCard isAdmin={isAdmin} />
 
       <div className="card roster-card"><RosterImport /></div>
 
       <div className="settings-grid">
         <div className="card">
           <h2>AI Runtime</h2>
-          <div className="hint">This machine only — hardware and tools. Other machines using this library keep their own.</div>
+          <div className="hint">
+            {isClient
+              ? "The server's hardware and tools — administrators only. This machine's own are under Worker mode above."
+              : 'This machine only — hardware and tools. Other machines using this library keep their own.'}
+          </div>
           <label className="field">
             <span>Acceleration</span>
             <select
@@ -273,16 +291,20 @@ export function SettingsScreen() {
             {clearIndexes.isPending ? 'Clearing indexed media…' : 'Clear all indexed media'}
           </button>
 
-          <h2 style={{ marginTop: 8 }}>Premiere Pro panel</h2>
-          {panelHint()}
-          {panel.data?.bundledVersion && !panel.data.installedVersion && panel.data.installerAvailable && (
-            <button
-              className="small"
-              disabled={installPanel.isPending}
-              onClick={() => installPanel.mutate()}
-            >
-              {installPanel.isPending ? 'Installing…' : 'Install panel'}
-            </button>
+          {desktopLibrary && (
+            <>
+              <h2 style={{ marginTop: 8 }}>Premiere Pro panel</h2>
+              {panelHint()}
+              {panel.data?.bundledVersion && !panel.data.installedVersion && panel.data.installerAvailable && (
+                <button
+                  className="small"
+                  disabled={installPanel.isPending}
+                  onClick={() => installPanel.mutate()}
+                >
+                  {installPanel.isPending ? 'Installing…' : 'Install panel'}
+                </button>
+              )}
+            </>
           )}
           <h2 style={{ marginTop: 8 }}>Privacy</h2>
           <div className="hint">

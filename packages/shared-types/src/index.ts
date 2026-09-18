@@ -878,6 +878,8 @@ export interface NoticeEvent {
 export type StartupStatus =
   | { kind: 'ready' }
   | { kind: 'needsDatabase'; settings: DatabaseSettings; title: string; detail: string }
+  /** A client installation: the webview talks to `serverUrl`; there is no library here. */
+  | { kind: 'client'; serverUrl: string; machineId: string; machineName: string | null; workerEnabled: boolean }
 
 /** A library database connection, without the password. */
 export interface DatabaseSettings {
@@ -891,4 +893,75 @@ export interface DatabaseSettings {
    * making someone retype it to change a port.
    */
   hasSavedPassword: boolean
+}
+
+// ---------------------------------------------------------------------------
+// Client mode and worker machines
+// ---------------------------------------------------------------------------
+
+/** This machine's half of the settings: hardware and tools, never shared. */
+export interface MachineSettings {
+  accelerator: Accelerator
+  inferenceThreads: number
+  workerThreads: number
+  aiWorkers: number
+  videoFramePrefetch: boolean
+  ffmpegDirectory: string | null
+  detectorModel: string | null
+  embedderModel: string | null
+}
+
+/** What a worker advertises when it enrols and on every claim. */
+export interface MachineCapabilities {
+  appVersion: string
+  gpu: string | null
+  detectorHash: string | null
+  embedderHash: string | null
+  aiWorkers: number
+  onBattery: boolean
+}
+
+/** One enrolled worker machine, with what it is doing (from `list_machines`). */
+export interface MachineRosterEntry {
+  id: string
+  name: string
+  enrolledBy: string | null
+  enrolledAt: string
+  lastSeen: string | null
+  capabilities: MachineCapabilities
+  revokedAt: string | null
+  running: number
+  completed: number
+  failed: number
+}
+
+/** The answer to `enrol_machine`. The token is shown once. */
+export interface EnrolResponse {
+  machine: Omit<MachineRosterEntry, 'running' | 'completed' | 'failed'>
+  token: string
+}
+
+/** A client worker's connection to its server. */
+export interface RemoteStatus {
+  connected: boolean
+  paused: boolean
+  lastError: string | null
+  jobsCompleted: number
+  jobsFailed: number
+  held: number
+  libraryVersion: number
+  modelsReady: boolean
+}
+
+/** The worker panel's view of this installation (desktop only). */
+export interface WorkerStatus {
+  serverUrl: string | null
+  machineId: string
+  machineName: string | null
+  enrolled: boolean
+  enabled: boolean
+  starting: boolean
+  lastError: string | null
+  remote: RemoteStatus | null
+  machineSettings: MachineSettings
 }

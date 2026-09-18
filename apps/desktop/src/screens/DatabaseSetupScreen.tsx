@@ -136,7 +136,12 @@ export function DatabaseSetupScreen({ initial, problem, embedded }: Props) {
   )
 
   if (embedded) {
-    return <section className="db-setup embedded">{form}</section>
+    return (
+      <section className="db-setup embedded">
+        {form}
+        <ServerOption />
+      </section>
+    )
   }
 
   return (
@@ -149,7 +154,65 @@ export function DatabaseSetupScreen({ initial, problem, embedded }: Props) {
           remember.
         </p>
         {form}
+        <ServerOption />
       </section>
+    </div>
+  )
+}
+
+/**
+ * The other way to set a machine up: as a client of a SKWAD server. It then
+ * holds the server's address and nothing else — no database, no library
+ * folder — and everything it shows comes from the server.
+ */
+function ServerOption() {
+  const [url, setUrl] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [outcome, setOutcome] = useState<Outcome | null>(null)
+  const [saved, setSaved] = useState(false)
+
+  const save = async () => {
+    setBusy(true)
+    setOutcome(null)
+    try {
+      await api.setServerUrl(url)
+      setSaved(true)
+      setOutcome({ ok: true, message: 'Saved. SKWAD will start as a client of that server after a restart.' })
+    } catch (e) {
+      setOutcome({ ok: false, message: e instanceof Error ? e.message : String(e) })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="db-setup-server">
+      <h2>Or use a SKWAD server</h2>
+      <p className="db-setup-intro">
+        When one machine runs the SKWAD server, this one only needs its address. Nothing else is
+        configured here: sign in with your usual account once connected.
+      </p>
+      <div className="db-setup-actions">
+        <input
+          value={url}
+          placeholder="https://studio-pc:8420"
+          onChange={(e) => {
+            setUrl(e.target.value)
+            setOutcome(null)
+            setSaved(false)
+          }}
+          spellCheck={false}
+        />
+        <button className="ghost" onClick={() => void save()} disabled={busy || !url.trim()}>
+          {busy ? 'Saving…' : 'Use this server'}
+        </button>
+        {saved && (
+          <button className="primary" onClick={() => api.restartForClientChange()}>
+            Restart SKWAD
+          </button>
+        )}
+      </div>
+      {outcome && <p className={outcome.ok ? 'db-setup-result ok' : 'db-setup-result bad'}>{outcome.message}</p>}
     </div>
   )
 }

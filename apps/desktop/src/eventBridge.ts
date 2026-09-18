@@ -17,6 +17,16 @@ import type {
 import { useUi } from './store'
 import { LIBRARY_CHANGE_KEYS, SHOOT_COMPLETE_KEYS, invalidateKeys } from './queryKeys'
 
+/// The bridge in use, so a reconnect can replace it rather than stack a second one.
+let current: (() => void) | null = null
+
+/** Stops the running bridge, if any, and starts one on the active transport. */
+export async function restartEventBridge(queryClient: QueryClient): Promise<void> {
+  current?.()
+  current = null
+  current = await startEventBridge(queryClient)
+}
+
 export async function startEventBridge(queryClient: QueryClient): Promise<() => void> {
   // Same handler shape as Tauri's `listen`, over whichever transport is active.
   const listen = <T,>(event: string, handler: (event: { payload: T }) => void) =>

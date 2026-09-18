@@ -119,6 +119,13 @@ const DESKTOP_ONLY: Record<string, string> = {
   reveal_in_folder: 'Opening a folder on this machine',
   open_path: 'Opening a file on this machine',
   open_catalogue_media: 'Opening a catalogue file on this machine',
+  client_status: 'Worker mode',
+  set_server_url: 'Choosing a server',
+  restart_for_client_change: 'Restarting the app',
+  store_machine_enrolment: 'Worker mode',
+  forget_machine_enrolment: 'Worker mode',
+  set_worker_enabled: 'Worker mode',
+  update_worker_settings: 'Worker mode',
 }
 
 function normaliseError(raw: unknown): Error {
@@ -201,10 +208,15 @@ export function forgetConnection() {
 export interface HttpTransport extends Transport {
   readonly kind: 'http'
   readonly connection: HttpConnection
+  /**
+   * The desktop IPC behind a client installation: desktop-only commands and
+   * this machine's own events (its worker) go there. Absent in a browser.
+   */
+  readonly local?: Transport
   close(): void
 }
 
-export function createHttpTransport(initial: HttpConnection): HttpTransport {
+export function createHttpTransport(initial: HttpConnection, local?: Transport): HttpTransport {
   const connection: HttpConnection = { ...initial, baseUrl: initial.baseUrl.replace(/\/+$/, '') }
   const url = (path: string) => `${connection.baseUrl}${path}`
 
@@ -276,12 +288,16 @@ export function createHttpTransport(initial: HttpConnection): HttpTransport {
   return {
     kind: 'http',
     connection,
+    local,
 
     async call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
-      const local = HTTP_LOCAL[command]
-      if (local) return local(args ?? {}) as T
+      const constant = HTTP_LOCAL[command]
+      if (constant) return constant(args ?? {}) as T
       const reason = DESKTOP_ONLY[command]
-      if (reason) throw new UnsupportedByTransport(reason)
+      if (reason) {
+        if (local) return local.call<T>(command, args)
+        throw new UnsupportedByTransport(reason)
+      }
 
       const response = await fetch(url(`/api/invoke/${command}`), {
         method: 'POST',
@@ -321,9 +337,13 @@ export function createHttpTransport(initial: HttpConnection): HttpTransport {
       handlers.set(event, set)
       ensureStream()
       attach(event)
+      // A client installation's own worker reports through the desktop IPC;
+      // everything about the library comes down the server's stream.
+      const disposeLocal = local ? await local.listen<T>(event, handler) : null
       return () => {
         set.delete(handler as (payload: unknown) => void)
         if (set.size === 0) handlers.delete(event)
+        disposeLocal?.()
       }
     },
 
@@ -357,15 +377,40 @@ export function activeKind(): 'tauri' | 'http' | null {
   return active?.kind ?? null
 }
 
+/** Why a client installation could not reach its server at boot, if it could not. */
+let clientProblem: { serverUrl: string; message: string } | null = null
+
+export function clientConnectProblem() {
+  return clientProblem
+}
+
 /**
- * Picks the transport once, at boot. Inside the Tauri window the IPC is
- * there; served by (or pointed at) a server, a saved connection is used;
- * otherwise nothing is chosen yet and the UI shows the connect screen.
+ * Picks the transport once, at boot.
+ *
+ * Inside the Tauri window the IPC is there — and if the installation is a
+ * client of a server, the HTTP transport is layered over it, so the library
+ * comes from the server and the machine's own commands stay local. Served
+ * by (or pointed at) a server in a browser, a saved connection is used.
+ * Otherwise nothing is chosen yet and the UI shows the connect screen.
  */
-export function initTransport(): Transport | null {
+export async function bootTransport(): Promise<Transport | null> {
   if (active) return active
   if (isTauri()) {
-    active = createTauriTransport()
+    const tauri = createTauriTransport()
+    let startup: { kind?: string; serverUrl?: string } | null = null
+    try {
+      startup = await tauri.call<{ kind?: string; serverUrl?: string }>('startup_status')
+    } catch {
+      startup = null
+    }
+    if (startup?.kind === 'client' && startup.serverUrl) {
+      try {
+        return await connectToServer(startup.serverUrl, { local: tauri })
+      } catch (e) {
+        clientProblem = { serverUrl: startup.serverUrl, message: String((e as Error).message ?? e) }
+      }
+    }
+    active = tauri
     return active
   }
   const saved = loadConnection()
@@ -376,8 +421,11 @@ export function initTransport(): Transport | null {
   return null
 }
 
-/** Connects a browser build to a server chosen on the connect screen. */
-export async function connectToServer(baseUrl: string): Promise<HttpTransport> {
+/**
+ * Connects to a server chosen on the connect screen — a browser build, or a
+ * client installation whose desktop IPC is passed as `local`.
+ */
+export async function connectToServer(baseUrl: string, options: { local?: Transport } = {}): Promise<HttpTransport> {
   const trimmed = baseUrl.trim().replace(/\/+$/, '')
   const response = await fetch(`${trimmed}/health`, { credentials: 'include' }).catch(() => null)
   if (!response || !response.ok) {
@@ -389,10 +437,19 @@ export async function connectToServer(baseUrl: string): Promise<HttpTransport> {
       `the server at ${trimmed || 'this origin'} speaks API version ${health.apiVersion ?? '?'}; this client speaks ${API_VERSION}`,
     )
   }
-  const connection: HttpConnection = { baseUrl: trimmed, token: null, tokenInUrl: trimmed !== '' && trimmed !== window.location.origin }
+  // A session kept from an earlier run of the same server still works.
+  const saved = loadConnection()
+  const token = saved && saved.baseUrl === trimmed ? saved.token : null
+  const connection: HttpConnection = {
+    baseUrl: trimmed,
+    token,
+    tokenInUrl: options.local !== undefined || (trimmed !== '' && trimmed !== window.location.origin),
+  }
   saveConnection(connection)
-  const next = createHttpTransport(connection)
+  const next = createHttpTransport(connection, options.local)
+  if (active?.kind === 'http') (active as HttpTransport).close()
   active = next
+  clientProblem = null
   return next
 }
 

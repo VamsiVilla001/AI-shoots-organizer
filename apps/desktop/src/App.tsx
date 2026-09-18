@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { startEventBridge } from './eventBridge'
+import { restartEventBridge } from './eventBridge'
 import * as api from './api'
 import { setMediaBase } from './media'
-import { transportReady } from './transport'
+import { clientConnectProblem, transportReady } from './transport'
 import { ServerConnectScreen } from './screens/ServerConnectScreen'
 import { useUi } from './store'
 import { Sidebar } from './components/Sidebar'
@@ -35,7 +35,7 @@ export default function App() {
       <ServerConnectScreen
         onConnected={() => {
           setConnected(true)
-          startEventBridge(queryClient).catch((e) => console.error('event bridge failed to start', e))
+          restartEventBridge(queryClient).catch((e) => console.error('event bridge failed to start', e))
         }}
       />
     )
@@ -44,6 +44,7 @@ export default function App() {
 }
 
 function ConnectedApp() {
+  const queryClient = useQueryClient()
   const [experience, setExperience] = useState<'classic' | 'projects'>(() => {
     try { return localStorage.getItem('skwad.experience') === 'classic' ? 'classic' : 'projects' } catch { return 'projects' }
   })
@@ -90,6 +91,25 @@ function ConnectedApp() {
 
   if (startup.isPending) {
     return <div className="auth-shell"><div className="auth-loading">Loading SKWAD…</div></div>
+  }
+
+  // A client installation whose server could not be reached at boot: the
+  // desktop IPC is up, the library is not. Once it connects, the startup
+  // question is asked again over the server and answers "ready".
+  if (startup.data?.kind === 'client') {
+    const problem = clientConnectProblem()
+    return (
+      <>
+        <ServerConnectScreen
+          desktop={{ serverUrl: problem?.serverUrl ?? startup.data.serverUrl, problem: problem?.message ?? null }}
+          onConnected={() => {
+            restartEventBridge(queryClient).catch((e) => console.error('event bridge failed to start', e))
+            queryClient.invalidateQueries({ queryKey: ['startupStatus'] })
+          }}
+        />
+        <Notices />
+      </>
+    )
   }
 
   if (startup.data?.kind === 'needsDatabase') {

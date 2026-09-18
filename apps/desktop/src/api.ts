@@ -10,6 +10,10 @@ import { transport } from './transport'
 import type {
   DatabaseSettings,
   StartupStatus,
+  EnrolResponse,
+  MachineRosterEntry,
+  MachineSettings,
+  WorkerStatus,
   Album,
   AppInfo,
   AppSettings,
@@ -360,3 +364,25 @@ export const saveDatabaseConnection = (settings: DatabaseSettings, password: str
   call<string>('save_database_connection', { settings, password })
 
 export const restartForDatabaseChange = () => call<void>('restart_for_database_change')
+
+// --- client mode and worker machines ---------------------------------------
+//
+// The first three run against whichever library the transport reaches (the
+// server, in client mode). The rest are answered by the desktop itself and
+// describe this installation.
+
+export const listMachines = () => call<MachineRosterEntry[]>('list_machines')
+export const enrolMachine = (name: string, machineId: string) =>
+  call<EnrolResponse>('enrol_machine', { name, machineId })
+export const revokeMachine = (machineId: string) => call<boolean>('revoke_machine', { machineId })
+
+export const clientStatus = () => call<WorkerStatus>('client_status')
+/** Points this installation at a server; null returns it to a library of its own. Needs a restart. */
+export const setServerUrl = (url: string | null) => call<boolean>('set_server_url', { url })
+export const restartForClientChange = () => call<void>('restart_for_client_change')
+export const storeMachineEnrolment = (token: string, name: string) =>
+  call<WorkerStatus>('store_machine_enrolment', { token, name })
+export const forgetMachineEnrolment = () => call<WorkerStatus>('forget_machine_enrolment')
+export const setWorkerEnabled = (enabled: boolean) => call<WorkerStatus>('set_worker_enabled', { enabled })
+export const updateWorkerSettings = (settings: MachineSettings) =>
+  call<WorkerStatus>('update_worker_settings', { settings })

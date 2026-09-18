@@ -50,6 +50,14 @@ pub enum StartupStatus {
         title: String,
         detail: String,
     },
+    /// This installation is a client of a server: the webview should talk
+    /// HTTP to `server_url` and there is no library here.
+    Client {
+        server_url: String,
+        machine_id: String,
+        machine_name: Option<String>,
+        worker_enabled: bool,
+    },
 }
 
 /// The connection, without the password. Mirrors `PgConfig`'s serialised shape
