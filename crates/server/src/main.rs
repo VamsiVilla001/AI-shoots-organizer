@@ -6,6 +6,8 @@
 //! skwad-server create-user --email … --name … [--password …] [--admin]
 //! skwad-server install …         register the Windows service with these settings (elevated)
 //! skwad-server uninstall | start | stop | status
+//! skwad-server enrol --server URL --email … --password … --name …   enrol this box as a worker
+//! skwad-server worker --server URL --token …                    analyse for a server, headless
 //! ```
 //!
 //! Configuration precedence is command line, then environment, then the
@@ -22,7 +24,7 @@ mod service;
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (command, rest) = match args.first().map(String::as_str) {
-        Some(c @ ("run" | "doctor" | "create-user" | "install" | "uninstall" | "start" | "stop" | "status" | "help" | "--help" | "-h")) => (c, &args[1..]),
+        Some(c @ ("run" | "doctor" | "create-user" | "enrol" | "worker" | "install" | "uninstall" | "start" | "stop" | "status" | "help" | "--help" | "-h")) => (c, &args[1..]),
         Some(flag) if flag.starts_with("--") => ("run", &args[..]),
         Some(other) => {
             eprintln!("unrecognised command: {other}\n");
@@ -56,6 +58,20 @@ fn main() {
         "create-user" => {
             init_console_logging();
             if let Err(error) = create_user(rest) {
+                eprintln!("skwad-server: {error}");
+                std::process::exit(1);
+            }
+        }
+        "enrol" => {
+            init_console_logging();
+            if let Err(error) = enrol(rest) {
+                eprintln!("skwad-server: {error}");
+                std::process::exit(1);
+            }
+        }
+        "worker" => {
+            init_console_logging();
+            if let Err(error) = worker(rest) {
                 eprintln!("skwad-server: {error}");
                 std::process::exit(1);
             }
@@ -188,6 +204,137 @@ fn create_user(rest: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Picks `--key value` pairs out of `rest`, leaving the rest alone.
+fn take_flags(rest: &[String], keys: &[&str]) -> (std::collections::HashMap<String, String>, Vec<String>) {
+    let mut found = std::collections::HashMap::new();
+    let mut remaining = Vec::new();
+    let mut i = 0;
+    while i < rest.len() {
+        if keys.contains(&rest[i].as_str()) {
+            if let Some(value) = rest.get(i + 1) {
+                found.insert(rest[i].clone(), value.clone());
+            }
+            i += 2;
+        } else {
+            remaining.push(rest[i].clone());
+            i += 1;
+        }
+    }
+    (found, remaining)
+}
+
+/// Where a headless worker keeps its own state: models, downloads, machine id.
+fn worker_home(flags: &std::collections::HashMap<String, String>) -> std::path::PathBuf {
+    flags
+        .get("--home")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| config::default_library_root().join("worker"))
+}
+
+/// `enrol --server URL --email E --password P --name N [--home DIR]` signs in
+/// as an administrator and enrols this box, printing the token to keep.
+fn enrol(rest: &[String]) -> Result<(), String> {
+    let (flags, _) = take_flags(rest, &["--server", "--email", "--password", "--name", "--home"]);
+    let server = flags.get("--server").ok_or("--server is required")?;
+    let email = flags.get("--email").ok_or("--email is required")?;
+    let name = flags.get("--name").ok_or("--name is required")?;
+    let password = match flags.get("--password") {
+        Some(p) => p.clone(),
+        None => rpassword_prompt("password: ")?,
+    };
+    let home = worker_home(&flags);
+    std::fs::create_dir_all(&home).map_err(|e| e.to_string())?;
+    let machine_id = skwad_app_core::machine::load_or_create(&home);
+    let enrolled = skwad_app_core::remote::enrol_with_credentials(server, email, &password, name, &machine_id)?;
+    println!("enrolled {} as \"{}\"", enrolled.machine.id, enrolled.machine.name);
+    println!("machine token (shown once):
+{}", enrolled.token);
+    println!("
+run:  skwad-server worker --server {server} --token <token> --home {}", home.display());
+    Ok(())
+}
+
+fn rpassword_prompt(prompt: &str) -> Result<String, String> {
+    use std::io::Write;
+    print!("{prompt}");
+    std::io::stdout().flush().ok();
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line).map_err(|e| e.to_string())?;
+    Ok(line.trim().to_string())
+}
+
+/// `worker --server URL --token T [--home DIR] [--ai-workers N]` runs analysis
+/// slots for a server with no library of its own — a GPU box in a rack.
+fn worker(rest: &[String]) -> Result<(), String> {
+    use skwad_app_core::{MachineSettings, RemoteConfig, RemoteJobSource, WorkerPool};
+    let (flags, _) = take_flags(rest, &["--server", "--token", "--home", "--ai-workers"]);
+    let server = flags.get("--server").ok_or("--server is required")?.clone();
+    let token = flags
+        .get("--token")
+        .cloned()
+        .or_else(|| std::env::var("SKWAD_MACHINE_TOKEN").ok())
+        .ok_or("--token (or SKWAD_MACHINE_TOKEN) is required")?;
+    let home = worker_home(&flags);
+    let paths = skwad_app_core::AppPaths::create(&home).map_err(|e| e.to_string())?;
+    let machine_id = skwad_app_core::machine::load_or_create(&home);
+    let machine_file = skwad_app_core::settings::machine_settings_path(&home);
+    let mut machine = MachineSettings::load(&machine_file).unwrap_or_default();
+    if let Some(n) = flags.get("--ai-workers") {
+        machine.ai_workers = n.parse().map_err(|e| format!("--ai-workers `{n}`: {e}"))?;
+        machine.save(&machine_file).map_err(|e| e.to_string())?;
+    }
+    tracing::info!(server = %server, machine = %machine_id, home = %home.display(), slots = machine.ai_workers, "starting a headless worker");
+
+    let source = RemoteJobSource::connect(
+        RemoteConfig {
+            base_url: server,
+            machine_token: token,
+            machine_id,
+        },
+        paths.clone(),
+        machine,
+    )?;
+    source.sync_models()?;
+    let keeper = source.start_keeper();
+    let sink: Arc<dyn skwad_app_core::ProgressSink> = Arc::new(LogSink);
+    let pool = WorkerPool::start_remote(sink, source.clone(), paths);
+    tracing::info!("worker running; Ctrl-C to stop");
+
+    let stop = source.shutdown_flag();
+    ctrlc_wait(stop);
+    source.shutdown();
+    pool.join();
+    let _ = keeper.join();
+    let status = source.status();
+    tracing::info!(completed = status.jobs_completed, failed = status.jobs_failed, "worker stopped");
+    Ok(())
+}
+
+/// Blocks until Ctrl-C, on a small runtime of its own.
+fn ctrlc_wait(stop: Arc<std::sync::atomic::AtomicBool>) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime for the signal handler");
+    runtime.block_on(async {
+        let _ = tokio::signal::ctrl_c().await;
+    });
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// A worker with no window: events become log lines.
+struct LogSink;
+
+impl skwad_app_core::ProgressSink for LogSink {
+    fn emit(&self, event: &str, payload: serde_json::Value) {
+        match event {
+            skwad_app_core::events::JOB_FAILED => tracing::warn!(%payload, "job failed"),
+            skwad_app_core::events::NOTICE => tracing::info!(%payload, "notice"),
+            _ => tracing::debug!(event, %payload, "event"),
+        }
+    }
+}
+
 fn uuid_password() -> String {
     // 20 characters from a v4 UUID: enough entropy for a first sign-in, and
     // meant to be changed.
@@ -206,7 +353,9 @@ fn print_usage() {
          USAGE\n  \
            skwad-server [run] [flags]      run in the foreground (Ctrl-C to stop)\n  \
            skwad-server doctor [flags]     check database, library, models and workers\n  \
-           skwad-server create-user --email E --name N [--password P] [--admin]\n"
+           skwad-server create-user --email E --name N [--password P] [--admin]\n  \
+           skwad-server enrol --server URL --email E --password P --name N [--home DIR]\n  \
+           skwad-server worker --server URL --token T [--home DIR] [--ai-workers N]\n"
     );
     #[cfg(windows)]
     println!(

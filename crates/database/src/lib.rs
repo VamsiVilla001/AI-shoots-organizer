@@ -147,6 +147,11 @@ impl Database {
             .build(manager)?;
 
         let mut conn = pool.get()?;
+        if let Some(schema) = &config.schema {
+            // The connection's search_path already points here; the schema
+            // itself may not exist yet on a first run.
+            conn.batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS {schema}"))?;
+        }
         migrations::run(&mut *conn)?;
         drop(conn);
 

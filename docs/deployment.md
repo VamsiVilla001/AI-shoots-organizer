@@ -32,10 +32,11 @@ cross-compile shortcut.
   - The server must have **ICU collation support** (every mainstream build
     does). The schema's `nocase` collation is built on it, and without it the
     first migration fails rather than silently sorting differently.
-- **The frontend, the shell binary, and `skwad-server`** — always. The desktop app
-  is a client of a private server it starts on loopback, so the installer ships
-  both binaries; without the sidecar the app opens, says the local server did not
-  start, and can do nothing else. `npm run package:win` builds and stages it.
+- **The frontend, the desktop binary, and `skwad-server`** — always. The desktop
+  app opens the library itself; the server is shipped beside it (under `server/`
+  in the install folder) for the one machine in a studio that will run it as a
+  service. `npm run build` and `npm run build:models` build and stage it
+  (`npm run stage:server` on its own).
 - **The face models** (~191 MB) — only from `npm run build:models`, which adds
   the `src-tauri/tauri.models.conf.json` overlay. That puts them in
   `bundle.resources`, and `models::seed_from_bundle` installs them into
@@ -72,8 +73,8 @@ cross-compile shortcut.
   cannot start, so nothing here can break an install. On macOS CoreML is part
   of the OS and needs nothing. On **Windows** it does need one file: Windows
   ships `DirectML.dll` 1.0 in System32, while ONNX Runtime wants the 1.15
-  redistributable it downloads at build time. `npm run package:win` stages that
-  DLL out of the download cache and ships it beside the executable; a build
+  redistributable it downloads at build time. Stage that DLL beside the
+  executable when packaging (it is in the ONNX Runtime download cache); a build
   without it runs on CPU — the README's measurements put that at roughly 2.6x
   slower detection and 7.9x slower embedding. **Settings → Acceleration** shows
   what actually started, which is the quickest way to check a fresh install.
@@ -212,26 +213,22 @@ minutes on a cold build — ONNX Runtime and the webview crates dominate.
 
 ```bash
 powershell -ExecutionPolicy Bypass -File scripts/fetch-models.ps1
-npm run package:win
+npm run build:models
 ```
 
-`package:win` builds `skwad-server`, stages it and `DirectML.dll`, then builds with
-the config overlays. **Close the app first** — a running copy holds both
-binaries, and the staging step cannot overwrite a file that is in use.
-The installer lands in `target/release/bundle/nsis/` and is ~192 MB: the binary,
-the DirectML redistributable and the two models. Verified contents of a build
-made this way:
+`build:models` packages the Premiere panel, builds and stages `skwad-server`,
+then builds the desktop with the models overlay. **Close the app first** — a
+running copy holds the binary, and the build cannot overwrite a file that is in
+use. The installer lands in `target/release/bundle/nsis/`; the bulk of it is
+the two models. It installs:
 
 ```
-skwad-desktop.exe          6.0 MB   the shell: a window and a supervisor
-skwad-server.exe          27.5 MB   the application itself
-DirectML.dll            18.5 MB
-models/det_10g.onnx     16.9 MB
-models/w600k_r50.onnx  174.4 MB
+skwad-desktop.exe                the application
+server/skwad-server.exe          the server, for the machine that runs one
+models/det_10g.onnx
+models/w600k_r50.onnx
+resources/premiere-panel/…
 ```
-
-The shell shrank from 32 MB to 6 MB when it stopped linking the database and
-ONNX Runtime; that work moved into the server, not away.
 
 `npm run tauri:build -w @skwad/desktop` on its own produces a ~32 MB installer
 with none of those extras — fine for someone who will fetch models themselves.

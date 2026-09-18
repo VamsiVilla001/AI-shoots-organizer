@@ -189,11 +189,19 @@ async fn require_session(request: Request, next: Next) -> Response {
 /// Every `/api` caller says which contract it speaks. A mismatch is a clear
 /// `426` with a human message rather than a confusing 404 or 422 later.
 async fn require_api_version(request: Request, next: Next) -> Response {
+    // An `EventSource` cannot set a header, so the event stream says its
+    // version in the query string instead.
+    let from_query = request
+        .uri()
+        .query()
+        .and_then(|q| q.split('&').find_map(|pair| pair.strip_prefix("api=")))
+        .and_then(|v| v.trim().parse::<u32>().ok());
     let presented = request
         .headers()
         .get("x-skwad-api")
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.trim().parse::<u32>().ok());
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .or(from_query);
     match presented {
         Some(version) if version == config::API_VERSION => next.run(request).await,
         Some(version) => ApiError::new(
@@ -494,16 +502,19 @@ pub fn serve_blocking(
     on_listening: impl FnOnce() + Send + 'static,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
+    // The database client is synchronous and drives a runtime of its own, so
+    // the boot — and the shutdown, which closes the pool — happen on this
+    // thread *outside* the server runtime. Inside it, every database call
+    // goes through `spawn_blocking` (see `error::blocking`).
+    let (state, workers) = boot(config)?;
+    let health = health::summarise(&state.core, 0, true);
+    tracing::info!("\n{}", health::render_text(&health));
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
-    runtime.block_on(async move {
-        let (state, workers) = boot(config)?;
-        let health = health::summarise(&state.core, 0, true);
-        tracing::info!("\n{}", health::render_text(&health));
-        let result = serve(Arc::clone(&state), on_listening, shutdown).await;
-        state.core.begin_shutdown();
-        workers.join();
-        result
-    })
+    let result = runtime.block_on(serve(Arc::clone(&state), on_listening, shutdown));
+    drop(runtime);
+    state.core.begin_shutdown();
+    workers.join();
+    result
 }
 
 /// Parses `--key value` pairs into the same keys the config file uses.

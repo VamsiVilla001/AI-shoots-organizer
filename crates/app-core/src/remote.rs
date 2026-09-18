@@ -643,3 +643,62 @@ impl JobSource for RemoteJobSource {
         Ok(())
     }
 }
+
+/// Enrols this machine through the server's ordinary front door — a sign-in
+/// as an administrator, then `enrol_machine` — and returns the token. What
+/// the desktop's worker card does, for a headless worker box.
+pub fn enrol_with_credentials(
+    base_url: &str,
+    email: &str,
+    password: &str,
+    machine_name: &str,
+    machine_id: &str,
+) -> Result<EnrolResponse, String> {
+    let base = base_url.trim_end_matches('/');
+    let http = Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|error| format!("could not build an HTTP client: {error}"))?;
+    let invoke = |command: &str, body: serde_json::Value, session: Option<&str>| -> Result<reqwest::blocking::Response, String> {
+        let mut request = http
+            .post(format!("{base}/api/invoke/{command}"))
+            .header("x-skwad-api", API_VERSION.to_string())
+            .json(&body);
+        if let Some(token) = session {
+            request = request.bearer_auth(token);
+        }
+        let response = request.send().map_err(|error| format!("cannot reach {base}: {error}"))?;
+        if response.status().is_success() {
+            return Ok(response);
+        }
+        let status = response.status();
+        let message = response
+            .json::<serde_json::Value>()
+            .ok()
+            .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(str::to_string))
+            .unwrap_or_else(|| format!("the server answered {status}"));
+        Err(message)
+    };
+
+    let signed_in = invoke(
+        "sign_in_skwad",
+        serde_json::json!({ "email": email, "password": password }),
+        None,
+    )?;
+    let session = signed_in
+        .headers()
+        .get("x-skwad-session-token")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+        .ok_or_else(|| "the sign-in did not return a session".to_string())?;
+
+    let enrolled = invoke(
+        "enrol_machine",
+        serde_json::json!({ "name": machine_name, "machineId": machine_id }),
+        Some(&session),
+    )?
+    .json::<EnrolResponse>()
+    .map_err(|error| format!("unexpected answer to the enrolment: {error}"))?;
+    let _ = invoke("sign_out_skwad", serde_json::Value::Null, Some(&session));
+    Ok(enrolled)
+}

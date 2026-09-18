@@ -29,6 +29,8 @@ export function SettingsScreen() {
   const desktopLibrary = transport().kind === 'tauri'
   const client = useQuery({ queryKey: ['clientStatus'], queryFn: api.clientStatus, retry: false, enabled: !desktopLibrary })
   const isClient = client.data?.serverUrl != null
+  // Over HTTP the hardware settings on this screen are the server's.
+  const remoteLibrary = transport().kind === 'http'
   const isAdmin = session.data?.isAdmin === true
   const [draft, setDraft] = useState<AppSettings | null>(null)
 
@@ -174,8 +176,8 @@ export function SettingsScreen() {
         <div className="card">
           <h2>AI Runtime</h2>
           <div className="hint">
-            {isClient
-              ? "The server's hardware and tools — administrators only. This machine's own are under Worker mode above."
+            {remoteLibrary
+              ? "The server's hardware and tools — administrators only." + (isClient ? " This machine's own are under Worker mode above." : "")
               : 'This machine only — hardware and tools. Other machines using this library keep their own.'}
           </div>
           <label className="field">

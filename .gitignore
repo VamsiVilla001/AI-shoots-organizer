@@ -38,3 +38,6 @@ desktop.ini
 
 # Claude Code runtime state (settings.json is tracked; this is per-run)
 .claude/scheduled_tasks.lock
+
+# Staged server binary for the installer (scripts/stage-server.mjs)
+apps/desktop/src-tauri/binaries/

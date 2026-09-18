@@ -23,7 +23,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; img-src 'self' data: blob: http://skwadmedia.localhost skwadmedia: asset: http://asset.localhost; media-src 'self' blob: http://skwadmedia.localhost skwadmedia:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost",
+      "csp": "default-src 'self'; img-src 'self' data: blob: http://skwadmedia.localhost skwadmedia: asset: http://asset.localhost http: https:; media-src 'self' blob: http://skwadmedia.localhost skwadmedia: http: https:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost http: https:",
       "assetProtocol": {
         "enable": false,
         "scope": []
@@ -34,7 +34,8 @@
     "active": true,
     "targets": ["nsis", "app", "dmg"],
     "resources": {
-      "resources/premiere-panel/*": "resources/premiere-panel/"
+      "resources/premiere-panel/*": "resources/premiere-panel/",
+      "binaries/*": "server/"
     },
     "category": "Photography",
     "fileAssociations": [

@@ -13,7 +13,13 @@ export function FolderBrowserHost() {
   const [request, setRequest] = useState<FolderRequest | null>(null)
   useEffect(() => subscribeFolderRequests(setRequest), [])
   if (!request) return null
-  return <FolderBrowser title={request.title} />
+  // Its own stacking context: the browser opens from inside other dialogs
+  // (the "Add media" form) and has to sit above them.
+  return (
+    <div className="folder-browser-host">
+      <FolderBrowser title={request.title} />
+    </div>
+  )
 }
 
 function FolderBrowser({ title }: { title: string }) {

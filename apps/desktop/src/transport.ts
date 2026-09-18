@@ -228,10 +228,12 @@ export function createHttpTransport(initial: HttpConnection, local?: Transport):
   const handlers = new Map<string, Set<(payload: unknown) => void>>()
   const attached = new Set<string>()
 
+  // `EventSource` cannot set headers: the version (and, cross-origin, the
+  // token) travel in the query string instead.
   const streamUrl = () =>
     connection.tokenInUrl && connection.token
-      ? url(`/api/events?token=${encodeURIComponent(connection.token)}`)
-      : url('/api/events')
+      ? url(`/api/events?api=${API_VERSION}&token=${encodeURIComponent(connection.token)}`)
+      : url(`/api/events?api=${API_VERSION}`)
 
   const attach = (name: string) => {
     if (!source || attached.has(name)) return

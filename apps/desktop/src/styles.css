@@ -3437,3 +3437,8 @@ button {
   align-items: center;
   gap: 8px;
 }
+
+/* The folder browser opens from inside other dialogs and must sit above them. */
+.folder-browser-host .modal-backdrop {
+  z-index: 130;
+}

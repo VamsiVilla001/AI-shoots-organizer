@@ -41,6 +41,11 @@ pub struct PgConfig {
     pub max_connections: u32,
     #[serde(default = "default_connect_timeout_secs")]
     pub connect_timeout_secs: u64,
+    /// A schema to keep this library in, instead of `public`. Lets one
+    /// server hold several libraries (a studio's and a test one) under one
+    /// database; `?schema=name` on the URL sets it.
+    #[serde(default)]
+    pub schema: Option<String>,
 }
 
 fn default_max_connections() -> u32 {
@@ -61,6 +66,7 @@ impl Default for PgConfig {
             password: None,
             max_connections: default_max_connections(),
             connect_timeout_secs: default_connect_timeout_secs(),
+            schema: None,
         }
     }
 }
@@ -149,6 +155,8 @@ impl PgConfig {
 
     /// Parses a `postgres://user:password@host:port/database` URL.
     pub fn from_url(url: &str) -> Result<Self> {
+        // `schema` is ours, not libpq's: take it off before the parser sees it.
+        let (url, schema) = split_schema(url)?;
         let parsed: postgres::Config = url
             .parse()
             .map_err(|e| DbError::other(format!("not a PostgreSQL connection string: {e}")))?;
@@ -172,6 +180,7 @@ impl PgConfig {
                 .map(|bytes| String::from_utf8_lossy(bytes).into_owned()),
             max_connections: defaults.max_connections,
             connect_timeout_secs: defaults.connect_timeout_secs,
+            schema,
         })
     }
 
@@ -194,13 +203,19 @@ impl PgConfig {
         if let Some(password) = &self.password {
             config.password(password);
         }
+        if let Some(schema) = &self.schema {
+            config.options(&format!("-c search_path={schema}"));
+        }
         config
     }
 
     /// A human-readable identifier for the Settings screen and logs. Contains
     /// no credential, so it is safe to log.
     pub fn describe(&self) -> String {
-        format!("{}@{}:{}/{}", self.user, self.host, self.port, self.database)
+        match &self.schema {
+            Some(schema) => format!("{}@{}:{}/{}/{schema}", self.user, self.host, self.port, self.database),
+            None => format!("{}@{}:{}/{}", self.user, self.host, self.port, self.database),
+        }
     }
 
     /// True when this points at the machine the app is running on, which is
@@ -383,5 +398,51 @@ mod tests {
         assert_eq!(loaded.host, "studio-nas");
         assert_eq!(loaded.port, 5433);
         assert_eq!(loaded.database, "bgms");
+    }
+}
+
+/// Splits a `schema=` query parameter off a connection URL, returning the
+/// URL without it. Only plain identifiers are accepted, because the value
+/// ends up in `search_path` and `CREATE SCHEMA` unquoted.
+fn split_schema(url: &str) -> Result<(String, Option<String>)> {
+    let Some((base, query)) = url.split_once('?') else {
+        return Ok((url.to_string(), None));
+    };
+    let mut schema = None;
+    let mut kept = Vec::new();
+    for pair in query.split('&') {
+        match pair.split_once('=') {
+            Some(("schema", value)) => {
+                if value.is_empty() || !value.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                    return Err(DbError::other(format!(
+                        "schema `{value}` is not a plain identifier (letters, digits and underscores)"
+                    )));
+                }
+                schema = Some(value.to_string());
+            }
+            _ => kept.push(pair),
+        }
+    }
+    let rebuilt = if kept.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base}?{}", kept.join("&"))
+    };
+    Ok((rebuilt, schema))
+}
+
+#[cfg(test)]
+mod schema_tests {
+    use super::*;
+
+    #[test]
+    fn a_schema_parameter_is_ours_and_the_rest_of_the_url_survives() {
+        let config = PgConfig::from_url("postgres://u:p@host:5433/db?schema=smoke&sslmode=disable").unwrap();
+        assert_eq!(config.schema.as_deref(), Some("smoke"));
+        assert_eq!(config.database, "db");
+        assert!(config.describe().ends_with("/db/smoke"));
+
+        assert!(PgConfig::from_url("postgres://u:p@host/db?schema=bad-name").is_err());
+        assert!(PgConfig::from_url("postgres://u:p@host/db").unwrap().schema.is_none());
     }
 }
