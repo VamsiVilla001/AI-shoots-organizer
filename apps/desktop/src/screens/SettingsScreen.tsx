@@ -159,6 +159,7 @@ export function SettingsScreen() {
       <div className="settings-grid">
         <div className="card">
           <h2>AI Runtime</h2>
+          <div className="hint">This machine only — hardware and tools. Other machines using this library keep their own.</div>
           <label className="field">
             <span>Acceleration</span>
             <select
@@ -182,7 +183,7 @@ export function SettingsScreen() {
             </span>
           </label>
           {number('Parallel AI workers', 'aiWorkers', 1, `1–10 simultaneous photo/video analyses, shared fairly across shoots. Default 2. Each worker uses additional RAM and GPU memory. A separate worker prepares thumbnails. Changes apply as current files finish. ${info.data?.cpuCores ?? '?'} CPU cores available.`)}
-          {number('Analysis image size', 'analysisMaxDim', 64, 'Longest edge before detection. Lower is faster; higher finds smaller faces.')}
+          {number('Analysis image size', 'analysisMaxDim', 64, 'Longest edge before detection. Lower is faster; higher finds smaller faces. Library-wide: it changes the embeddings, so every machine uses the same value.')}
 
           <h2 style={{ marginTop: 8 }}>Models</h2>
           <div className="hint">{info.data?.models.message}</div>
@@ -216,6 +217,7 @@ export function SettingsScreen() {
 
         <div className="card">
           <h2>Recognition</h2>
+          <div className="hint">Library-wide — applies to every machine working on this library, because it changes what is written into it.</div>
           {number('Recognition threshold', 'recognitionThreshold', 0.01, 'Similarity a face needs to be suggested as a known player. The conservative default is 0.55; lower catches more but also mixes more faces.')}
           {number('Ambiguity margin', 'recognitionMargin', 0.01, 'How far ahead of the runner-up a match must be. The default is 0.10.')}
           {number('Auto-confirm above', 'autoConfirmAbove', 0.01, '1.0 disables auto-confirmation — everything waits for review.')}
@@ -229,12 +231,14 @@ export function SettingsScreen() {
           </label>
 
           <h2 style={{ marginTop: 8 }}>Clustering</h2>
+          <div className="hint">Library-wide.</div>
           {number('Cluster similarity', 'clusterEdgeThreshold', 0.01, 'How alike two unknown faces must be to group.')}
           {number('Minimum cluster size', 'clusterMinSize', 1, 'Smaller groups stay in the unidentified pool.')}
         </div>
 
         <div className="card">
           <h2>Video</h2>
+          <div className="hint">Library-wide, except frame prefetch which is this machine only.</div>
           <label className="checkbox-row">
             <input type="checkbox" checked={draft.videoFramePrefetch}
               onChange={(e) => set('videoFramePrefetch', e.target.checked)} />

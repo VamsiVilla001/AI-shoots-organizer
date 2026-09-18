@@ -1356,6 +1356,7 @@ mod tests {
             AppSettings::default(),
             "skwadmedia://".into(),
             "test-machine",
+            temp.path().join("machine-settings.json"),
         ));
 
         assert!(authenticate_local(&state, "PERSON@example.com", "temporary-password").is_ok());
@@ -1376,6 +1377,7 @@ mod tests {
             AppSettings::default(),
             "skwadmedia://".into(),
             "test-machine",
+            temp.path().join("machine-settings.json"),
         ));
 
         let auth = load_local_auth(&state).unwrap();
@@ -1430,6 +1432,7 @@ mod tests {
             AppSettings::default(),
             "skwadmedia://".into(),
             "test-machine",
+            temp.path().join("machine-settings.json"),
         ));
 
         let auth = load_local_auth(&state).unwrap();

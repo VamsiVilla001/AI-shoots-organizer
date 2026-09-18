@@ -1,6 +1,7 @@
 //! Shared application state.
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -51,12 +52,19 @@ pub struct AppState {
     /// This installation's identity on the job queue — the `owner` written
     /// into every lease it claims. See `machine.rs`.
     pub machine_id: String,
+    /// Where this installation keeps the machine half of its settings.
+    machine_settings_file: PathBuf,
 
     settings: RwLock<AppSettings>,
-    /// Bumped whenever settings change. Workers watch this and rebuild their
-    /// inference sessions, so a threshold or accelerator change takes effect
-    /// without restarting the application.
+    /// Bumped whenever *anything* about this machine's effective settings
+    /// changes. Local workers watch this and rebuild their inference
+    /// sessions, so a threshold or accelerator change takes effect without
+    /// restarting the application.
     settings_version: AtomicU64,
+    /// Bumped only when the library-wide half changes — the half every
+    /// machine must agree on. This is what remote workers are told about on
+    /// the heartbeat; a machine-local change is nobody else's business.
+    library_version: AtomicU64,
 
     /// Per-shoot cancellation flags, checked inside long-running stages.
     cancellations: Mutex<HashMap<i64, Arc<AtomicBool>>>,
@@ -94,6 +102,7 @@ impl AppState {
         settings: AppSettings,
         media_url_base: String,
         machine_id: impl Into<String>,
+        machine_settings_file: impl Into<PathBuf>,
     ) -> Self {
         let thumbnails = ThumbnailCache::new(&paths.thumbnails);
         let proxies = VideoProxyCache::new(&paths.proxies);
@@ -106,8 +115,10 @@ impl AppState {
             paths,
             media_url_base,
             machine_id: machine_id.into(),
+            machine_settings_file: machine_settings_file.into(),
             settings: RwLock::new(settings),
             settings_version: AtomicU64::new(1),
+            library_version: AtomicU64::new(1),
             cancellations: Mutex::new(HashMap::new()),
             blockages: Mutex::new(HashMap::new()),
             paused: AtomicBool::new(false),
@@ -145,12 +156,28 @@ impl AppState {
         self.settings_version.load(Ordering::Acquire)
     }
 
-    /// Replaces the settings and signals workers to reload.
+    /// The version of the library-wide half only. See [`Self::library_version`]
+    /// on the struct for why it is separate.
+    pub fn library_version(&self) -> u64 {
+        self.library_version.load(Ordering::Acquire)
+    }
+
+    /// Replaces the settings, persists each half to its own home and signals
+    /// workers to reload. The library version only moves when the library
+    /// half actually changed, so a machine-local tweak does not make every
+    /// other worker in the fleet rebuild its sessions.
     pub fn update_settings(&self, next: AppSettings) -> skwad_database::Result<AppSettings> {
         let next = next.sanitised();
-        next.save(&self.db)?;
+        let library_changed = {
+            let current = self.settings.read();
+            current.library() != next.library()
+        };
+        next.save(&self.db, &self.machine_settings_file)?;
         *self.settings.write() = next.clone();
         self.settings_version.fetch_add(1, Ordering::Release);
+        if library_changed {
+            self.library_version.fetch_add(1, Ordering::Release);
+        }
         Ok(next)
     }
 
@@ -297,6 +324,7 @@ mod tests {
             AppSettings::default(),
             "skwadmedia://localhost".into(),
             "test-machine",
+            temp.join(format!("machine-{}.json", uuid::Uuid::new_v4())),
         )
     }
 
@@ -304,13 +332,33 @@ mod tests {
     fn updating_settings_bumps_the_version() {
         let state = state();
         let before = state.settings_version();
+        let library_before = state.library_version();
 
         let mut next = state.settings();
         next.recognition_threshold = 0.66;
         state.update_settings(next).unwrap();
 
         assert!(state.settings_version() > before, "workers need a signal to reload");
+        assert!(state.library_version() > library_before, "a threshold is library-wide");
         assert!((state.settings().recognition_threshold - 0.66).abs() < 1e-6);
+    }
+
+    /// An accelerator or thread-count change is this machine's business only:
+    /// local workers reload, but the library version — what the rest of the
+    /// fleet watches — must not move.
+    #[test]
+    fn a_machine_local_change_does_not_bump_the_library_version() {
+        let state = state();
+        let before = state.settings_version();
+        let library_before = state.library_version();
+
+        let mut next = state.settings();
+        next.accelerator = skwad_face_detection::Accelerator::Cpu;
+        next.ffmpeg_directory = Some("C:\\tools\\ffmpeg".into());
+        state.update_settings(next).unwrap();
+
+        assert!(state.settings_version() > before);
+        assert_eq!(state.library_version(), library_before);
     }
 
     #[test]

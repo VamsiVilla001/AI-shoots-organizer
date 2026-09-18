@@ -98,13 +98,23 @@ pub fn run() {
                 }
             };
             app.manage(db_setup::StartupStatus::Ready);
-            let settings = AppSettings::load(&db).unwrap_or_default().sanitised();
-
-            // Lives in this machine's own app data, never the (possibly
-            // shared) library folder: two machines must never claim jobs
-            // under one id.
+            // Both of these live in this machine's own app data, never the
+            // (possibly shared) library folder: two machines must never claim
+            // jobs under one id, and a laptop must never inherit the
+            // server's accelerator choice.
+            let machine_settings_file = settings::machine_settings_path(&data_dir);
+            let settings = AppSettings::load(&db, &machine_settings_file)
+                .unwrap_or_default()
+                .sanitised();
             let machine_id = machine::load_or_create(&data_dir);
-            let state = Arc::new(AppState::new(db, paths, settings, protocol::url_base(), machine_id));
+            let state = Arc::new(AppState::new(
+                db,
+                paths,
+                settings,
+                protocol::url_base(),
+                machine_id,
+                machine_settings_file,
+            ));
             app.manage(Arc::clone(&state));
 
             // The roster lives in the library folder, so it is prepared once the

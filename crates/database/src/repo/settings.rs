@@ -30,6 +30,12 @@ pub fn get<T: DeserializeOwned>(conn: &mut dyn Db, key: &str, default: T) -> Res
     }
 }
 
+/// Reads a setting, distinguishing "missing" from "present". A stored value
+/// this build cannot parse is reported as missing, as with [`get`].
+pub fn get_opt<T: DeserializeOwned>(conn: &mut dyn Db, key: &str) -> Result<Option<T>> {
+    Ok(get_raw(conn, key)?.and_then(|raw| serde_json::from_str(&raw).ok()))
+}
+
 pub fn set<T: Serialize>(conn: &mut dyn Db, key: &str, value: &T) -> Result<()> {
     set_raw(conn, key, &serde_json::to_string(value)?)
 }
