@@ -13,7 +13,8 @@ use std::time::{Duration, Instant};
 use skwad_database::models::{Job, JobKind, JobState, ProcessingStatus};
 use skwad_database::repo::{jobs, logs, media as media_repo, telemetry};
 use crate::events;
-use crate::job_source::{JobSource, LocalJobSource, Settled};
+use crate::job_source::{JobSource, LocalJobSource, Settled, WorkError};
+use crate::paths::AppPaths;
 use crate::progress::ProgressSink;
 use crate::pipeline::{Engine, PipelineError};
 use crate::stages;
@@ -40,6 +41,33 @@ const RESOURCE_INTERVAL: Duration = Duration::from_secs(2);
 /// one's jobs are back within a lease of dying.
 const REAP_INTERVAL: Duration = Duration::from_secs(15);
 
+/// What a worker thread runs against.
+///
+/// `local` is the library, when this process owns it. A client's worker has
+/// none: the job, the media row, the bytes and somewhere to send the result
+/// all come through `source`, and it only ever sees the per-file analysis
+/// jobs ([`jobs::WorkerLane::Remote`]).
+pub struct WorkerContext {
+    pub source: Arc<dyn JobSource>,
+    pub paths: AppPaths,
+    pub local: Option<Arc<AppState>>,
+    /// Whether this machine analyses files itself. A server without a GPU
+    /// sets this off and its compute slots run only the finishing stages,
+    /// leaving every analysis job for the clients.
+    pub local_analysis: bool,
+}
+
+impl WorkerContext {
+    fn lane_for(&self, index: usize) -> jobs::WorkerLane {
+        match (&self.local, index) {
+            (None, _) => jobs::WorkerLane::Remote,
+            (Some(_), 0) => jobs::WorkerLane::Io,
+            (Some(_), _) if self.local_analysis => jobs::WorkerLane::Compute,
+            (Some(_), _) => jobs::WorkerLane::Finishing,
+        }
+    }
+}
+
 pub struct WorkerPool {
     handles: Vec<std::thread::JoinHandle<()>>,
 }
@@ -48,6 +76,12 @@ impl WorkerPool {
     /// One I/O worker and bounded AI slots. Disabled slots stay idle without
     /// loading models, allowing concurrency changes without restarting the app.
     pub fn start(sink: Arc<dyn ProgressSink>, state: Arc<AppState>) -> Self {
+        Self::start_with(sink, state, true)
+    }
+
+    /// [`Self::start`], choosing whether this machine analyses files itself
+    /// or only brokers them (see [`WorkerContext::local_analysis`]).
+    pub fn start_with(sink: Arc<dyn ProgressSink>, state: Arc<AppState>, local_analysis: bool) -> Self {
         // Recover anything a previous run *of this machine* left mid-flight.
         // Other machines' running jobs are theirs until their lease lapses.
         match state
@@ -62,20 +96,15 @@ impl WorkerPool {
         let local = LocalJobSource::new(Arc::clone(&state));
         let leases = Arc::clone(local.leases());
         let source: Arc<dyn JobSource> = Arc::new(local);
+        let context = Arc::new(WorkerContext {
+            source,
+            paths: state.paths.clone(),
+            local: Some(Arc::clone(&state)),
+            local_analysis,
+        });
         let worker_count = crate::settings::MAX_AI_WORKERS + 1;
         let mut handles = Vec::with_capacity(worker_count + 2);
-
-        for index in 0..worker_count {
-            let app = Arc::clone(&sink);
-            let state = Arc::clone(&state);
-            let source = Arc::clone(&source);
-            handles.push(
-                std::thread::Builder::new()
-                    .name(format!("skwad-worker-{index}"))
-                    .spawn(move || worker_loop(index, app, state, source))
-                    .expect("failed to spawn worker thread"),
-            );
-        }
+        handles.extend(spawn_workers(0..worker_count, &sink, &context));
 
         let keeper_state = Arc::clone(&state);
         let keeper_leases = Arc::clone(&leases);
@@ -98,6 +127,22 @@ impl WorkerPool {
         Self { handles }
     }
 
+    /// A client's worker mode: analysis slots only, fed by a server over
+    /// HTTP. No I/O lane, no monitor and no database — the server runs those.
+    /// `source` keeps its own leases alive.
+    pub fn start_remote(sink: Arc<dyn ProgressSink>, source: Arc<dyn JobSource>, paths: AppPaths) -> Self {
+        let context = Arc::new(WorkerContext {
+            source,
+            paths,
+            local: None,
+            local_analysis: true,
+        });
+        // Slot 0 is the I/O worker in a local pool; a remote pool has none,
+        // so its slots are numbered from 1 and gated by `ai_workers` alike.
+        let handles = spawn_workers(1..=crate::settings::MAX_AI_WORKERS, &sink, &context);
+        Self { handles }
+    }
+
     /// Waits for workers to notice the shutdown flag and stop.
     pub fn join(self) {
         for handle in self.handles {
@@ -106,8 +151,26 @@ impl WorkerPool {
     }
 }
 
-fn worker_loop(index: usize, app: Arc<dyn ProgressSink>, state: Arc<AppState>, source: Arc<dyn JobSource>) {
+fn spawn_workers(
+    indices: impl Iterator<Item = usize>,
+    sink: &Arc<dyn ProgressSink>,
+    context: &Arc<WorkerContext>,
+) -> Vec<std::thread::JoinHandle<()>> {
+    indices
+        .map(|index| {
+            let app = Arc::clone(sink);
+            let context = Arc::clone(context);
+            std::thread::Builder::new()
+                .name(format!("skwad-worker-{index}"))
+                .spawn(move || worker_loop(index, app, context))
+                .expect("failed to spawn worker thread")
+        })
+        .collect()
+}
+
+fn worker_loop(index: usize, app: Arc<dyn ProgressSink>, context: Arc<WorkerContext>) {
     tracing::debug!(worker = index, "worker started");
+    let source = Arc::clone(&context.source);
 
     // Built on first use: a session that only ever browses an existing shoot
     // should not pay to load two ONNX models.
@@ -118,13 +181,9 @@ fn worker_loop(index: usize, app: Arc<dyn ProgressSink>, state: Arc<AppState>, s
     // indexing works with no models installed.
     let mut tools_version = source.settings_version();
     let mut ffmpeg = crate::pipeline::discover_ffmpeg(&source.settings());
-    let lane = if index == 0 {
-        jobs::WorkerLane::Io
-    } else {
-        jobs::WorkerLane::Compute
-    };
+    let lane = context.lane_for(index);
 
-    while !state.is_shutting_down() {
+    while !source.is_shutting_down() {
         if index > source.settings().ai_workers.clamp(1, crate::settings::MAX_AI_WORKERS) {
             engine = None;
             engine_last_used = None;
@@ -184,20 +243,20 @@ fn worker_loop(index: usize, app: Arc<dyn ProgressSink>, state: Arc<AppState>, s
             tools_version = source.settings_version();
         }
 
-        if let Ok(mut conn) = state.db.conn() {
+        if let Some(Ok(mut conn)) = context.local.as_ref().map(|state| state.db.conn()) {
             if let Err(error) = telemetry::mark_stage_started(&mut conn, job.shoot_id, &job.kind) {
                 tracing::warn!(shoot = job.shoot_id, error = %error, "could not start processing telemetry");
             }
         }
 
-        let outcome = run_job(&app, &state, source.as_ref(), &job, &mut engine, &mut engine_version, ffmpeg.as_ref());
+        let outcome = run_job(&app, &context, &job, &mut engine, &mut engine_version, ffmpeg.as_ref());
         if matches!(
             JobKind::parse(&job.kind),
             Some(JobKind::AnalysePhoto | JobKind::AnalyseVideo)
         ) {
             engine_last_used = Some(Instant::now());
         }
-        finish_job(&app, &state, source.as_ref(), &job, outcome);
+        finish_job(&app, &context, &job, outcome);
     }
 
     tracing::debug!(worker = index, "worker stopped");
@@ -214,6 +273,15 @@ enum JobOutcome {
     /// errors, so these requeue and wait for the situation to be fixed.
     Blocked(String),
     Failed(String),
+}
+
+impl From<WorkError> for JobOutcome {
+    fn from(error: WorkError) -> Self {
+        match error {
+            WorkError::Blocked(reason) => JobOutcome::Blocked(reason),
+            WorkError::Failed(reason) => JobOutcome::Failed(reason),
+        }
+    }
 }
 
 /// How long a blocked worker waits before looking again. Long enough not to
@@ -238,8 +306,7 @@ fn should_announce_blockage() -> bool {
 
 fn run_job(
     app: &Arc<dyn ProgressSink>,
-    state: &Arc<AppState>,
-    source: &dyn JobSource,
+    context: &WorkerContext,
     job: &Job,
     engine: &mut Option<Engine>,
     engine_version: &mut u64,
@@ -248,7 +315,18 @@ fn run_job(
     let Some(kind) = JobKind::parse(&job.kind) else {
         return JobOutcome::Failed(format!("unknown job kind '{}'", job.kind));
     };
+    let source = context.source.as_ref();
     let settings = source.settings();
+
+    // Everything but per-file analysis needs the library itself. A worker
+    // without one only ever claims analysis jobs; anything else that reaches
+    // it is not its to run.
+    let Some(state) = context.local.as_ref() else {
+        return match kind {
+            JobKind::AnalysePhoto | JobKind::AnalyseVideo => run_media_job(context, job, engine, engine_version),
+            _ => JobOutcome::Deferred,
+        };
+    };
 
     match kind {
         JobKind::Scan => {
@@ -292,11 +370,7 @@ fn run_job(
         // without touching the source media or starting a transcoder.
         JobKind::Proxy => JobOutcome::Done,
 
-        JobKind::AnalysePhoto | JobKind::AnalyseVideo => {
-            run_media_job(state, source, job, engine, engine_version, |engine, db, item| {
-                engine.analyse(db, item).map(|_| ())
-            })
-        }
+        JobKind::AnalysePhoto | JobKind::AnalyseVideo => run_media_job(context, job, engine, engine_version),
 
         // The three shoot-wide stages must not start while per-file analysis is
         // still running, or they would work from a partial picture.
@@ -354,23 +428,14 @@ fn load_media(state: &Arc<AppState>, job: &Job) -> std::result::Result<skwad_dat
     }
 }
 
-/// Shared shape for the per-file jobs that *do* need AI: load the row, make
-/// sure an engine exists, run the closure.
-fn run_media_job(
-    state: &Arc<AppState>,
-    source: &dyn JobSource,
-    job: &Job,
-    engine: &mut Option<Engine>,
-    engine_version: &mut u64,
-    action: impl FnOnce(
-        &mut Engine,
-        &skwad_database::Database,
-        &skwad_database::models::Media,
-    ) -> crate::pipeline::Result<()>,
-) -> JobOutcome {
-    let item = match load_media(state, job) {
+/// The per-file jobs that *do* need AI: find the row, make sure an engine
+/// exists, find the bytes, compute, deliver. Where the row and the bytes come
+/// from and where the result goes is the source's business.
+fn run_media_job(context: &WorkerContext, job: &Job, engine: &mut Option<Engine>, engine_version: &mut u64) -> JobOutcome {
+    let source = context.source.as_ref();
+    let item = match source.media_for(job) {
         Ok(item) => item,
-        Err(outcome) => return outcome,
+        Err(error) => return error.into(),
     };
 
     // The I/O worker and AI worker deliberately run in parallel, but a newly
@@ -385,7 +450,7 @@ fn run_media_job(
 
     if engine.is_none() {
         let version = source.settings_version();
-        match Engine::new(&state.paths, &source.settings()) {
+        match Engine::new(&context.paths, &source.settings()) {
             Ok(built) => {
                 tracing::info!(
                     detector = built.detector_name(),
@@ -402,9 +467,16 @@ fn run_media_job(
         }
     }
 
+    let path = match source.source_path(job, &item) {
+        Ok(path) => path,
+        Err(error) => return error.into(),
+    };
     let engine = engine.as_mut().expect("engine was just built");
-    match action(engine, &state.db, &item) {
-        Ok(()) => JobOutcome::Done,
+    match engine.compute(&path, &item) {
+        Ok(output) => match source.deliver(job, &item, output) {
+            Ok(()) => JobOutcome::Done,
+            Err(error) => error.into(),
+        },
         // A video on a machine with no FFmpeg is the same class of problem as
         // a missing model: no amount of retrying this file will help.
         Err(PipelineError::FfmpegUnavailable) => {
@@ -433,10 +505,17 @@ fn analysis_outstanding(state: &Arc<AppState>, shoot_id: i64) -> bool {
     outstanding > 0
 }
 
-fn finish_job(app: &Arc<dyn ProgressSink>, state: &Arc<AppState>, source: &dyn JobSource, job: &Job, outcome: JobOutcome) {
-    let Ok(mut conn) = state.db.conn() else {
-        source.drop_lease(job.id);
-        return;
+fn finish_job(app: &Arc<dyn ProgressSink>, context: &WorkerContext, job: &Job, outcome: JobOutcome) {
+    let source = context.source.as_ref();
+    // Only a worker with the library records telemetry and failures itself;
+    // for a remote one the server does both when the job is settled.
+    let mut conn = match context.local.as_ref().map(|state| state.db.conn()) {
+        Some(Ok(conn)) => Some(conn),
+        Some(Err(_)) => {
+            source.drop_lease(job.id);
+            return;
+        }
+        None => None,
     };
 
     let mut settled = false;
@@ -488,22 +567,25 @@ fn finish_job(app: &Arc<dyn ProgressSink>, state: &Arc<AppState>, source: &dyn J
             }
             if state_after == Some(JobState::Failed) {
                 settled = true;
-                if let Some(media_id) = job.media_id {
-                    let _ = media_repo::set_status(&mut conn, media_id, ProcessingStatus::Failed, Some(&error));
-                }
-                let file = job
-                    .media_id
-                    .and_then(|id| media_repo::get_by_id(&mut conn, id).ok().flatten())
-                    .map(|m| m.filename);
+                let mut file = None;
+                if let Some(conn) = conn.as_mut() {
+                    if let Some(media_id) = job.media_id {
+                        let _ = media_repo::set_status(conn, media_id, ProcessingStatus::Failed, Some(&error));
+                    }
+                    file = job
+                        .media_id
+                        .and_then(|id| media_repo::get_by_id(conn, id).ok().flatten())
+                        .map(|m| m.filename);
 
-                logs::record_quiet(
-                    &mut conn,
-                    logs::EVENT_PROCESSING_ERROR,
-                    Some(job.shoot_id),
-                    job.media_id,
-                    None,
-                    Some(&error),
-                );
+                    logs::record_quiet(
+                        conn,
+                        logs::EVENT_PROCESSING_ERROR,
+                        Some(job.shoot_id),
+                        job.media_id,
+                        None,
+                        Some(&error),
+                    );
+                }
                 events::emit(
                     app.as_ref(),
                     events::JOB_FAILED,
@@ -519,11 +601,11 @@ fn finish_job(app: &Arc<dyn ProgressSink>, state: &Arc<AppState>, source: &dyn J
     }
     source.drop_lease(job.id);
 
-    if settled {
-        if let Err(error) = telemetry::mark_stage_settled(&mut conn, job.shoot_id, &job.kind, succeeded) {
+    if let (true, Some(conn)) = (settled, conn.as_mut()) {
+        if let Err(error) = telemetry::mark_stage_settled(conn, job.shoot_id, &job.kind, succeeded) {
             tracing::warn!(shoot = job.shoot_id, error = %error, "could not finish stage telemetry");
         }
-        if let Err(error) = telemetry::finalize_if_settled(&mut conn, job.shoot_id) {
+        if let Err(error) = telemetry::finalize_if_settled(conn, job.shoot_id) {
             tracing::warn!(shoot = job.shoot_id, error = %error, "could not finish processing telemetry");
         }
     }
@@ -634,8 +716,8 @@ fn monitor_loop(app: Arc<dyn ProgressSink>, state: Arc<AppState>) {
         for shoot_id in to_report {
             if let Ok(mut progress) = jobs::progress(&mut conn, shoot_id) {
                 if let Some(blockage) = state.blockage(shoot_id) {
+                    progress.blocked_reason = Some(blockage.describe());
                     progress.blocked_kind = Some(blockage.kind);
-                    progress.blocked_reason = Some(blockage.reason);
                 }
                 events::emit(
                     app.as_ref(),

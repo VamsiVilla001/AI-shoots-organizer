@@ -84,7 +84,10 @@ pub struct AppState {
     /// Why a shoot's queue is stalled (missing FFmpeg, missing models), kept
     /// only in memory: a blockage is a fact about this run, not about the
     /// stored job. Entries age out on their own once work resumes.
-    blockages: Mutex<HashMap<i64, Blockage>>,
+    /// Keyed by shoot and by the machine that hit the blockage (`None` for
+    /// this one), so one laptop without FFmpeg does not look like the
+    /// whole library being stuck.
+    blockages: Mutex<HashMap<(i64, Option<String>), Blockage>>,
     /// Global pause for the worker pool.
     paused: AtomicBool,
     /// Whether seeded and reset accounts must change their password before
@@ -236,6 +239,18 @@ impl AppState {
         conn: &mut dyn skwad_database::Db,
         lane: skwad_database::repo::jobs::WorkerLane,
     ) -> skwad_database::Result<Option<skwad_database::models::Job>> {
+        self.claim_job_as(conn, lane, &self.machine_id)
+    }
+
+    /// [`Self::claim_job`] with the lease recorded under another machine's
+    /// id — what the server does on behalf of a client worker. Pause and
+    /// cancellation apply exactly as they do to its own workers.
+    pub fn claim_job_as(
+        &self,
+        conn: &mut dyn skwad_database::Db,
+        lane: skwad_database::repo::jobs::WorkerLane,
+        owner: &str,
+    ) -> skwad_database::Result<Option<skwad_database::models::Job>> {
         use skwad_database::repo::jobs::{self, WorkerLane};
         let mut scheduler = self.scheduler.lock();
         if self.is_paused() || self.is_shutting_down() {
@@ -253,7 +268,7 @@ impl AppState {
             WorkerLane::Io => &mut scheduler.last_io_shoot,
             _ => &mut scheduler.last_compute_shoot,
         };
-        let job = jobs::claim_next_parallel(conn, lane, *cursor, &excluded, &self.machine_id)?;
+        let job = jobs::claim_next_parallel(conn, lane, *cursor, &excluded, owner)?;
         if let Some(job) = &job {
             *cursor = Some(job.shoot_id);
         }
@@ -305,11 +320,17 @@ impl AppState {
     /// Records why a shoot's queue cannot move. Workers refresh this on every
     /// blocked attempt, so it stays current while the blockage lasts.
     pub fn record_blockage(&self, shoot_id: i64, kind: &str, reason: &str) {
+        self.record_blockage_for(None, shoot_id, kind, reason);
+    }
+
+    /// [`Self::record_blockage`] on behalf of a named remote worker.
+    pub fn record_blockage_for(&self, machine: Option<&str>, shoot_id: i64, kind: &str, reason: &str) {
         self.blockages.lock().insert(
-            shoot_id,
+            (shoot_id, machine.map(str::to_string)),
             Blockage {
                 kind: kind.to_string(),
                 reason: reason.to_string(),
+                machine: machine.map(str::to_string),
                 at: Instant::now(),
             },
         );
@@ -323,7 +344,13 @@ impl AppState {
     pub fn blockage(&self, shoot_id: i64) -> Option<Blockage> {
         let mut blockages = self.blockages.lock();
         blockages.retain(|_, blockage| blockage.at.elapsed() < Self::BLOCKAGE_TTL);
-        blockages.get(&shoot_id).cloned()
+        // This machine's own blockage first: it is the one the person looking
+        // at this screen can fix. Otherwise the most recent remote one.
+        blockages
+            .iter()
+            .filter(|((shoot, _), _)| *shoot == shoot_id)
+            .max_by_key(|((_, machine), blockage)| (machine.is_none(), blockage.at))
+            .map(|(_, blockage)| blockage.clone())
     }
 }
 
@@ -333,7 +360,20 @@ pub struct Blockage {
     /// The [`skwad_database::models::JobKind`] that could not run.
     pub kind: String,
     pub reason: String,
+    /// The remote worker that reported it; `None` for this machine.
+    pub machine: Option<String>,
     at: Instant,
+}
+
+impl Blockage {
+    /// The reason as the progress panel shows it, naming the machine when
+    /// it is not this one.
+    pub fn describe(&self) -> String {
+        match &self.machine {
+            Some(machine) => format!("{machine}: {}", self.reason),
+            None => self.reason.clone(),
+        }
+    }
 }
 
 #[cfg(test)]

@@ -135,6 +135,7 @@ mod generated {
     use super::*;
     use skwad_app_core::api::catalogue::*;
     use skwad_app_core::api::commands::*;
+    use skwad_app_core::api::machines::*;
     use skwad_app_core::api::roster::*;
     use skwad_app_core::api::storage::*;
     use skwad_app_core::models::ModelStatus;

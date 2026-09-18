@@ -31,15 +31,18 @@ pub mod models;
 pub mod paths;
 pub mod pipeline;
 pub mod progress;
+pub mod remote;
 pub mod resource_monitor;
 pub mod settings;
 pub mod stages;
 pub mod state;
+pub mod work_api;
 pub mod worker;
 
 pub use paths::AppPaths;
 pub use progress::{null_sink, NullProgressSink, ProgressSink, RecordingProgressSink};
 pub use settings::{AppSettings, LibrarySettings, MachineSettings};
 pub use job_source::{JobSource, LocalJobSource};
+pub use remote::{RemoteConfig, RemoteJobSource, RemoteStatus};
 pub use state::AppState;
 pub use worker::WorkerPool;

@@ -43,6 +43,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "model_identity",
         sql: include_str!("sql/004_model_identity.sql"),
     },
+    Migration {
+        version: 5,
+        name: "machines",
+        sql: include_str!("sql/005_machines.sql"),
+    },
 ];
 
 /// The schema version this build expects.

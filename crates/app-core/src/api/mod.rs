@@ -15,6 +15,7 @@
 
 pub mod catalogue;
 pub mod commands;
+pub mod machines;
 pub mod roster;
 pub mod storage;
 
@@ -196,6 +197,9 @@ macro_rules! command_registry {
             model_status() -> ModelStatus = $crate::api::commands::model_status;
             embedding_cohorts(shoot_id: Option<i64>) -> EmbeddingCohorts = $crate::api::commands::embedding_cohorts;
             reembed_stale_faces(shoot_id: Option<i64>) -> usize = $crate::api::commands::reembed_stale_faces;
+            list_machines() -> Vec<MachineRosterEntry> = $crate::api::machines::list_machines;
+            enrol_machine(name: String, machine_id: String) -> EnrolResponse = $crate::api::machines::enrol_machine;
+            revoke_machine(machine_id: String) -> bool = $crate::api::machines::revoke_machine;
             list_projects() -> Vec<Project> = $crate::api::commands::list_projects;
             save_project(project: Project) -> Project = $crate::api::commands::save_project;
             delete_project(project_id: String) -> () = $crate::api::commands::delete_project;
@@ -351,6 +355,7 @@ mod generated {
     #![allow(unused_imports)]
     use super::catalogue::*;
     use super::commands::*;
+    use super::machines::*;
     use super::roster::*;
     use super::storage::*;
     use super::{ApiError, Ctx, Result};

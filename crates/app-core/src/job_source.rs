@@ -16,13 +16,16 @@
 //!   through the same front door as everything else.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Instant;
 
-use skwad_database::models::{Job, JobState};
+use skwad_database::models::{Job, JobState, Media};
 use skwad_database::repo::jobs::{self, WorkerLane};
+use skwad_database::repo::media as media_repo;
 
+use crate::analysis::{apply_analysis, AnalysisOutput};
 use crate::settings::AppSettings;
 use crate::state::AppState;
 
@@ -34,6 +37,24 @@ pub enum Settled {
     /// The lease was no longer held: reaped, cancelled or finished by a newer
     /// holder. Whatever the worker computed must be discarded.
     LeaseLost,
+}
+
+/// Why a per-file job could not be prepared or delivered on this worker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkError {
+    /// Nothing is wrong with the file: this machine cannot reach the bytes,
+    /// the server or the library right now. The job goes back untouched.
+    Blocked(String),
+    /// This file's own problem: recorded against it.
+    Failed(String),
+}
+
+impl std::fmt::Display for WorkError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WorkError::Blocked(reason) | WorkError::Failed(reason) => f.write_str(reason),
+        }
+    }
 }
 
 /// A worker's view of the queue.
@@ -82,6 +103,22 @@ pub trait JobSource: Send + Sync {
     /// Records why a job could not run on this worker (missing models,
     /// missing FFmpeg), so the queue can explain itself.
     fn record_blockage(&self, shoot_id: i64, kind: &str, reason: &str);
+
+    /// True once the process — or the worker mode — is winding down.
+    fn is_shutting_down(&self) -> bool;
+
+    /// The indexed row a per-file job refers to.
+    fn media_for(&self, job: &Job) -> std::result::Result<Media, WorkError>;
+
+    /// Where the bytes of `media` are on *this* machine: the indexed path on
+    /// the machine that owns the library, the share or a fetched copy on any
+    /// other. Asked for only once the engine is ready, so a fetch is never
+    /// spent on a job that then blocks on models.
+    fn source_path(&self, job: &Job, media: &Media) -> std::result::Result<PathBuf, WorkError>;
+
+    /// Hands a computed analysis to whoever writes the library. The job is
+    /// settled separately, through [`Self::complete`].
+    fn deliver(&self, job: &Job, media: &Media, output: AnalysisOutput) -> std::result::Result<(), WorkError>;
 }
 
 // --- the local source ------------------------------------------------------------
@@ -299,6 +336,36 @@ impl JobSource for LocalJobSource {
 
     fn record_blockage(&self, shoot_id: i64, kind: &str, reason: &str) {
         self.state.record_blockage(shoot_id, kind, reason);
+    }
+
+    fn is_shutting_down(&self) -> bool {
+        self.state.is_shutting_down()
+    }
+
+    fn media_for(&self, job: &Job) -> std::result::Result<Media, WorkError> {
+        let Some(media_id) = job.media_id else {
+            return Err(WorkError::Failed("job has no media id".into()));
+        };
+        match self
+            .state
+            .db
+            .conn()
+            .and_then(|mut conn| media_repo::get_by_id(&mut conn, media_id))
+        {
+            Ok(Some(item)) => Ok(item),
+            Ok(None) => Err(WorkError::Failed(format!("media {media_id} no longer indexed"))),
+            Err(error) => Err(WorkError::Failed(error.to_string())),
+        }
+    }
+
+    fn source_path(&self, _job: &Job, media: &Media) -> std::result::Result<PathBuf, WorkError> {
+        Ok(PathBuf::from(&media.path))
+    }
+
+    fn deliver(&self, _job: &Job, media: &Media, output: AnalysisOutput) -> std::result::Result<(), WorkError> {
+        apply_analysis(&self.state.db, &self.state.video_frames, media, output)
+            .map(|_| ())
+            .map_err(|error| WorkError::Failed(error.to_string()))
     }
 }
 

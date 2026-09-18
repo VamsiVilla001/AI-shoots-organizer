@@ -206,6 +206,13 @@ pub enum WorkerLane {
     All,
     Io,
     Compute,
+    /// Only the per-file analysis jobs — the ones a worker on another
+    /// machine can run without the library: it needs the bytes and the
+    /// models, not the database.
+    Remote,
+    /// Only the shoot-wide stages, for a machine that owns the library but
+    /// leaves per-file analysis to its workers: a server with no GPU.
+    Finishing,
 }
 
 /// Atomically claim the next ready shoot's head job after `last_shoot`.
@@ -233,6 +240,8 @@ pub fn claim_next_parallel(
         WorkerLane::All => "1 = 1",
         WorkerLane::Io => "kind IN ('scan', 'thumbnail', 'proxy')",
         WorkerLane::Compute => "kind NOT IN ('scan', 'thumbnail', 'proxy')",
+        WorkerLane::Remote => "kind IN ('analysePhoto', 'analyseVideo')",
+        WorkerLane::Finishing => "kind IN ('recognise', 'cluster', 'albums')",
     };
     // Both interpolations are application constants, never user-supplied SQL.
     //
@@ -354,10 +363,13 @@ pub fn heartbeat(conn: &mut dyn Db, id: i64, token: &str) -> Result<Heartbeat> {
 /// Marks the job done. Returns `false` when the lease was no longer held —
 /// the caller's results must then be treated as discarded, because a newer
 /// holder may already be producing its own.
+///
+/// The lease goes; the owner stays, so a done row still says which machine
+/// did the work (the worker roster reads it).
 pub fn complete(conn: &mut dyn Db, id: i64, token: &str) -> Result<bool> {
     let n = conn.exec(
         "UPDATE jobs SET state = 'done', finished_at = $2, error = NULL,
-                         owner = NULL, lease_token = NULL, lease_expires_at = NULL
+                         lease_token = NULL, lease_expires_at = NULL
           WHERE id = $1 AND lease_token = $3 AND state = 'running'",
         params![id, now(), token],
     )?;
@@ -377,7 +389,8 @@ pub fn fail(conn: &mut dyn Db, id: i64, token: &str, error: &str) -> Result<Opti
                 error = $3,
                 finished_at = $4,
                 started_at = NULL,
-                owner = NULL, lease_token = NULL, lease_expires_at = NULL
+                owner = CASE WHEN attempts < $2 THEN NULL ELSE owner END,
+                lease_token = NULL, lease_expires_at = NULL
           WHERE id = $1 AND lease_token = $5 AND state = 'running'
       RETURNING state",
         params![id, MAX_ATTEMPTS, error, now(), token],
@@ -481,6 +494,13 @@ pub fn retry_failed(conn: &mut dyn Db, shoot_id: i64) -> Result<usize> {
 /// Cancels queued and running work. A running job keeps its token so the
 /// holder's next [`heartbeat`] answers [`Heartbeat::Cancelled`] rather than
 /// looking like a reaped lease.
+pub fn get_by_id(conn: &mut dyn Db, id: i64) -> Result<Option<Job>> {
+    conn.row_opt("SELECT * FROM jobs WHERE id = $1", params![id])?
+        .as_ref()
+        .map(map)
+        .transpose()
+}
+
 pub fn cancel_for_shoot(conn: &mut dyn Db, shoot_id: i64) -> Result<usize> {
     let n = conn.exec(
         "UPDATE jobs SET state = 'cancelled', finished_at = $2, owner = NULL, lease_expires_at = NULL

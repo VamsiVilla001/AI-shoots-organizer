@@ -30,6 +30,7 @@ pub mod health;
 pub mod mediaroutes;
 pub mod sse;
 pub mod state;
+pub mod work;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -72,6 +73,8 @@ const ADMIN_COMMANDS: &[&str] = &[
     "clear_log",
     "reembed_stale_faces",
     "update_settings",
+    "enrol_machine",
+    "revoke_machine",
 ];
 
 /// Opens the database, starts the workers, and returns the assembled state.
@@ -145,7 +148,10 @@ pub fn boot_with(config: ServerConfig, paths: AppPaths, db: Database) -> anyhow:
 
     // Workers start immediately so an import interrupted by a previous run
     // resumes without anyone having to ask.
-    let workers = WorkerPool::start(Arc::clone(&sink), Arc::clone(&core));
+    if !config.local_analysis {
+        tracing::info!("local analysis is off: this box brokers analysis to enrolled worker machines");
+    }
+    let workers = WorkerPool::start_with(Arc::clone(&sink), Arc::clone(&core), config.local_analysis);
 
     Ok((
         Arc::new(ServerState {
@@ -369,9 +375,24 @@ pub fn router(state: Arc<ServerState>) -> Router {
 
     // `invoke` is what a signed-out client calls to sign in, so it cannot sit
     // behind `require_session`; the handler checks the public list itself.
+    // Worker machines: their own token, never a person's session.
+    let work_routes = Router::new()
+        .route("/api/work/settings", get(work::settings))
+        .route("/api/work/claim", post(work::claim))
+        .route("/api/work/{id}/heartbeat", post(work::heartbeat))
+        .route("/api/work/{id}/artifact", post(work::artifact))
+        .route("/api/work/{id}/result", post(work::result))
+        .route("/api/work/{id}/fail", post(work::fail))
+        .route("/api/work/{id}/release", post(work::release))
+        .route("/api/work/{id}/original", get(work::original))
+        .route("/api/models", get(work::models))
+        .route("/api/models/{hash}", get(work::model_file))
+        .route_layer(middleware::from_fn_with_state(Arc::clone(&state), work::require_machine));
+
     let api = Router::new()
         .route("/api/invoke/{command}", post(invoke))
         .merge(session_routes)
+        .merge(work_routes)
         .route_layer(middleware::from_fn(require_api_version));
 
     let media = Router::new()
@@ -401,6 +422,8 @@ pub fn router(state: Arc<ServerState>) -> Router {
             header::AUTHORIZATION,
             header::CONTENT_TYPE,
             header::HeaderName::from_static("x-skwad-api"),
+            header::HeaderName::from_static(skwad_app_core::work_api::MACHINE_TOKEN_HEADER),
+            header::HeaderName::from_static(skwad_app_core::work_api::LEASE_TOKEN_HEADER),
         ])
         .expose_headers([header::HeaderName::from_static(auth::SESSION_HEADER)])
         .allow_methods([axum::http::Method::GET, axum::http::Method::POST, axum::http::Method::OPTIONS]);
@@ -499,6 +522,7 @@ pub fn cli_overrides(args: &[String]) -> Result<HashMap<String, String>, String>
             "--machine-settings" => "SKWAD_SERVER_MACHINE_SETTINGS",
             "--session-ttl-hours" => "SKWAD_SERVER_SESSION_TTL_HOURS",
             "--ai-workers" => "SKWAD_SERVER_AI_WORKERS",
+            "--local-analysis" => "SKWAD_SERVER_LOCAL_ANALYSIS",
             other => return Err(format!("unrecognised flag {other}")),
         };
         let value = args.get(i + 1).ok_or_else(|| format!("{flag} needs a value"))?;

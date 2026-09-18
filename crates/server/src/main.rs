@@ -223,7 +223,8 @@ fn print_usage() {
            --tls-cert PEM --tls-key PEM\n  \
            --allowed-origins A,B       extra browser origins allowed to call the API\n  \
            --web-dir DIR               serve a built web bundle at /\n  \
-           --ai-workers N              AI slots this box runs itself\n",
+           --ai-workers N              AI slots this box runs itself\n  \
+           --local-analysis BOOL       false: analyse only on enrolled worker machines\n",
         config::default_config_path().display()
     );
     let _ = Arc::new(());

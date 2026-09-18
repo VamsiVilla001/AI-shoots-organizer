@@ -13,6 +13,7 @@ pub mod faces;
 pub mod groups;
 pub mod jobs;
 pub mod logs;
+pub mod machines;
 pub mod media;
 pub mod people;
 pub mod projects;

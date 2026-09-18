@@ -19,7 +19,7 @@ pub const CONFIG_PATH_VAR: &str = "SKWAD_SERVER_CONFIG";
 
 /// The API contract version this build speaks. A client must send it as
 /// `X-Skwad-Api`; anything else is `426 Upgrade Required`.
-pub const API_VERSION: u32 = 1;
+pub const API_VERSION: u32 = skwad_app_core::work_api::API_VERSION;
 
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
@@ -48,6 +48,10 @@ pub struct ServerConfig {
     pub session_ttl_hours: u64,
     /// How many AI workers this box runs itself.
     pub ai_workers: Option<usize>,
+    /// Whether this box analyses files at all. Off for a server without a
+    /// GPU: it still scans, indexes and runs the finishing stages, and every
+    /// analysis job waits for an enrolled worker machine.
+    pub local_analysis: bool,
 }
 
 impl Default for ServerConfig {
@@ -65,6 +69,7 @@ impl Default for ServerConfig {
             machine_settings_file: None,
             session_ttl_hours: 24 * 14,
             ai_workers: None,
+            local_analysis: true,
         }
     }
 }
@@ -132,6 +137,7 @@ pub const KEYS: &[&str] = &[
     "SKWAD_SERVER_MACHINE_SETTINGS",
     "SKWAD_SERVER_SESSION_TTL_HOURS",
     "SKWAD_SERVER_AI_WORKERS",
+    "SKWAD_SERVER_LOCAL_ANALYSIS",
 ];
 
 /// Layered lookup: command line, environment, file.
@@ -217,6 +223,13 @@ impl ServerConfig {
                     .map_err(|e| anyhow::anyhow!("SKWAD_SERVER_AI_WORKERS `{workers}`: {e}"))?,
             );
         }
+        if let Some(flag) = sources.get("SKWAD_SERVER_LOCAL_ANALYSIS") {
+            config.local_analysis = match flag.trim().to_ascii_lowercase().as_str() {
+                "1" | "true" | "yes" | "on" => true,
+                "0" | "false" | "no" | "off" => false,
+                other => anyhow::bail!("SKWAD_SERVER_LOCAL_ANALYSIS `{other}`: expected true or false"),
+            };
+        }
 
         if !sources.file_was_read {
             tracing::debug!(path = %sources.file_path.display(), "no config file; using environment and defaults");
@@ -270,6 +283,7 @@ impl ServerConfig {
         );
         line("SKWAD_SERVER_SESSION_TTL_HOURS", Some(self.session_ttl_hours.to_string()));
         line("SKWAD_SERVER_AI_WORKERS", self.ai_workers.map(|n| n.to_string()));
+        line("SKWAD_SERVER_LOCAL_ANALYSIS", Some(self.local_analysis.to_string()));
         out
     }
 }
