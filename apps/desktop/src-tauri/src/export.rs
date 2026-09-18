@@ -344,6 +344,7 @@ mod tests {
                     file_size: 8,
                     content_key: name.to_string(),
                     captured_at: None,
+                    normalized_relative_path: None,
                 },
             )
             .unwrap();
@@ -365,6 +366,7 @@ mod tests {
                     quality: Some(0.5),
                     frame_time: None,
                     crop_path: None,
+                    model_key: None,
                 },
             )
             .unwrap();

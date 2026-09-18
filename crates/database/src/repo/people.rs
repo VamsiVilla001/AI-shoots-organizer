@@ -255,6 +255,7 @@ mod tests {
                 file_size: 1,
                 content_key: "ref-a".into(),
                 captured_at: None,
+                normalized_relative_path: None,
             },
         )
         .unwrap();
@@ -275,6 +276,7 @@ mod tests {
                 quality: Some(0.9),
                 frame_time: None,
                 crop_path: None,
+                model_key: None,
             },
         )
         .unwrap();
@@ -293,6 +295,7 @@ mod tests {
                 file_size: 1,
                 content_key: "tagged-b".into(),
                 captured_at: None,
+                normalized_relative_path: None,
             },
         )
         .unwrap();
@@ -313,6 +316,7 @@ mod tests {
                 quality: Some(0.8),
                 frame_time: None,
                 crop_path: None,
+                model_key: None,
             },
         )
         .unwrap();

@@ -129,7 +129,13 @@ string_enum!(ExportStatus {
 pub struct Shoot {
     pub id: i64,
     pub name: String,
+    /// Where the *scanner* reads the shoot from. Baked into every media row's
+    /// `content_key`, so it never changes once files have been indexed.
     pub source_path: String,
+    /// Where *other machines* reach the same folder — typically a UNC path.
+    /// `None` means the shoot is only reachable from the machine that scanned
+    /// it. See [`crate::paths`].
+    pub share_path: Option<String>,
     pub status: String,
     pub notes: Option<String>,
     pub created_at: String,
@@ -169,6 +175,11 @@ pub struct Media {
     pub duration: Option<f64>,
     pub file_size: i64,
     pub content_key: String,
+    /// The file's path below the shoot's source root, `/`-separated. What a
+    /// client joins onto `shoots.share_path` to open the original. `None` only
+    /// for rows indexed before this was written, whose path does not sit under
+    /// the shoot root.
+    pub normalized_relative_path: Option<String>,
     pub captured_at: Option<String>,
     pub indexed_at: String,
     pub camera_make: Option<String>,
@@ -215,6 +226,9 @@ pub struct NewMedia {
     pub file_size: i64,
     pub content_key: String,
     pub captured_at: Option<String>,
+    /// See [`Media::normalized_relative_path`]. The scanner derives it with
+    /// [`crate::paths::relative_to_root`].
+    pub normalized_relative_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -274,6 +288,10 @@ pub struct Face {
     pub frame_time: Option<f64>,
     pub crop_path: Option<String>,
     pub created_at: String,
+    /// Content hash of the embedder that produced `embedding`. `None` is the
+    /// cohort from before models had an identity; vectors are only ever
+    /// compared within a cohort.
+    pub model_key: Option<String>,
 }
 
 /// Normalised against the full frame, so it survives thumbnail resizing.
@@ -311,6 +329,8 @@ pub struct NewFace {
     pub quality: Option<f64>,
     pub frame_time: Option<f64>,
     pub crop_path: Option<String>,
+    /// See [`Face::model_key`].
+    pub model_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -435,6 +455,24 @@ pub struct Job {
     pub created_at: String,
     pub started_at: Option<String>,
     pub finished_at: Option<String>,
+    /// The machine holding the lease while the job is `running`.
+    pub owner: Option<String>,
+    /// Fencing token issued at claim time. Every write the holder makes is
+    /// gated on it, so a worker whose lease was reaped cannot write stale
+    /// results over a newer claim's.
+    pub lease_token: Option<String>,
+    pub lease_expires_at: Option<String>,
+    /// How many times a lease on this job expired under a worker. Separate
+    /// from `attempts`, which only a genuine failure consumes.
+    pub lease_losses: i64,
+}
+
+impl Job {
+    /// The fencing token, for the holder of a freshly claimed job. Absent only
+    /// on rows read back from the table rather than returned by a claim.
+    pub fn token(&self) -> Option<&str> {
+        self.lease_token.as_deref()
+    }
 }
 
 /// One step of the pipeline, counted from the job queue. The panel renders

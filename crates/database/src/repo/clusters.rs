@@ -200,6 +200,7 @@ mod tests {
                     file_size: 1,
                     content_key: format!("k{i}"),
                     captured_at: None,
+                    normalized_relative_path: None,
                 },
             )
             .unwrap();
@@ -221,6 +222,7 @@ mod tests {
                         quality: Some(i as f64),
                         frame_time: None,
                         crop_path: None,
+                        model_key: None,
                     },
                 )
                 .unwrap(),

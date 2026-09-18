@@ -6,6 +6,7 @@ pub mod db_setup;
 pub mod events;
 pub mod export;
 pub mod library;
+pub mod machine;
 pub mod models;
 pub mod paths;
 pub mod pipeline;
@@ -99,7 +100,11 @@ pub fn run() {
             app.manage(db_setup::StartupStatus::Ready);
             let settings = AppSettings::load(&db).unwrap_or_default().sanitised();
 
-            let state = Arc::new(AppState::new(db, paths, settings, protocol::url_base()));
+            // Lives in this machine's own app data, never the (possibly
+            // shared) library folder: two machines must never claim jobs
+            // under one id.
+            let machine_id = machine::load_or_create(&data_dir);
+            let state = Arc::new(AppState::new(db, paths, settings, protocol::url_base(), machine_id));
             app.manage(Arc::clone(&state));
 
             // The roster lives in the library folder, so it is prepared once the

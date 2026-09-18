@@ -187,6 +187,7 @@ mod tests {
                 file_size: 10,
                 content_key: "k".into(),
                 captured_at: None,
+                normalized_relative_path: None,
             },
         )
         .unwrap();
@@ -222,6 +223,7 @@ mod tests {
                 file_size: 10,
                 content_key: "video-review".into(),
                 captured_at: None,
+                normalized_relative_path: None,
             },
         )
         .unwrap();
@@ -242,6 +244,7 @@ mod tests {
                 quality: Some(0.8),
                 frame_time: Some(5.0),
                 crop_path: None,
+                model_key: None,
             },
         )
         .unwrap();
@@ -279,6 +282,7 @@ mod tests {
                 file_size: 10,
                 content_key: "empty-frame".into(),
                 captured_at: None,
+                normalized_relative_path: None,
             },
         )
         .unwrap();

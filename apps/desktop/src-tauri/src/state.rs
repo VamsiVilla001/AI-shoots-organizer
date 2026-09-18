@@ -48,6 +48,9 @@ pub struct AppState {
     pub video_frames: VideoFrameCache,
     /// Base URL the webview uses to fetch media through our custom protocol.
     pub media_url_base: String,
+    /// This installation's identity on the job queue — the `owner` written
+    /// into every lease it claims. See `machine.rs`.
+    pub machine_id: String,
 
     settings: RwLock<AppSettings>,
     /// Bumped whenever settings change. Workers watch this and rebuild their
@@ -85,7 +88,13 @@ impl AppState {
     /// entry older than this belongs to work that has since moved on.
     const BLOCKAGE_TTL: Duration = Duration::from_secs(20);
 
-    pub fn new(db: Database, paths: AppPaths, settings: AppSettings, media_url_base: String) -> Self {
+    pub fn new(
+        db: Database,
+        paths: AppPaths,
+        settings: AppSettings,
+        media_url_base: String,
+        machine_id: impl Into<String>,
+    ) -> Self {
         let thumbnails = ThumbnailCache::new(&paths.thumbnails);
         let proxies = VideoProxyCache::new(&paths.proxies);
         let video_frames = VideoFrameCache::new(paths.face_cache.join("video_frames"));
@@ -96,6 +105,7 @@ impl AppState {
             video_frames,
             paths,
             media_url_base,
+            machine_id: machine_id.into(),
             settings: RwLock::new(settings),
             settings_version: AtomicU64::new(1),
             cancellations: Mutex::new(HashMap::new()),
@@ -189,7 +199,7 @@ impl AppState {
             WorkerLane::Io => &mut scheduler.last_io_shoot,
             _ => &mut scheduler.last_compute_shoot,
         };
-        let job = jobs::claim_next_parallel(conn, lane, *cursor, &excluded)?;
+        let job = jobs::claim_next_parallel(conn, lane, *cursor, &excluded, &self.machine_id)?;
         if let Some(job) = &job {
             *cursor = Some(job.shoot_id);
         }
@@ -286,6 +296,7 @@ mod tests {
             paths,
             AppSettings::default(),
             "skwadmedia://localhost".into(),
+            "test-machine",
         )
     }
 

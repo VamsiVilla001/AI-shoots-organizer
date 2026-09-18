@@ -10,6 +10,7 @@ fn map(row: &Row) -> Result<Shoot> {
         id: get(row, "id")?,
         name: get(row, "name")?,
         source_path: get(row, "source_path")?,
+        share_path: get(row, "share_path")?,
         status: get(row, "status")?,
         notes: get(row, "notes")?,
         created_at: get(row, "created_at")?,
@@ -153,6 +154,18 @@ pub fn rename(conn: &mut dyn Db, id: i64, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Records (or clears) the path other machines use to reach this shoot's
+/// folder. `source_path` is deliberately not touched: it is what the scanner
+/// saw and what every `content_key` was derived from.
+pub fn set_share_path(conn: &mut dyn Db, id: i64, share_path: Option<&str>) -> Result<()> {
+    let share_path = share_path.map(str::trim).filter(|s| !s.is_empty());
+    conn.exec(
+        "UPDATE shoots SET share_path = $2, updated_at = $3 WHERE id = $1",
+        params![id, share_path, now()],
+    )?;
+    Ok(())
+}
+
 pub fn set_notes(conn: &mut dyn Db, id: i64, notes: Option<&str>) -> Result<()> {
     conn.exec(
         "UPDATE shoots SET notes = $2, updated_at = $3 WHERE id = $1",
@@ -216,6 +229,26 @@ mod tests {
 
         set_status(&mut conn, shoot.id, ShootStatus::Completed).unwrap();
         assert_eq!(get_by_id(&mut conn, shoot.id).unwrap().unwrap().status, "completed");
+    }
+
+    #[test]
+    fn share_path_is_separate_from_the_scanned_source_path() {
+        let db = Database::open_test().unwrap();
+        let mut conn = db.conn().unwrap();
+        let shoot = create(&mut conn, "Finals", "D:\\shoots\\finals").unwrap();
+        assert_eq!(shoot.share_path, None, "a new shoot is server-only until mapped");
+
+        set_share_path(&mut conn, shoot.id, Some("\\\\STUDIO-PC\\shoots\\finals")).unwrap();
+        let mapped = get_by_id(&mut conn, shoot.id).unwrap().unwrap();
+        assert_eq!(mapped.share_path.as_deref(), Some("\\\\STUDIO-PC\\shoots\\finals"));
+        assert_eq!(mapped.source_path, "D:\\shoots\\finals", "the scanner's path is untouched");
+
+        set_share_path(&mut conn, shoot.id, Some("   ")).unwrap();
+        assert_eq!(
+            get_by_id(&mut conn, shoot.id).unwrap().unwrap().share_path,
+            None,
+            "blank means unmapped, not a share called ' '"
+        );
     }
 
     #[test]

@@ -19,6 +19,7 @@ fn map(row: &Row) -> Result<Media> {
         duration: get(row, "duration")?,
         file_size: get(row, "file_size")?,
         content_key: get(row, "content_key")?,
+        normalized_relative_path: get(row, "normalized_relative_path")?,
         captured_at: get(row, "captured_at")?,
         indexed_at: get(row, "indexed_at")?,
         camera_make: get(row, "camera_make")?,
@@ -52,11 +53,15 @@ pub fn upsert(conn: &mut dyn Db, m: &NewMedia) -> Result<i64> {
     // `RETURNING id` fires on the conflict branch too, which folds what used to
     // be an insert followed by a separate `SELECT id` into one round trip.
     let row = conn.row_one(
-        "INSERT INTO media (shoot_id, path, filename, media_type, extension, file_size, content_key, captured_at, indexed_at)
-              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        "INSERT INTO media (shoot_id, path, filename, media_type, extension, file_size, content_key, captured_at, indexed_at,
+                            normalized_relative_path)
+              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
          ON CONFLICT (shoot_id, path) DO UPDATE SET
               file_size   = excluded.file_size,
               captured_at = COALESCE(media.captured_at, excluded.captured_at),
+              -- Rows from before this column was written pick it up on the
+              -- next re-scan; a caller passing NULL never erases a good value.
+              normalized_relative_path = COALESCE(excluded.normalized_relative_path, media.normalized_relative_path),
               -- A changed content key means the file was replaced on disk, so
               -- everything derived from it has to be recomputed.
               processing_status = CASE WHEN media.content_key = excluded.content_key
@@ -89,6 +94,7 @@ pub fn upsert(conn: &mut dyn Db, m: &NewMedia) -> Result<i64> {
             m.content_key,
             m.captured_at,
             now(),
+            m.normalized_relative_path,
         ],
     )?;
     get(&row, "id")
@@ -601,6 +607,7 @@ mod tests {
                     file_size: 100 + i as i64,
                     content_key: format!("key{i}"),
                     captured_at: None,
+                    normalized_relative_path: None,
                 },
             )
             .unwrap();
@@ -640,6 +647,7 @@ mod tests {
                 file_size: 999,
                 content_key: "different".into(),
                 captured_at: None,
+                normalized_relative_path: None,
             },
         )
         .unwrap();
@@ -663,6 +671,7 @@ mod tests {
             file_size: 1,
             content_key: "key".into(),
             captured_at: None,
+            normalized_relative_path: None,
         };
         let first = upsert(&mut conn, &new).unwrap();
         let second = upsert(&mut conn, &new).unwrap();
@@ -768,6 +777,7 @@ mod tests {
                 file_size: 1,
                 content_key: "ref-a".into(),
                 captured_at: None,
+                normalized_relative_path: None,
             },
         )
         .unwrap();

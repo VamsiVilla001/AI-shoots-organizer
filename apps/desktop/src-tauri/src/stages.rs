@@ -102,11 +102,23 @@ pub fn scan_shoot(
     // Batch inserts rather than holding one writer lock for an entire large
     // shoot. This keeps the UI and progress monitor responsive without paying
     // the cost of one transaction per file.
+    let source_root = std::path::PathBuf::from(&shoot.source_path);
     let mut queued: Vec<(i64, MediaKind)> = Vec::with_capacity(report.files.len());
     for batch in report.files.chunks(SCAN_DB_BATCH_SIZE) {
         let mut rows = db.transaction(|conn| {
             let mut rows = Vec::with_capacity(batch.len());
             for file in batch {
+                // The half of the path that survives a change of machine. The
+                // absolute `path` stays exactly as scanned because `content_key`
+                // is derived from it; see `skwad_database::paths`.
+                let normalized_relative_path = skwad_database::paths::relative_to_root(&source_root, &file.path);
+                if normalized_relative_path.is_none() {
+                    tracing::warn!(
+                        file = %file.path.display(),
+                        root = %shoot.source_path,
+                        "scanned file is not under the shoot root; it will not be reachable from other machines"
+                    );
+                }
                 let media_id = media_repo::upsert(
                     conn,
                     &NewMedia {
@@ -121,6 +133,7 @@ pub fn scan_shoot(
                         file_size: file.file_size as i64,
                         content_key: file.content_key.clone(),
                         captured_at: file.modified_at.clone(),
+                        normalized_relative_path,
                     },
                 )?;
                 rows.push((media_id, file.kind));
@@ -536,6 +549,7 @@ mod tests {
                 file_size: 1,
                 content_key: filename.to_string(),
                 captured_at: None,
+                normalized_relative_path: None,
             },
         )
         .unwrap();
@@ -556,6 +570,7 @@ mod tests {
                 quality: Some(0.7),
                 frame_time: None,
                 crop_path: None,
+                model_key: None,
             },
         )
         .unwrap();
@@ -575,6 +590,7 @@ mod tests {
                 file_size: 1,
                 content_key: filename.to_string(),
                 captured_at: None,
+                normalized_relative_path: None,
             },
         )
         .unwrap();
@@ -598,6 +614,7 @@ mod tests {
                         quality: Some(0.7),
                         frame_time: Some(*frame_time),
                         crop_path: None,
+                        model_key: None,
                     },
                 )
                 .unwrap()
@@ -926,6 +943,51 @@ mod tests {
             .unwrap()
             .iter()
             .any(|a| a.name == "Mavi"));
+    }
+
+    /// `normalized_relative_path` existed in the schema and was exported by
+    /// portable catalogues, but nothing wrote it. The scanner is the only
+    /// place that knows both the root and the file, so it fills it in.
+    #[test]
+    fn scanning_records_the_path_relative_to_the_shoot_root() {
+        let source = tempfile::tempdir().unwrap();
+        let day = source.path().join("day1");
+        std::fs::create_dir_all(&day).unwrap();
+        let mut image = image::RgbImage::new(16, 16);
+        for pixel in image.pixels_mut() {
+            *pixel = image::Rgb([10, 20, 30]);
+        }
+        image.save(day.join("IMG_0001.jpg")).unwrap();
+        image.save(source.path().join("IMG_0002.jpg")).unwrap();
+
+        let db = Database::open_test().unwrap();
+        let shoot_id = {
+            let mut conn = db.conn().unwrap();
+            shoots::create(&mut conn, "Finals", &source.path().display().to_string())
+                .unwrap()
+                .id
+        };
+
+        let summary = scan_shoot(&db, shoot_id, &AppSettings::default(), None, |_| {}).unwrap();
+        assert_eq!(summary.photos, 2);
+
+        let mut conn = db.conn().unwrap();
+        let mut relative: Vec<Option<String>> = media_repo::query(
+            &mut conn,
+            &skwad_database::models::MediaQuery {
+                shoot_id: Some(shoot_id),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .into_iter()
+        .map(|m| m.normalized_relative_path)
+        .collect();
+        relative.sort();
+        assert_eq!(
+            relative,
+            vec![Some("IMG_0002.jpg".to_string()), Some("day1/IMG_0001.jpg".to_string())]
+        );
     }
 
     #[test]

@@ -668,6 +668,7 @@ pub async fn enroll_person(
                         file_size: std::fs::metadata(&path).map(|m| m.len() as i64).unwrap_or(0),
                         content_key: video_path.clone(),
                         captured_at: None,
+                        normalized_relative_path: None,
                     },
                 )?
             };
@@ -805,6 +806,7 @@ fn reference_sample_from_photo(
                 file_size: std::fs::metadata(&path).map(|m| m.len() as i64).unwrap_or(0),
                 content_key: photo_path.to_string(),
                 captured_at: None,
+                normalized_relative_path: None,
             },
         )?
     };
@@ -849,6 +851,7 @@ fn write_reference_samples(
                     quality: Some(sample.quality),
                     frame_time: sample.frame_time,
                     crop_path: None,
+                    model_key: None,
                 },
             )?;
             faces::assign(conn, face_id, person_id, Some(1.0))?;
@@ -1722,6 +1725,7 @@ pub async fn add_manual_face(
                     quality: Some(quality),
                     frame_time,
                     crop_path: None,
+                    model_key: None,
                 },
             )?;
 

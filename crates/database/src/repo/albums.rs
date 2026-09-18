@@ -391,6 +391,7 @@ mod tests {
                     file_size: 1,
                     content_key: format!("k{i}"),
                     captured_at: None,
+                    normalized_relative_path: None,
                 },
             )
             .unwrap();
@@ -420,6 +421,7 @@ mod tests {
                         quality: Some(0.5),
                         frame_time: None,
                         crop_path: None,
+                        model_key: None,
                     },
                 )
                 .unwrap();
@@ -493,6 +495,7 @@ mod tests {
                 file_size: 1,
                 content_key: filename.to_string(),
                 captured_at: None,
+                normalized_relative_path: None,
             },
         )
         .unwrap();
@@ -515,6 +518,7 @@ mod tests {
                     quality: Some(0.5),
                     frame_time: *frame_time,
                     crop_path: None,
+                    model_key: None,
                 },
             )
             .unwrap();
@@ -828,6 +832,7 @@ mod tests {
                 file_size: 1,
                 content_key: "kx".into(),
                 captured_at: None,
+                normalized_relative_path: None,
             },
         )
         .unwrap();
@@ -848,6 +853,7 @@ mod tests {
                 quality: Some(0.5),
                 frame_time: None,
                 crop_path: None,
+                model_key: None,
             },
         )
         .unwrap();

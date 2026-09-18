@@ -22,11 +22,28 @@ struct Migration {
     sql: &'static str,
 }
 
-const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "baseline",
-    sql: include_str!("sql/001_baseline.sql"),
-}];
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "baseline",
+        sql: include_str!("sql/001_baseline.sql"),
+    },
+    Migration {
+        version: 2,
+        name: "path_portability",
+        sql: include_str!("sql/002_path_portability.sql"),
+    },
+    Migration {
+        version: 3,
+        name: "job_leases",
+        sql: include_str!("sql/003_job_leases.sql"),
+    },
+    Migration {
+        version: 4,
+        name: "model_identity",
+        sql: include_str!("sql/004_model_identity.sql"),
+    },
+];
 
 /// The schema version this build expects.
 pub fn target_version() -> i32 {

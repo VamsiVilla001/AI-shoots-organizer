@@ -1355,6 +1355,7 @@ mod tests {
             paths,
             AppSettings::default(),
             "skwadmedia://".into(),
+            "test-machine",
         ));
 
         assert!(authenticate_local(&state, "PERSON@example.com", "temporary-password").is_ok());
@@ -1374,6 +1375,7 @@ mod tests {
             paths,
             AppSettings::default(),
             "skwadmedia://".into(),
+            "test-machine",
         ));
 
         let auth = load_local_auth(&state).unwrap();
@@ -1427,6 +1429,7 @@ mod tests {
             paths,
             AppSettings::default(),
             "skwadmedia://".into(),
+            "test-machine",
         ));
 
         let auth = load_local_auth(&state).unwrap();

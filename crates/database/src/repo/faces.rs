@@ -27,6 +27,7 @@ fn map(row: &Row) -> Result<Face> {
         frame_time: get(row, "frame_time")?,
         crop_path: get(row, "crop_path")?,
         created_at: get(row, "created_at")?,
+        model_key: get(row, "model_key")?,
     })
 }
 
@@ -420,6 +421,7 @@ mod tests {
                 file_size: 1,
                 content_key: format!("k{}", embedding[0]),
                 captured_at: None,
+                normalized_relative_path: None,
             },
         )
         .unwrap();
@@ -440,6 +442,7 @@ mod tests {
                 quality: Some(0.8),
                 frame_time: None,
                 crop_path: None,
+                model_key: None,
             },
         )
         .unwrap();
@@ -522,6 +525,7 @@ mod tests {
                 quality: Some(0.9),
                 frame_time: None,
                 crop_path: None,
+                model_key: None,
             },
         )
         .unwrap();
@@ -555,6 +559,7 @@ mod tests {
                 quality: Some(0.85),
                 frame_time: Some(12.5),
                 crop_path: None,
+                model_key: None,
             },
         )
         .unwrap();

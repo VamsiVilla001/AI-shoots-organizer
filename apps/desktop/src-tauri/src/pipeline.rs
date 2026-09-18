@@ -569,6 +569,7 @@ impl Engine {
                     quality: Some(detection.quality(width, height)),
                     frame_time,
                     crop_path: None,
+                    model_key: None,
                 },
             )?;
             outcome.faces_detected += 1;
@@ -877,6 +878,7 @@ mod tests {
                     file_size: 1,
                     content_key: "testkey".into(),
                     captured_at: None,
+                    normalized_relative_path: None,
                 },
             )
             .unwrap();
@@ -917,6 +919,7 @@ mod tests {
                     file_size: 1,
                     content_key: "oriented".into(),
                     captured_at: None,
+                    normalized_relative_path: None,
                 },
             )
             .unwrap();
@@ -954,6 +957,7 @@ mod tests {
                     file_size: 1,
                     content_key: "k".into(),
                     captured_at: None,
+                    normalized_relative_path: None,
                 },
             )
             .unwrap();

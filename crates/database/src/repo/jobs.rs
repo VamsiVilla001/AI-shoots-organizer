@@ -1,8 +1,8 @@
 //! The resumable job queue behind §18.
 //!
 //! Jobs live in the database rather than memory so that closing the application
-//! mid import leaves the work recoverable: on the next launch anything stuck in
-//! `running` is returned to `queued` and picked up again.
+//! mid import leaves the work recoverable: anything a worker held when it died
+//! goes back to `queued` once its lease expires and is picked up again.
 //!
 //! ## `FOR UPDATE SKIP LOCKED`
 //!
@@ -15,6 +15,24 @@
 //! which is exactly the double-analysis the `busy.media_id` guards exist to
 //! prevent. `SKIP LOCKED` makes the loser move to the next candidate instead of
 //! blocking, so the lanes keep their throughput.
+//!
+//! ## Leases and fencing
+//!
+//! A claim is a *lease*: the row records who holds it (`owner`), a fencing
+//! token issued for that claim (`lease_token`) and when it lapses
+//! (`lease_expires_at`). The holder extends it with [`heartbeat`]; a
+//! [`reap_expired`] pass returns lapsed leases to the queue; and every write
+//! the holder makes — [`complete`], [`fail`], [`release`], the heartbeat itself
+//! — is gated on the token. Zero rows matched means the lease was already
+//! reaped and someone else may now hold the job: the caller discards its work
+//! rather than writing over the newer claim's.
+//!
+//! This replaced a startup-time `requeue_stale` of *every* running row, which
+//! was correct while one process owned the queue and is a data-loss bug the
+//! moment two do. It also matters on one machine: a lease that lapses hands its
+//! attempt back, so only a genuine failure consumes one of the retries.
+
+use std::time::Duration;
 
 use postgres::Row;
 
@@ -26,6 +44,33 @@ use crate::{now, params, Result};
 /// A job is abandoned after this many failed attempts, so one corrupt file
 /// cannot spin the workers forever.
 pub const MAX_ATTEMPTS: i64 = 3;
+
+/// How long a claim stays valid without a heartbeat. Long enough to ride out a
+/// network blip or a paused laptop, short enough that a dead worker's jobs are
+/// back in the queue before anyone notices the shoot has stalled.
+pub const LEASE_TTL: Duration = Duration::from_secs(90);
+
+/// How often a holder should heartbeat. Several beats fit inside one TTL, so a
+/// single missed one costs nothing.
+pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
+
+/// A job whose lease lapses this many times is failed rather than requeued
+/// again. Without this cap a poison job — a file that reliably exhausts GPU
+/// memory and kills its worker — would cycle forever, taking a worker down each
+/// time; with it, the job lands in the failed list after three.
+pub const MAX_LEASE_LOSSES: i64 = 3;
+
+/// The lease expiry for a claim made now, in the same RFC3339 UTC form as
+/// every `*_at` column. Written and compared server-side only, so there is no
+/// clock-skew exposure between machines.
+pub fn lease_expiry_from_now() -> String {
+    lease_expiry_from(chrono::Utc::now())
+}
+
+fn lease_expiry_from(at: chrono::DateTime<chrono::Utc>) -> String {
+    (at + chrono::Duration::from_std(LEASE_TTL).expect("the lease TTL fits in a chrono duration"))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
 
 fn map(row: &Row) -> Result<Job> {
     Ok(Job {
@@ -41,6 +86,10 @@ fn map(row: &Row) -> Result<Job> {
         created_at: get(row, "created_at")?,
         started_at: get(row, "started_at")?,
         finished_at: get(row, "finished_at")?,
+        owner: get(row, "owner")?,
+        lease_token: get(row, "lease_token")?,
+        lease_expires_at: get(row, "lease_expires_at")?,
+        lease_losses: get(row, "lease_losses")?,
     })
 }
 
@@ -87,59 +136,72 @@ pub fn enqueue_unique(
     Ok(Some(enqueue(conn, shoot_id, kind, media_id, priority, None)?))
 }
 
-/// Atomically claims the next queued job. Returns `None` when the queue for
-/// this shoot (or all shoots, when `shoot_id` is `None`) is empty.
-pub fn claim_next(conn: &mut dyn Db, shoot_id: Option<i64>) -> Result<Option<Job>> {
+/// The `SET` clause every claim shares: the state change plus the lease. The
+/// token comes from Postgres itself so it is unique without this crate needing
+/// a UUID dependency. `$1` is `started_at`, `$2` the owner, `$3` the expiry.
+const CLAIM_SET: &str = "state = 'running', started_at = $1, attempts = attempts + 1,
+                         owner = $2, lease_token = gen_random_uuid()::text, lease_expires_at = $3";
+
+/// Atomically claims the next queued job for `owner`. Returns `None` when the
+/// queue for this shoot (or all shoots, when `shoot_id` is `None`) is empty.
+pub fn claim_next(conn: &mut dyn Db, shoot_id: Option<i64>, owner: &str) -> Result<Option<Job>> {
     map_opt(conn.row_opt(
-        "UPDATE jobs SET state = 'running', started_at = $1, attempts = attempts + 1
-          WHERE id = (
-              SELECT id FROM jobs
-               WHERE state = 'queued' AND ($2::bigint IS NULL OR shoot_id = $2::bigint)
-               ORDER BY priority ASC, id ASC LIMIT 1
-               FOR UPDATE SKIP LOCKED
-          )
-      RETURNING *",
-        params![now(), shoot_id],
+        &format!(
+            "UPDATE jobs SET {CLAIM_SET}
+              WHERE id = (
+                  SELECT id FROM jobs
+                   WHERE state = 'queued' AND ($4::bigint IS NULL OR shoot_id = $4::bigint)
+                   ORDER BY priority ASC, id ASC LIMIT 1
+                   FOR UPDATE SKIP LOCKED
+              )
+          RETURNING *"
+        ),
+        params![now(), owner, lease_expiry_from_now(), shoot_id],
     )?)
 }
 
 /// Claims only work that does not construct or run an AI engine. Additional
 /// workers use this lane so scanning and thumbnails retain I/O concurrency
 /// while a single worker owns the memory-hungry GPU sessions.
-pub fn claim_next_io(conn: &mut dyn Db) -> Result<Option<Job>> {
+pub fn claim_next_io(conn: &mut dyn Db, owner: &str) -> Result<Option<Job>> {
     map_opt(conn.row_opt(
-        "UPDATE jobs SET state = 'running', started_at = $1, attempts = attempts + 1
-          WHERE id = (
-              SELECT id FROM jobs
-               WHERE state = 'queued' AND kind IN ('scan', 'thumbnail', 'proxy')
-               ORDER BY priority ASC, id ASC LIMIT 1
-               FOR UPDATE SKIP LOCKED
-          )
-      RETURNING *",
-        params![now()],
+        &format!(
+            "UPDATE jobs SET {CLAIM_SET}
+              WHERE id = (
+                  SELECT id FROM jobs
+                   WHERE state = 'queued' AND kind IN ('scan', 'thumbnail', 'proxy')
+                   ORDER BY priority ASC, id ASC LIMIT 1
+                   FOR UPDATE SKIP LOCKED
+              )
+          RETURNING *"
+        ),
+        params![now(), owner, lease_expiry_from_now()],
     )?)
 }
 
 /// Claims AI and shoot-wide processing while leaving scans, thumbnails and proxies to
 /// the I/O worker. Keeping the lanes independent lets GPU inference overlap
 /// image indexing instead of waiting behind the entire thumbnail queue.
-pub fn claim_next_compute(conn: &mut dyn Db) -> Result<Option<Job>> {
+pub fn claim_next_compute(conn: &mut dyn Db, owner: &str) -> Result<Option<Job>> {
     map_opt(conn.row_opt(
-        "UPDATE jobs SET state = 'running', started_at = $1, attempts = attempts + 1
-          WHERE id = (
-              SELECT id FROM jobs
-               WHERE state = 'queued' AND kind NOT IN ('scan', 'thumbnail', 'proxy')
-               ORDER BY priority ASC, id ASC LIMIT 1
-               FOR UPDATE SKIP LOCKED
-          )
-      RETURNING *",
-        params![now()],
+        &format!(
+            "UPDATE jobs SET {CLAIM_SET}
+              WHERE id = (
+                  SELECT id FROM jobs
+                   WHERE state = 'queued' AND kind NOT IN ('scan', 'thumbnail', 'proxy')
+                   ORDER BY priority ASC, id ASC LIMIT 1
+                   FOR UPDATE SKIP LOCKED
+              )
+          RETURNING *"
+        ),
+        params![now(), owner, lease_expiry_from_now()],
     )?)
 }
 
 /// Each lane rotates independently across shoots. Multiple compute workers
 /// share its cursor at the application level and claim distinct media.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum WorkerLane {
     All,
     Io,
@@ -149,8 +211,13 @@ pub enum WorkerLane {
 /// Atomically claim the next ready shoot's head job after `last_shoot`.
 /// Priority and FIFO still apply within each shoot. A pending dependency does
 /// not consume attempts or block ready work belonging to another shoot.
-pub fn claim_next_fair(conn: &mut dyn Db, lane: WorkerLane, last_shoot: Option<i64>) -> Result<Option<Job>> {
-    claim_next_parallel(conn, lane, last_shoot, &[])
+pub fn claim_next_fair(
+    conn: &mut dyn Db,
+    lane: WorkerLane,
+    last_shoot: Option<i64>,
+    owner: &str,
+) -> Result<Option<Job>> {
+    claim_next_parallel(conn, lane, last_shoot, &[], owner)
 }
 
 /// Multiple compute workers may analyse distinct media in the same shoot.
@@ -160,6 +227,7 @@ pub fn claim_next_parallel(
     lane: WorkerLane,
     last_shoot: Option<i64>,
     paused_shoots: &[i64],
+    owner: &str,
 ) -> Result<Option<Job>> {
     let lane_filter = match lane {
         WorkerLane::All => "1 = 1",
@@ -168,7 +236,7 @@ pub fn claim_next_parallel(
     };
     // Both interpolations are application constants, never user-supplied SQL.
     //
-    // `s.id <> ALL($3)` replaces `s.id NOT IN (SELECT value FROM json_each(?3))`:
+    // `s.id <> ALL($5)` replaces `s.id NOT IN (SELECT value FROM json_each(?3))`:
     // the paused list no longer has to be marshalled through JSON because a
     // Postgres parameter can simply be an array of bigints.
     let sql = format!(
@@ -190,13 +258,13 @@ pub fn claim_next_parallel(
                  ORDER BY candidate.priority, candidate.id LIMIT 1
             ) AS job_id
             FROM shoots s
-            WHERE s.id <> ALL($3) AND NOT EXISTS (
+            WHERE s.id <> ALL($5) AND NOT EXISTS (
                 SELECT 1 FROM jobs
                  WHERE shoot_id = s.id AND state = 'running'
                    AND kind IN ('recognise', 'cluster', 'albums')
             )
         )
-        UPDATE jobs SET state = 'running', started_at = $1, attempts = attempts + 1
+        UPDATE jobs SET {CLAIM_SET}
         WHERE id = (
             SELECT j.id FROM heads h JOIN jobs j ON j.id = h.job_id
             WHERE (
@@ -227,49 +295,173 @@ pub fn claim_next_parallel(
             ORDER BY (SELECT COUNT(*) FROM jobs running
                        WHERE running.shoot_id = j.shoot_id AND running.state = 'running'
                          AND running.kind IN ('analysePhoto', 'analyseVideo')),
-                     CASE WHEN $2::bigint IS NULL OR j.shoot_id > $2::bigint THEN 0 ELSE 1 END,
+                     CASE WHEN $4::bigint IS NULL OR j.shoot_id > $4::bigint THEN 0 ELSE 1 END,
                      j.shoot_id
             LIMIT 1
             FOR UPDATE OF j SKIP LOCKED
         ) RETURNING *"
     );
-    map_opt(conn.row_opt(&sql, params![now(), last_shoot, paused_shoots])?)
+    map_opt(conn.row_opt(
+        &sql,
+        params![now(), owner, lease_expiry_from_now(), last_shoot, paused_shoots],
+    )?)
 }
 
-pub fn complete(conn: &mut dyn Db, id: i64) -> Result<()> {
-    conn.exec(
-        "UPDATE jobs SET state = 'done', finished_at = $2, error = NULL WHERE id = $1",
-        params![id, now()],
+/// What a heartbeat learned about the lease it tried to extend.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Heartbeat {
+    /// Extended; keep working. Carries the new expiry.
+    Alive { lease_expires_at: String },
+    /// The shoot was cancelled under the worker. Stop, discard, do not report.
+    Cancelled,
+    /// The lease was reaped (or the job finished by someone else). The worker
+    /// must discard whatever it computed — another holder may own the job.
+    LeaseLost,
+}
+
+/// Extends the lease on `id` for the holder of `token`.
+///
+/// The worker's heartbeat runs on its own thread, so job duration is
+/// irrelevant to the TTL: a twenty-minute video analysis heartbeats
+/// throughout. A heartbeat sharing the worker thread would expire leases under
+/// exactly the load they exist to survive.
+pub fn heartbeat(conn: &mut dyn Db, id: i64, token: &str) -> Result<Heartbeat> {
+    let expires = lease_expiry_from_now();
+    let extended = conn.row_opt(
+        "UPDATE jobs SET lease_expires_at = $2
+          WHERE id = $1 AND lease_token = $3 AND state = 'running'
+      RETURNING id",
+        params![id, expires, token],
     )?;
-    Ok(())
+    if extended.is_some() {
+        return Ok(Heartbeat::Alive {
+            lease_expires_at: expires,
+        });
+    }
+    // Zero rows: either the shoot was cancelled (the row keeps its token so
+    // this is distinguishable) or the lease was reaped and reissued.
+    let cancelled = conn.row_opt(
+        "SELECT 1 FROM jobs WHERE id = $1 AND lease_token = $2 AND state = 'cancelled'",
+        params![id, token],
+    )?;
+    Ok(if cancelled.is_some() {
+        Heartbeat::Cancelled
+    } else {
+        Heartbeat::LeaseLost
+    })
+}
+
+/// Marks the job done. Returns `false` when the lease was no longer held —
+/// the caller's results must then be treated as discarded, because a newer
+/// holder may already be producing its own.
+pub fn complete(conn: &mut dyn Db, id: i64, token: &str) -> Result<bool> {
+    let n = conn.exec(
+        "UPDATE jobs SET state = 'done', finished_at = $2, error = NULL,
+                         owner = NULL, lease_token = NULL, lease_expires_at = NULL
+          WHERE id = $1 AND lease_token = $3 AND state = 'running'",
+        params![id, now(), token],
+    )?;
+    Ok(n == 1)
 }
 
 /// Records a failure. Below [`MAX_ATTEMPTS`] the job goes back to `queued` for
-/// another try; past it, it stays failed and surfaces in the UI.
-pub fn fail(conn: &mut dyn Db, id: i64, error: &str) -> Result<JobState> {
+/// another try; past it, it stays failed and surfaces in the UI. `None` when
+/// the lease was no longer held.
+pub fn fail(conn: &mut dyn Db, id: i64, token: &str, error: &str) -> Result<Option<JobState>> {
     // One statement rather than a read of `attempts` followed by a write: with
     // concurrent workers the two could interleave and a job could be retried
     // past its budget.
-    let row = conn.row_one(
+    let row = conn.row_opt(
         "UPDATE jobs
             SET state = CASE WHEN attempts < $2 THEN 'queued' ELSE 'failed' END,
                 error = $3,
-                finished_at = $4
-          WHERE id = $1
+                finished_at = $4,
+                started_at = NULL,
+                owner = NULL, lease_token = NULL, lease_expires_at = NULL
+          WHERE id = $1 AND lease_token = $5 AND state = 'running'
       RETURNING state",
-        params![id, MAX_ATTEMPTS, error, now()],
+        params![id, MAX_ATTEMPTS, error, now(), token],
     )?;
+    let Some(row) = row else { return Ok(None) };
     let state: String = get(&row, "state")?;
-    JobState::parse(&state).ok_or_else(|| crate::DbError::other(format!("unknown job state `{state}`")))
+    JobState::parse(&state)
+        .map(Some)
+        .ok_or_else(|| crate::DbError::other(format!("unknown job state `{state}`")))
 }
 
-/// Returns jobs abandoned by a previous run to the queue. Called once at
-/// startup — this is what makes processing resumable across restarts.
-pub fn requeue_stale(conn: &mut dyn Db) -> Result<usize> {
+/// Returns a job to the queue without charging it an attempt — for work that
+/// cannot run *yet* (a dependency still pending, a missing tool) rather than
+/// work that failed. `false` when the lease was no longer held.
+pub fn release(conn: &mut dyn Db, id: i64, token: &str) -> Result<bool> {
     let n = conn.exec(
-        "UPDATE jobs SET state = 'queued', started_at = NULL
-          WHERE state = 'running' AND attempts < $1",
-        params![MAX_ATTEMPTS],
+        "UPDATE jobs SET state = 'queued', started_at = NULL, attempts = GREATEST(attempts - 1, 0),
+                         owner = NULL, lease_token = NULL, lease_expires_at = NULL
+          WHERE id = $1 AND lease_token = $2 AND state = 'running'",
+        params![id, token],
+    )?;
+    Ok(n == 1)
+}
+
+/// What one reaper pass did.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Reaped {
+    /// Leases that lapsed and went back to the queue.
+    pub requeued: usize,
+    /// Jobs that lapsed once too often and were failed instead.
+    pub failed: usize,
+}
+
+/// Returns every job whose lease has lapsed to the queue, or fails it once it
+/// has lapsed [`MAX_LEASE_LOSSES`] times. Run periodically by whichever
+/// process brokers the queue.
+///
+/// A lapse hands the attempt back — `claim` always charged one — so only a
+/// genuine [`fail`] consumes one of the [`MAX_ATTEMPTS`]. Without that, three
+/// network blips would permanently fail a job that never actually failed.
+pub fn reap_expired(conn: &mut dyn Db) -> Result<Reaped> {
+    let cutoff = now();
+    // Fail first, then requeue: the two predicates are disjoint on
+    // `lease_losses`, so ordering only matters for not counting a row twice.
+    let failed = conn.exec(
+        "UPDATE jobs
+            SET state = 'failed',
+                error = 'the worker running this job stopped responding ' || (lease_losses + 1) || ' times',
+                finished_at = $1, started_at = NULL,
+                owner = NULL, lease_token = NULL, lease_expires_at = NULL,
+                lease_losses = lease_losses + 1
+          WHERE state = 'running' AND lease_expires_at < $1
+            AND lease_losses + 1 >= $2",
+        params![cutoff, MAX_LEASE_LOSSES],
+    )?;
+    let requeued = conn.exec(
+        "UPDATE jobs
+            SET state = 'queued', owner = NULL, lease_token = NULL,
+                lease_expires_at = NULL, started_at = NULL,
+                attempts = GREATEST(attempts - 1, 0),
+                lease_losses = lease_losses + 1
+          WHERE state = 'running' AND lease_expires_at < $1
+            AND lease_losses + 1 < $2",
+        params![cutoff, MAX_LEASE_LOSSES],
+    )?;
+    Ok(Reaped {
+        requeued: requeued as usize,
+        failed: failed as usize,
+    })
+}
+
+/// Returns the jobs *this* owner left `running` when it last stopped. Called
+/// once at startup, scoped to the caller's own id: anything else that is
+/// running belongs to another machine and is the reaper's business, not ours.
+///
+/// The attempt is handed back, as with a lapsed lease — an interrupted job did
+/// not fail.
+pub fn requeue_stale(conn: &mut dyn Db, owner: &str) -> Result<usize> {
+    let n = conn.exec(
+        "UPDATE jobs SET state = 'queued', started_at = NULL,
+                         attempts = GREATEST(attempts - 1, 0),
+                         owner = NULL, lease_token = NULL, lease_expires_at = NULL
+          WHERE state = 'running' AND owner = $1",
+        params![owner],
     )?;
     Ok(n as usize)
 }
@@ -277,16 +469,22 @@ pub fn requeue_stale(conn: &mut dyn Db) -> Result<usize> {
 /// Retries everything that gave up, for the "Resume Processing" action.
 pub fn retry_failed(conn: &mut dyn Db, shoot_id: i64) -> Result<usize> {
     let n = conn.exec(
-        "UPDATE jobs SET state = 'queued', attempts = 0, error = NULL, started_at = NULL, finished_at = NULL
+        "UPDATE jobs SET state = 'queued', attempts = 0, lease_losses = 0, error = NULL,
+                         started_at = NULL, finished_at = NULL,
+                         owner = NULL, lease_token = NULL, lease_expires_at = NULL
           WHERE shoot_id = $1 AND state = 'failed'",
         params![shoot_id],
     )?;
     Ok(n as usize)
 }
 
+/// Cancels queued and running work. A running job keeps its token so the
+/// holder's next [`heartbeat`] answers [`Heartbeat::Cancelled`] rather than
+/// looking like a reaped lease.
 pub fn cancel_for_shoot(conn: &mut dyn Db, shoot_id: i64) -> Result<usize> {
     let n = conn.exec(
-        "UPDATE jobs SET state = 'cancelled', finished_at = $2 WHERE shoot_id = $1 AND state IN ('queued','running')",
+        "UPDATE jobs SET state = 'cancelled', finished_at = $2, owner = NULL, lease_expires_at = NULL
+          WHERE shoot_id = $1 AND state IN ('queued','running')",
         params![shoot_id, now()],
     )?;
     Ok(n as usize)
@@ -484,6 +682,163 @@ mod tests {
     use crate::repo::shoots;
     use crate::Database;
 
+    /// The fencing token a claim issued for `id`, for tests that only kept
+    /// the job id around.
+    fn token(conn: &mut dyn Db, id: i64) -> String {
+        conn.row_one("SELECT lease_token FROM jobs WHERE id = $1", params![id])
+            .unwrap()
+            .get::<_, Option<String>>(0)
+            .expect("the job should hold a lease")
+    }
+
+    /// Completes a job the test claimed earlier, through the token gate.
+    fn finish(conn: &mut dyn Db, id: i64) {
+        let token = token(conn, id);
+        assert!(complete(conn, id, &token).unwrap(), "job {id} should still be leased");
+    }
+
+    /// Fails a job the test claimed earlier, through the token gate.
+    fn fail_held(conn: &mut dyn Db, id: i64, error: &str) -> Option<JobState> {
+        let token = token(conn, id);
+        fail(conn, id, &token, error).unwrap()
+    }
+
+    /// Backdates a lease so the reaper sees it as lapsed, without waiting.
+    fn expire_lease(conn: &mut dyn Db, id: i64) {
+        conn.exec(
+            "UPDATE jobs SET lease_expires_at = '2000-01-01T00:00:00Z' WHERE id = $1",
+            params![id],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_claim_issues_a_lease_to_its_owner() {
+        let db = Database::open_test().unwrap();
+        let mut conn = db.conn().unwrap();
+        let shoot = shoots::create(&mut conn, "S", "S").unwrap();
+        enqueue(&mut conn, shoot.id, JobKind::AnalysePhoto, None, 100, None).unwrap();
+
+        let job = claim_next(&mut conn, None, "studio-pc").unwrap().unwrap();
+        assert_eq!(job.owner.as_deref(), Some("studio-pc"));
+        assert!(job.lease_token.is_some());
+        assert!(job.lease_expires_at.as_deref() > Some(now().as_str()), "expires in the future");
+        assert_eq!(job.lease_losses, 0);
+    }
+
+    #[test]
+    fn heartbeat_extends_a_live_lease_and_reports_cancellation() {
+        let db = Database::open_test().unwrap();
+        let mut conn = db.conn().unwrap();
+        let shoot = shoots::create(&mut conn, "S", "S").unwrap();
+        enqueue(&mut conn, shoot.id, JobKind::AnalysePhoto, None, 100, None).unwrap();
+        let job = claim_next(&mut conn, None, "a").unwrap().unwrap();
+        let token = job.token().unwrap();
+
+        expire_lease(&mut conn, job.id);
+        let beat = heartbeat(&mut conn, job.id, token).unwrap();
+        let Heartbeat::Alive { lease_expires_at } = beat else {
+            panic!("a live lease extends: {beat:?}")
+        };
+        assert!(lease_expires_at > now());
+
+        cancel_for_shoot(&mut conn, shoot.id).unwrap();
+        assert_eq!(heartbeat(&mut conn, job.id, token).unwrap(), Heartbeat::Cancelled);
+    }
+
+    /// The fencing rule: once a lease is reaped and re-issued, the old holder
+    /// can neither extend it nor write results, however far it got.
+    #[test]
+    fn a_reaped_lease_fences_out_its_previous_holder() {
+        let db = Database::open_test().unwrap();
+        let mut conn = db.conn().unwrap();
+        let shoot = shoots::create(&mut conn, "S", "S").unwrap();
+        let id = enqueue(&mut conn, shoot.id, JobKind::AnalysePhoto, None, 100, None).unwrap();
+        let first = claim_next(&mut conn, None, "laptop").unwrap().unwrap();
+        let stale = first.token().unwrap().to_string();
+
+        expire_lease(&mut conn, id);
+        assert_eq!(
+            reap_expired(&mut conn).unwrap(),
+            Reaped {
+                requeued: 1,
+                failed: 0
+            }
+        );
+        let attempts: i64 = conn
+            .row_one("SELECT attempts FROM jobs WHERE id = $1", params![id])
+            .unwrap()
+            .get(0);
+        assert_eq!(attempts, 0, "a lapsed lease hands the attempt back");
+
+        let second = claim_next(&mut conn, None, "studio-pc").unwrap().unwrap();
+        assert_eq!(second.id, id);
+        assert_ne!(second.token(), Some(stale.as_str()));
+
+        assert_eq!(heartbeat(&mut conn, id, &stale).unwrap(), Heartbeat::LeaseLost);
+        assert!(!complete(&mut conn, id, &stale).unwrap(), "stale results are refused");
+        assert_eq!(fail(&mut conn, id, &stale, "boom").unwrap(), None);
+        assert!(!release(&mut conn, id, &stale).unwrap());
+
+        let state: String = conn
+            .row_one("SELECT state FROM jobs WHERE id = $1", params![id])
+            .unwrap()
+            .get(0);
+        assert_eq!(state, "running", "the newer holder's claim is untouched");
+        assert!(complete(&mut conn, id, second.token().unwrap()).unwrap());
+    }
+
+    #[test]
+    fn a_job_that_keeps_losing_its_lease_is_failed_not_cycled_forever() {
+        let db = Database::open_test().unwrap();
+        let mut conn = db.conn().unwrap();
+        let shoot = shoots::create(&mut conn, "S", "S").unwrap();
+        let id = enqueue(&mut conn, shoot.id, JobKind::AnalyseVideo, None, 120, None).unwrap();
+
+        for loss in 1..MAX_LEASE_LOSSES {
+            claim_next(&mut conn, None, "flaky").unwrap().unwrap();
+            expire_lease(&mut conn, id);
+            let reaped = reap_expired(&mut conn).unwrap();
+            assert_eq!((reaped.requeued, reaped.failed), (1, 0), "loss {loss} requeues");
+        }
+        claim_next(&mut conn, None, "flaky").unwrap().unwrap();
+        expire_lease(&mut conn, id);
+        let reaped = reap_expired(&mut conn).unwrap();
+        assert_eq!((reaped.requeued, reaped.failed), (0, 1), "the last loss fails it");
+
+        let failed = list_failed(&mut conn, shoot.id, 10).unwrap();
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].lease_losses, MAX_LEASE_LOSSES);
+        assert!(failed[0].error.as_deref().unwrap_or_default().contains("stopped responding"));
+        assert!(claim_next(&mut conn, None, "flaky").unwrap().is_none());
+
+        // "Resume processing" clears the loss count along with the attempts.
+        assert_eq!(retry_failed(&mut conn, shoot.id).unwrap(), 1);
+        assert_eq!(claim_next(&mut conn, None, "flaky").unwrap().unwrap().lease_losses, 0);
+    }
+
+    /// The bug this whole design exists to fix: a machine starting up must
+    /// only recover *its own* interrupted work.
+    #[test]
+    fn startup_recovery_leaves_other_machines_jobs_alone() {
+        let db = Database::open_test().unwrap();
+        let mut conn = db.conn().unwrap();
+        let shoot = shoots::create(&mut conn, "S", "S").unwrap();
+        enqueue(&mut conn, shoot.id, JobKind::AnalysePhoto, None, 100, None).unwrap();
+        enqueue(&mut conn, shoot.id, JobKind::AnalysePhoto, None, 100, None).unwrap();
+        let mine = claim_next(&mut conn, None, "laptop").unwrap().unwrap();
+        let theirs = claim_next(&mut conn, None, "studio-pc").unwrap().unwrap();
+
+        assert_eq!(requeue_stale(&mut conn, "laptop").unwrap(), 1);
+        let state = |conn: &mut dyn Db, id: i64| -> String {
+            conn.row_one("SELECT state FROM jobs WHERE id = $1", params![id])
+                .unwrap()
+                .get(0)
+        };
+        assert_eq!(state(&mut conn, mine.id), "queued");
+        assert_eq!(state(&mut conn, theirs.id), "running", "still leased to the other machine");
+    }
+
     /// Inserts one media row and returns its id, the shape most of these tests
     /// need before they can enqueue a per-file job.
     fn seed_media(conn: &mut dyn Db, shoot_id: i64, filename: &str, status: &str) -> i64 {
@@ -511,34 +866,34 @@ mod tests {
         let cluster = enqueue(&mut conn, shoot.id, JobKind::Cluster, None, 400, None).unwrap();
         for id in &video_jobs {
             assert_eq!(
-                claim_next_parallel(&mut conn, WorkerLane::Compute, None, &[])
+                claim_next_parallel(&mut conn, WorkerLane::Compute, None, &[], "test")
                     .unwrap()
                     .unwrap()
                     .id,
                 *id
             );
         }
-        assert!(claim_next_parallel(&mut conn, WorkerLane::Compute, None, &[])
+        assert!(claim_next_parallel(&mut conn, WorkerLane::Compute, None, &[], "test")
             .unwrap()
             .is_none());
-        complete(&mut conn, video_jobs[0]).unwrap();
-        assert!(claim_next_parallel(&mut conn, WorkerLane::Compute, None, &[])
+        finish(&mut conn, video_jobs[0]);
+        assert!(claim_next_parallel(&mut conn, WorkerLane::Compute, None, &[], "test")
             .unwrap()
             .is_none());
-        complete(&mut conn, video_jobs[1]).unwrap();
+        finish(&mut conn, video_jobs[1]);
         assert_eq!(
-            claim_next_parallel(&mut conn, WorkerLane::Compute, None, &[])
+            claim_next_parallel(&mut conn, WorkerLane::Compute, None, &[], "test")
                 .unwrap()
                 .unwrap()
                 .id,
             recognise
         );
-        assert!(claim_next_parallel(&mut conn, WorkerLane::Compute, None, &[])
+        assert!(claim_next_parallel(&mut conn, WorkerLane::Compute, None, &[], "test")
             .unwrap()
             .is_none());
-        complete(&mut conn, recognise).unwrap();
+        finish(&mut conn, recognise);
         assert_eq!(
-            claim_next_parallel(&mut conn, WorkerLane::Compute, None, &[])
+            claim_next_parallel(&mut conn, WorkerLane::Compute, None, &[], "test")
                 .unwrap()
                 .unwrap()
                 .id,
@@ -555,13 +910,13 @@ mod tests {
         let first = enqueue(&mut conn, shoot.id, JobKind::AnalyseVideo, Some(media_id), 120, None).unwrap();
         enqueue(&mut conn, shoot.id, JobKind::AnalyseVideo, Some(media_id), 120, None).unwrap();
         assert_eq!(
-            claim_next_parallel(&mut conn, WorkerLane::Compute, None, &[])
+            claim_next_parallel(&mut conn, WorkerLane::Compute, None, &[], "test")
                 .unwrap()
                 .unwrap()
                 .id,
             first
         );
-        assert!(claim_next_parallel(&mut conn, WorkerLane::Compute, None, &[])
+        assert!(claim_next_parallel(&mut conn, WorkerLane::Compute, None, &[], "test")
             .unwrap()
             .is_none());
     }
@@ -578,20 +933,20 @@ mod tests {
         let ready = enqueue(&mut conn, running.id, JobKind::AnalyseVideo, None, 120, None).unwrap();
 
         assert_eq!(
-            claim_next_parallel(&mut conn, WorkerLane::Compute, None, &[paused.id])
+            claim_next_parallel(&mut conn, WorkerLane::Compute, None, &[paused.id], "test")
                 .unwrap()
                 .unwrap()
                 .id,
             ready
         );
         assert!(
-            claim_next_parallel(&mut conn, WorkerLane::Compute, Some(running.id), &[paused.id])
+            claim_next_parallel(&mut conn, WorkerLane::Compute, Some(running.id), &[paused.id], "test")
                 .unwrap()
                 .is_none(),
             "the paused shoot's job stays put"
         );
         assert_eq!(
-            claim_next_parallel(&mut conn, WorkerLane::Compute, Some(running.id), &[])
+            claim_next_parallel(&mut conn, WorkerLane::Compute, Some(running.id), &[], "test")
                 .unwrap()
                 .unwrap()
                 .id,
@@ -610,18 +965,18 @@ mod tests {
         let proxy = enqueue(&mut conn, shoot.id, JobKind::Proxy, Some(media_id), 200, None).unwrap();
 
         assert_eq!(
-            claim_next_parallel(&mut conn, WorkerLane::Compute, None, &[])
+            claim_next_parallel(&mut conn, WorkerLane::Compute, None, &[], "test")
                 .unwrap()
                 .unwrap()
                 .id,
             analyse
         );
-        assert!(claim_next_parallel(&mut conn, WorkerLane::Io, None, &[])
+        assert!(claim_next_parallel(&mut conn, WorkerLane::Io, None, &[], "test")
             .unwrap()
             .is_none());
-        complete(&mut conn, analyse).unwrap();
+        finish(&mut conn, analyse);
         assert_eq!(
-            claim_next_parallel(&mut conn, WorkerLane::Io, None, &[])
+            claim_next_parallel(&mut conn, WorkerLane::Io, None, &[], "test")
                 .unwrap()
                 .unwrap()
                 .id,
@@ -636,18 +991,18 @@ mod tests {
         let old = shoots::create(&mut conn, "Quarter Finals", "C:/old").unwrap();
         let first = enqueue(&mut conn, old.id, JobKind::AnalyseVideo, None, 120, None).unwrap();
         let second = enqueue(&mut conn, old.id, JobKind::AnalyseVideo, None, 120, None).unwrap();
-        let started = claim_next_fair(&mut conn, WorkerLane::Compute, None).unwrap().unwrap();
+        let started = claim_next_fair(&mut conn, WorkerLane::Compute, None, "test").unwrap().unwrap();
         assert_eq!(started.id, first);
         let new = shoots::create(&mut conn, "GDR", "C:/new").unwrap();
         let gdr = enqueue(&mut conn, new.id, JobKind::AnalyseVideo, None, 120, None).unwrap();
-        complete(&mut conn, first).unwrap();
-        let next = claim_next_fair(&mut conn, WorkerLane::Compute, Some(old.id))
+        finish(&mut conn, first);
+        let next = claim_next_fair(&mut conn, WorkerLane::Compute, Some(old.id), "test")
             .unwrap()
             .unwrap();
         assert_eq!(next.id, gdr);
-        complete(&mut conn, gdr).unwrap();
+        finish(&mut conn, gdr);
         assert_eq!(
-            claim_next_fair(&mut conn, WorkerLane::Compute, Some(new.id))
+            claim_next_fair(&mut conn, WorkerLane::Compute, Some(new.id), "test")
                 .unwrap()
                 .unwrap()
                 .id,
@@ -680,15 +1035,15 @@ mod tests {
                 // One pass per turn, visiting every shoot: the lane must rotate
                 // between shoots rather than draining one before moving on.
                 for (shoot, jobs) in ids.iter().zip(&expected) {
-                    let job = claim_next_fair(&mut conn, lane, cursor).unwrap().unwrap();
+                    let job = claim_next_fair(&mut conn, lane, cursor, "test").unwrap().unwrap();
                     assert_eq!(job.shoot_id, *shoot);
                     assert_eq!(job.id, jobs[turn]);
                     assert_eq!(job.attempts, 1);
-                    complete(&mut conn, job.id).unwrap();
+                    finish(&mut conn, job.id);
                     cursor = Some(job.shoot_id);
                 }
             }
-            assert!(claim_next_fair(&mut conn, lane, cursor).unwrap().is_none());
+            assert!(claim_next_fair(&mut conn, lane, cursor, "test").unwrap().is_none());
         }
     }
 
@@ -702,13 +1057,13 @@ mod tests {
         let ready = shoots::create(&mut conn, "Ready", "C:/ready").unwrap();
         let runnable = enqueue(&mut conn, ready.id, JobKind::AnalyseVideo, None, 120, None).unwrap();
         assert_eq!(
-            claim_next_fair(&mut conn, WorkerLane::Compute, None)
+            claim_next_fair(&mut conn, WorkerLane::Compute, None, "test")
                 .unwrap()
                 .unwrap()
                 .id,
             runnable
         );
-        assert!(claim_next_fair(&mut conn, WorkerLane::Compute, Some(ready.id))
+        assert!(claim_next_fair(&mut conn, WorkerLane::Compute, Some(ready.id), "test")
             .unwrap()
             .is_none());
         let attempts: i64 = conn
@@ -722,7 +1077,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            claim_next_fair(&mut conn, WorkerLane::Compute, Some(ready.id))
+            claim_next_fair(&mut conn, WorkerLane::Compute, Some(ready.id), "test")
                 .unwrap()
                 .unwrap()
                 .id,
@@ -741,29 +1096,29 @@ mod tests {
         let recognise_b = enqueue(&mut conn, b.id, JobKind::Recognise, None, 300, None).unwrap();
         let cluster_b = enqueue(&mut conn, b.id, JobKind::Cluster, None, 400, None).unwrap();
         assert_eq!(
-            claim_next_fair(&mut conn, WorkerLane::Compute, None)
+            claim_next_fair(&mut conn, WorkerLane::Compute, None, "test")
                 .unwrap()
                 .unwrap()
                 .id,
             recognise_b
         );
         // Cannot run clustering concurrently with recognition in the same shoot.
-        assert!(claim_next_fair(&mut conn, WorkerLane::Compute, None).unwrap().is_none());
+        assert!(claim_next_fair(&mut conn, WorkerLane::Compute, None, "test").unwrap().is_none());
         assert_eq!(
-            claim_next_fair(&mut conn, WorkerLane::Io, None).unwrap().unwrap().id,
+            claim_next_fair(&mut conn, WorkerLane::Io, None, "test").unwrap().unwrap().id,
             thumb
         );
-        complete(&mut conn, thumb).unwrap();
+        finish(&mut conn, thumb);
         assert_eq!(
-            claim_next_fair(&mut conn, WorkerLane::Compute, Some(b.id))
+            claim_next_fair(&mut conn, WorkerLane::Compute, Some(b.id), "test")
                 .unwrap()
                 .unwrap()
                 .id,
             recognise_a
         );
-        complete(&mut conn, recognise_b).unwrap();
+        finish(&mut conn, recognise_b);
         assert_eq!(
-            claim_next_fair(&mut conn, WorkerLane::Compute, Some(a.id))
+            claim_next_fair(&mut conn, WorkerLane::Compute, Some(a.id), "test")
                 .unwrap()
                 .unwrap()
                 .id,
@@ -780,29 +1135,29 @@ mod tests {
         let first = enqueue(&mut conn, a.id, JobKind::AnalyseVideo, None, 120, None).unwrap();
         let second = enqueue(&mut conn, b.id, JobKind::AnalyseVideo, None, 120, None).unwrap();
         assert_eq!(
-            claim_next_fair(&mut conn, WorkerLane::Compute, None)
+            claim_next_fair(&mut conn, WorkerLane::Compute, None, "test")
                 .unwrap()
                 .unwrap()
                 .id,
             first
         );
-        fail(&mut conn, first, "temporary failure").unwrap();
+        fail_held(&mut conn, first, "temporary failure");
         assert_eq!(
-            claim_next_fair(&mut conn, WorkerLane::Compute, Some(a.id))
+            claim_next_fair(&mut conn, WorkerLane::Compute, Some(a.id), "test")
                 .unwrap()
                 .unwrap()
                 .id,
             second
         );
-        complete(&mut conn, second).unwrap();
+        finish(&mut conn, second);
         cancel_for_shoot(&mut conn, a.id).unwrap();
-        assert!(claim_next_fair(&mut conn, WorkerLane::Compute, Some(b.id))
+        assert!(claim_next_fair(&mut conn, WorkerLane::Compute, Some(b.id), "test")
             .unwrap()
             .is_none());
         conn.exec("DELETE FROM shoots WHERE id = $1", params![b.id]).unwrap();
         let later = enqueue(&mut conn, a.id, JobKind::AnalyseVideo, None, 120, None).unwrap();
         assert_eq!(
-            claim_next_fair(&mut conn, WorkerLane::Compute, Some(b.id))
+            claim_next_fair(&mut conn, WorkerLane::Compute, Some(b.id), "test")
                 .unwrap()
                 .unwrap()
                 .id,
@@ -819,14 +1174,14 @@ mod tests {
         enqueue(&mut conn, shoot.id, JobKind::Thumbnail, None, 200, None).unwrap();
         let urgent = enqueue(&mut conn, shoot.id, JobKind::Scan, None, 10, None).unwrap();
 
-        let first = claim_next(&mut conn, None).unwrap().unwrap();
+        let first = claim_next(&mut conn, None, "test").unwrap().unwrap();
         assert_eq!(first.id, urgent, "lower priority number runs first");
         assert_eq!(first.state, "running");
         assert_eq!(first.attempts, 1);
 
-        let second = claim_next(&mut conn, None).unwrap().unwrap();
+        let second = claim_next(&mut conn, None, "test").unwrap().unwrap();
         assert_ne!(second.id, first.id, "a running job cannot be claimed twice");
-        assert!(claim_next(&mut conn, None).unwrap().is_none());
+        assert!(claim_next(&mut conn, None, "test").unwrap().is_none());
     }
 
     #[test]
@@ -838,8 +1193,8 @@ mod tests {
         let analyse = enqueue(&mut conn, shoot.id, JobKind::AnalysePhoto, None, 10, None).unwrap();
         let thumbnail = enqueue(&mut conn, shoot.id, JobKind::Thumbnail, None, 50, None).unwrap();
 
-        assert_eq!(claim_next_io(&mut conn).unwrap().unwrap().id, thumbnail);
-        assert_eq!(claim_next(&mut conn, None).unwrap().unwrap().id, analyse);
+        assert_eq!(claim_next_io(&mut conn, "test").unwrap().unwrap().id, thumbnail);
+        assert_eq!(claim_next(&mut conn, None, "test").unwrap().unwrap().id, analyse);
     }
 
     #[test]
@@ -851,8 +1206,8 @@ mod tests {
         let thumbnail = enqueue(&mut conn, shoot.id, JobKind::Thumbnail, None, 10, None).unwrap();
         let analyse = enqueue(&mut conn, shoot.id, JobKind::AnalysePhoto, None, 50, None).unwrap();
 
-        assert_eq!(claim_next_compute(&mut conn).unwrap().unwrap().id, analyse);
-        assert_eq!(claim_next(&mut conn, None).unwrap().unwrap().id, thumbnail);
+        assert_eq!(claim_next_compute(&mut conn, "test").unwrap().unwrap().id, analyse);
+        assert_eq!(claim_next(&mut conn, None, "test").unwrap().unwrap().id, thumbnail);
     }
 
     #[test]
@@ -863,15 +1218,15 @@ mod tests {
         let id = enqueue(&mut conn, shoot.id, JobKind::AnalysePhoto, None, 100, None).unwrap();
 
         for _ in 0..(MAX_ATTEMPTS - 1) {
-            claim_next(&mut conn, None).unwrap().unwrap();
-            assert_eq!(fail(&mut conn, id, "boom").unwrap(), JobState::Queued);
+            claim_next(&mut conn, None, "test").unwrap().unwrap();
+            assert_eq!(fail_held(&mut conn, id, "boom"), Some(JobState::Queued));
         }
-        claim_next(&mut conn, None).unwrap().unwrap();
-        assert_eq!(fail(&mut conn, id, "boom").unwrap(), JobState::Failed);
-        assert!(claim_next(&mut conn, None).unwrap().is_none());
+        claim_next(&mut conn, None, "test").unwrap().unwrap();
+        assert_eq!(fail_held(&mut conn, id, "boom"), Some(JobState::Failed));
+        assert!(claim_next(&mut conn, None, "test").unwrap().is_none());
 
         assert_eq!(retry_failed(&mut conn, shoot.id).unwrap(), 1);
-        assert!(claim_next(&mut conn, None).unwrap().is_some());
+        assert!(claim_next(&mut conn, None, "test").unwrap().is_some());
     }
 
     #[test]
@@ -880,11 +1235,11 @@ mod tests {
         let mut conn = db.conn().unwrap();
         let shoot = shoots::create(&mut conn, "S", "C:\\s").unwrap();
         enqueue(&mut conn, shoot.id, JobKind::AnalysePhoto, None, 100, None).unwrap();
-        claim_next(&mut conn, None).unwrap().unwrap(); // simulates a crash mid-job
+        claim_next(&mut conn, None, "test").unwrap().unwrap(); // simulates a crash mid-job
 
-        assert!(claim_next(&mut conn, None).unwrap().is_none());
-        assert_eq!(requeue_stale(&mut conn).unwrap(), 1);
-        assert!(claim_next(&mut conn, None).unwrap().is_some());
+        assert!(claim_next(&mut conn, None, "test").unwrap().is_none());
+        assert_eq!(requeue_stale(&mut conn, "test").unwrap(), 1);
+        assert!(claim_next(&mut conn, None, "test").unwrap().is_some());
     }
 
     #[test]
@@ -900,8 +1255,8 @@ mod tests {
             .unwrap()
             .is_none());
 
-        let job = claim_next(&mut conn, None).unwrap().unwrap();
-        complete(&mut conn, job.id).unwrap();
+        let job = claim_next(&mut conn, None, "test").unwrap().unwrap();
+        finish(&mut conn, job.id);
         assert!(enqueue_unique(&mut conn, shoot.id, JobKind::Cluster, None, 400)
             .unwrap()
             .is_some());
@@ -919,8 +1274,9 @@ mod tests {
         for _ in 0..3 {
             enqueue(&mut conn, shoot.id, JobKind::AnalysePhoto, None, 100, None).unwrap();
         }
-        complete(&mut conn, scan).unwrap();
-        let running = claim_next_compute(&mut conn).unwrap().unwrap();
+        assert_eq!(claim_next_io(&mut conn, "test").unwrap().unwrap().id, scan);
+        finish(&mut conn, scan);
+        let running = claim_next_compute(&mut conn, "test").unwrap().unwrap();
         assert_eq!(running.kind, JobKind::AnalysePhoto.as_str());
 
         let stages = stage_breakdown(&mut conn, shoot.id).unwrap();

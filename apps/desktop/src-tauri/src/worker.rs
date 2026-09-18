@@ -1,10 +1,13 @@
 //! The background worker pool (§18).
 //!
-//! Workers pull jobs from the SQLite queue, so the queue survives a crash or a
-//! quit: anything left `running` is returned to `queued` at startup and picked
-//! up again. Nothing here blocks the UI thread.
+//! Workers pull jobs from the queue in PostgreSQL, so the queue survives a
+//! crash or a quit: every claim is a lease, a lease keeper thread heartbeats
+//! the jobs this process holds, and anything whose lease lapses — because the
+//! process died, or the machine went to sleep — is returned to the queue by
+//! the reaper and picked up again. Nothing here blocks the UI thread.
 
 use skwad_database::Db;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -33,6 +36,60 @@ const PROGRESS_INTERVAL: Duration = Duration::from_millis(500);
 /// processing or making long-run telemetry large.
 const RESOURCE_INTERVAL: Duration = Duration::from_secs(2);
 
+/// How often the monitor returns lapsed leases to the queue. Coarser than the
+/// heartbeat so a healthy worker always beats it, finer than the TTL so a dead
+/// one's jobs are back within a lease of dying.
+const REAP_INTERVAL: Duration = Duration::from_secs(15);
+
+/// The jobs this process currently holds a lease on, keyed by job id with the
+/// fencing token each claim issued.
+///
+/// The lease keeper thread heartbeats every entry on its own schedule, so a
+/// job's duration never interacts with the lease TTL: a twenty-minute video
+/// analysis is heartbeated throughout without the worker thread doing
+/// anything. A heartbeat that comes back [`jobs::Heartbeat::Cancelled`] or
+/// [`jobs::Heartbeat::LeaseLost`] sets the shoot's cancellation flag, which is
+/// how the stage running on the worker thread finds out.
+#[derive(Default)]
+pub struct HeldLeases {
+    held: parking_lot::Mutex<HashMap<i64, HeldLease>>,
+}
+
+struct HeldLease {
+    token: String,
+    shoot_id: i64,
+}
+
+impl HeldLeases {
+    fn hold(&self, job: &Job) {
+        if let Some(token) = job.token() {
+            self.held.lock().insert(
+                job.id,
+                HeldLease {
+                    token: token.to_string(),
+                    shoot_id: job.shoot_id,
+                },
+            );
+        }
+    }
+
+    fn drop_lease(&self, job_id: i64) {
+        self.held.lock().remove(&job_id);
+    }
+
+    fn snapshot(&self) -> Vec<(i64, String, i64)> {
+        self.held
+            .lock()
+            .iter()
+            .map(|(id, lease)| (*id, lease.token.clone(), lease.shoot_id))
+            .collect()
+    }
+
+    pub fn count(&self) -> usize {
+        self.held.lock().len()
+    }
+}
+
 pub struct WorkerPool {
     handles: Vec<std::thread::JoinHandle<()>>,
 }
@@ -41,25 +98,41 @@ impl WorkerPool {
     /// One I/O worker and bounded AI slots. Disabled slots stay idle without
     /// loading models, allowing concurrency changes without restarting the app.
     pub fn start(app: AppHandle, state: Arc<AppState>) -> Self {
-        // Recover anything a previous run left mid-flight.
-        match state.db.conn().and_then(|mut conn| jobs::requeue_stale(&mut conn)) {
+        // Recover anything a previous run *of this machine* left mid-flight.
+        // Other machines' running jobs are theirs until their lease lapses.
+        match state
+            .db
+            .conn()
+            .and_then(|mut conn| jobs::requeue_stale(&mut conn, &state.machine_id))
+        {
             Ok(n) if n > 0 => tracing::info!(jobs = n, "recovered interrupted jobs from the previous session"),
             Ok(_) => {}
             Err(e) => tracing::error!(error = %e, "could not recover interrupted jobs"),
         }
+        let leases = Arc::new(HeldLeases::default());
         let worker_count = crate::settings::MAX_AI_WORKERS + 1;
-        let mut handles = Vec::with_capacity(worker_count + 1);
+        let mut handles = Vec::with_capacity(worker_count + 2);
 
         for index in 0..worker_count {
             let app = app.clone();
             let state = Arc::clone(&state);
+            let leases = Arc::clone(&leases);
             handles.push(
                 std::thread::Builder::new()
                     .name(format!("skwad-worker-{index}"))
-                    .spawn(move || worker_loop(index, app, state))
+                    .spawn(move || worker_loop(index, app, state, leases))
                     .expect("failed to spawn worker thread"),
             );
         }
+
+        let keeper_state = Arc::clone(&state);
+        let keeper_leases = Arc::clone(&leases);
+        handles.push(
+            std::thread::Builder::new()
+                .name("skwad-lease-keeper".into())
+                .spawn(move || lease_keeper_loop(keeper_state, keeper_leases))
+                .expect("failed to spawn the lease keeper thread"),
+        );
 
         let monitor_app = app.clone();
         let monitor_state = Arc::clone(&state);
@@ -81,7 +154,46 @@ impl WorkerPool {
     }
 }
 
-fn worker_loop(index: usize, app: AppHandle, state: Arc<AppState>) {
+/// Heartbeats every lease this process holds, on its own thread so job
+/// duration and heartbeat cadence are independent.
+fn lease_keeper_loop(state: Arc<AppState>, leases: Arc<HeldLeases>) {
+    // Sleep in short steps so shutdown is noticed promptly, but only beat on
+    // the heartbeat interval.
+    let mut last_beat = Instant::now();
+    while !state.is_shutting_down() {
+        std::thread::sleep(IDLE_POLL);
+        if last_beat.elapsed() < jobs::HEARTBEAT_INTERVAL {
+            continue;
+        }
+        last_beat = Instant::now();
+        let held = leases.snapshot();
+        if held.is_empty() {
+            continue;
+        }
+        let Ok(mut conn) = state.db.conn() else { continue };
+        for (job_id, token, shoot_id) in held {
+            match jobs::heartbeat(&mut conn, job_id, &token) {
+                Ok(jobs::Heartbeat::Alive { .. }) => {}
+                Ok(jobs::Heartbeat::Cancelled) => {
+                    tracing::info!(job = job_id, shoot = shoot_id, "job cancelled while running; stopping it");
+                    state.cancel_shoot(shoot_id);
+                    leases.drop_lease(job_id);
+                }
+                Ok(jobs::Heartbeat::LeaseLost) => {
+                    // Someone else may hold this job now. The stage is told to
+                    // stop via the shoot flag; its results are refused by the
+                    // token gate regardless.
+                    tracing::warn!(job = job_id, shoot = shoot_id, "lease lost while running; abandoning the job");
+                    state.cancel_shoot(shoot_id);
+                    leases.drop_lease(job_id);
+                }
+                Err(error) => tracing::warn!(job = job_id, %error, "could not heartbeat a lease"),
+            }
+        }
+    }
+}
+
+fn worker_loop(index: usize, app: AppHandle, state: Arc<AppState>, leases: Arc<HeldLeases>) {
     tracing::debug!(worker = index, "worker started");
 
     // Built on first use: a session that only ever browses an existing shoot
@@ -131,12 +243,12 @@ fn worker_loop(index: usize, app: AppHandle, state: Arc<AppState>) {
             std::thread::sleep(IDLE_POLL);
             continue;
         };
+        leases.hold(&job);
+
         // A pause can arrive just after an atomic claim. Give the job back
         // without consuming an attempt; already executing files finish safely.
         if state.is_shoot_paused(job.shoot_id) {
-            if let Ok(mut conn) = state.db.conn() {
-                requeue_without_attempt(&mut conn, job.id);
-            }
+            release(&state, &leases, &job);
             continue;
         }
 
@@ -145,6 +257,7 @@ fn worker_loop(index: usize, app: AppHandle, state: Arc<AppState>) {
             if let Ok(mut conn) = state.db.conn() {
                 let _ = jobs::cancel_for_shoot(&mut conn, job.shoot_id);
             }
+            leases.drop_lease(job.id);
             continue;
         }
 
@@ -173,7 +286,7 @@ fn worker_loop(index: usize, app: AppHandle, state: Arc<AppState>) {
         ) {
             engine_last_used = Some(Instant::now());
         }
-        finish_job(&app, &state, &job, outcome);
+        finish_job(&app, &state, &leases, &job, outcome);
     }
 
     tracing::debug!(worker = index, "worker stopped");
@@ -407,22 +520,56 @@ fn analysis_outstanding(state: &Arc<AppState>, shoot_id: i64) -> bool {
     outstanding > 0
 }
 
-fn finish_job(app: &AppHandle, state: &Arc<AppState>, job: &Job, outcome: JobOutcome) {
-    let Ok(mut conn) = state.db.conn() else { return };
+/// The token a claimed job carries. A job without one cannot have come from a
+/// claim, so this is an invariant violation rather than a runtime condition.
+fn token_of(job: &Job) -> &str {
+    job.token().unwrap_or_default()
+}
+
+/// Returns a job to the queue without charging it an attempt.
+fn release(state: &Arc<AppState>, leases: &HeldLeases, job: &Job) {
+    if let Ok(mut conn) = state.db.conn() {
+        match jobs::release(&mut conn, job.id, token_of(job)) {
+            Ok(true) => {}
+            Ok(false) => tracing::debug!(job = job.id, "lease was already gone when releasing"),
+            Err(error) => tracing::warn!(job = job.id, %error, "could not release a job"),
+        }
+    }
+    leases.drop_lease(job.id);
+}
+
+fn finish_job(app: &AppHandle, state: &Arc<AppState>, leases: &HeldLeases, job: &Job, outcome: JobOutcome) {
+    let Ok(mut conn) = state.db.conn() else {
+        leases.drop_lease(job.id);
+        return;
+    };
+    let token = token_of(job);
 
     let mut settled = false;
     let mut succeeded = false;
 
     match outcome {
         JobOutcome::Done => {
-            settled = jobs::complete(&mut conn, job.id).is_ok();
-            succeeded = settled;
+            match jobs::complete(&mut conn, job.id, token) {
+                Ok(true) => {
+                    settled = true;
+                    succeeded = true;
+                }
+                // The lease lapsed (or the shoot was cancelled) while the
+                // stage ran. Whatever it wrote is either already superseded
+                // by a newer holder's run or belongs to a cancelled shoot;
+                // either way this job is not ours to settle.
+                Ok(false) => tracing::warn!(job = job.id, kind = %job.kind, "job finished after its lease was lost; result not recorded"),
+                Err(error) => tracing::warn!(job = job.id, %error, "could not mark a job done"),
+            }
         }
         JobOutcome::Deferred => {
             // Give the remaining analysis a moment rather than spinning on the
             // same row, and do not let waiting count against the retry budget.
             std::thread::sleep(IDLE_POLL);
-            requeue_without_attempt(&mut conn, job.id);
+            drop(conn);
+            release(state, leases, job);
+            return;
         }
         JobOutcome::Blocked(reason) => {
             // The job goes back untouched. As soon as the missing piece is in
@@ -435,13 +582,25 @@ fn finish_job(app: &AppHandle, state: &Arc<AppState>, job: &Job, outcome: JobOut
                 events::notice(app, "warn", format!("Processing paused: {reason}"));
             }
             std::thread::sleep(BLOCKED_BACKOFF);
-            requeue_without_attempt(&mut conn, job.id);
+            drop(conn);
+            release(state, leases, job);
+            return;
         }
         JobOutcome::Failed(error) => {
             tracing::warn!(job = job.id, kind = %job.kind, error = %error, "job failed");
 
-            let state_after = jobs::fail(&mut conn, job.id, &error).unwrap_or(JobState::Failed);
-            if state_after == JobState::Failed {
+            let state_after = match jobs::fail(&mut conn, job.id, token, &error) {
+                Ok(Some(state)) => Some(state),
+                Ok(None) => {
+                    tracing::warn!(job = job.id, "job failed after its lease was lost; failure not recorded");
+                    None
+                }
+                Err(db_error) => {
+                    tracing::warn!(job = job.id, error = %db_error, "could not record a job failure");
+                    Some(JobState::Failed)
+                }
+            };
+            if state_after == Some(JobState::Failed) {
                 settled = true;
                 if let Some(media_id) = job.media_id {
                     let _ = media_repo::set_status(&mut conn, media_id, ProcessingStatus::Failed, Some(&error));
@@ -472,6 +631,7 @@ fn finish_job(app: &AppHandle, state: &Arc<AppState>, job: &Job, outcome: JobOut
             }
         }
     }
+    leases.drop_lease(job.id);
 
     if settled {
         if let Err(error) = telemetry::mark_stage_settled(&mut conn, job.shoot_id, &job.kind, succeeded) {
@@ -483,18 +643,12 @@ fn finish_job(app: &AppHandle, state: &Arc<AppState>, job: &Job, outcome: JobOut
     }
 }
 
-/// Returns a job to the queue without charging it an attempt.
-fn requeue_without_attempt(conn: &mut dyn skwad_database::Db, job_id: i64) {
-    let _ = conn.exec(
-        "UPDATE jobs SET state = 'queued', started_at = NULL, attempts = GREATEST(attempts - 1, 0) WHERE id = $1",
-        skwad_database::params![job_id],
-    );
-}
-
-/// Pushes progress for every shoot that currently has work in the queue.
+/// Pushes progress for every shoot that currently has work in the queue, and
+/// runs the lease reaper.
 fn monitor_loop(app: AppHandle, state: Arc<AppState>) {
     let mut last_emit = Instant::now() - PROGRESS_INTERVAL;
     let mut last_resource = Instant::now() - RESOURCE_INTERVAL;
+    let mut last_reap = Instant::now();
     let mut resource_monitor = crate::resource_monitor::ResourceMonitor::new();
     // Remembers which shoots were active last tick so a final "finished"
     // update is always delivered, even though the queue is empty by then.
@@ -508,6 +662,22 @@ fn monitor_loop(app: AppHandle, state: Arc<AppState>) {
         last_emit = Instant::now();
 
         let Ok(mut conn) = state.db.conn() else { continue };
+
+        // Leases whose holder stopped heartbeating — a crashed worker, a
+        // laptop shut mid-job — go back to the queue here. Any process
+        // brokering the queue may reap, because the reaper only ever touches
+        // rows whose expiry has passed.
+        if last_reap.elapsed() >= REAP_INTERVAL {
+            last_reap = Instant::now();
+            match jobs::reap_expired(&mut conn) {
+                Ok(reaped) if reaped.requeued > 0 || reaped.failed > 0 => {
+                    tracing::info!(requeued = reaped.requeued, failed = reaped.failed, "reaped lapsed job leases");
+                }
+                Ok(_) => {}
+                Err(error) => tracing::warn!(%error, "could not reap lapsed job leases"),
+            }
+        }
+
         let active: Vec<i64> = conn
             .rows(
                 "SELECT DISTINCT shoot_id FROM jobs WHERE state IN ('queued','running')",
@@ -620,6 +790,7 @@ mod tests {
                 file_size: 1,
                 content_key: "k".into(),
                 captured_at: None,
+                normalized_relative_path: None,
             },
         )
         .unwrap();
@@ -653,8 +824,9 @@ mod tests {
             .get(0);
         assert_eq!(outstanding, 1, "the album stage must wait for this");
 
-        jobs::claim_next(&mut conn, None).unwrap();
-        jobs::complete(&mut conn, analyse).unwrap();
+        let claimed = jobs::claim_next(&mut conn, None, "test").unwrap().unwrap();
+        assert_eq!(claimed.id, analyse);
+        assert!(jobs::complete(&mut conn, analyse, claimed.token().unwrap()).unwrap());
 
         let outstanding_after: i64 = conn
             .row_one(
@@ -675,17 +847,13 @@ mod tests {
         let id = jobs::enqueue(&mut conn, shoot.id, JobKind::Albums, None, 500, None).unwrap();
 
         for _ in 0..10 {
-            let job = jobs::claim_next(&mut conn, None).unwrap().unwrap();
+            let job = jobs::claim_next(&mut conn, None, "test").unwrap().unwrap();
             assert_eq!(job.id, id);
-            conn.exec(
-        "UPDATE jobs SET state = 'queued', started_at = NULL, attempts = GREATEST(attempts - 1, 0) WHERE id = $1 AND state = 'running'",
-                skwad_database::params![id],
-            )
-            .unwrap();
+            assert!(jobs::release(&mut conn, id, job.token().unwrap()).unwrap());
         }
 
         // Still runnable after ten deferrals — far more than MAX_ATTEMPTS.
-        assert!(jobs::claim_next(&mut conn, None).unwrap().is_some());
+        assert!(jobs::claim_next(&mut conn, None, "test").unwrap().is_some());
     }
 
     #[test]
@@ -704,6 +872,7 @@ mod tests {
                 file_size: 1,
                 content_key: "rotated".into(),
                 captured_at: None,
+                normalized_relative_path: None,
             },
         )
         .unwrap();
@@ -729,8 +898,8 @@ mod tests {
         // Recreate the production race: one lane has claimed indexing while
         // the compute lane has independently claimed analysis for the same
         // row. The row must still make analysis wait.
-        let indexing = jobs::claim_next_io(&mut conn).unwrap().unwrap();
-        let analysis = jobs::claim_next_compute(&mut conn).unwrap().unwrap();
+        let indexing = jobs::claim_next_io(&mut conn, "test").unwrap().unwrap();
+        let analysis = jobs::claim_next_compute(&mut conn, "test").unwrap().unwrap();
         assert_eq!(indexing.kind, JobKind::Thumbnail.as_str());
         assert_eq!(analysis.kind, JobKind::AnalysePhoto.as_str());
         let before = media_repo::get_by_id(&mut conn, media_id).unwrap().unwrap();
@@ -739,5 +908,30 @@ mod tests {
         media_repo::set_status(&mut conn, media_id, ProcessingStatus::Thumbnailed, None).unwrap();
         let after = media_repo::get_by_id(&mut conn, media_id).unwrap().unwrap();
         assert!(!indexing_incomplete(&after));
+    }
+
+    /// The lease keeper's bookkeeping: a held job is heartbeated, a finished
+    /// one is not.
+    #[test]
+    fn held_leases_track_only_jobs_in_flight() {
+        let db = Database::open_test().unwrap();
+        let mut conn = db.conn().unwrap();
+        let shoot = shoots::create(&mut conn, "S", "C:\\s").unwrap();
+        jobs::enqueue(&mut conn, shoot.id, JobKind::Albums, None, 500, None).unwrap();
+        let job = jobs::claim_next(&mut conn, None, "test").unwrap().unwrap();
+
+        let leases = HeldLeases::default();
+        leases.hold(&job);
+        assert_eq!(leases.count(), 1);
+        let (id, token, shoot_id) = leases.snapshot().remove(0);
+        assert_eq!((id, shoot_id), (job.id, shoot.id));
+        assert!(matches!(
+            jobs::heartbeat(&mut conn, id, &token).unwrap(),
+            jobs::Heartbeat::Alive { .. }
+        ));
+
+        leases.drop_lease(job.id);
+        assert_eq!(leases.count(), 0);
+        assert!(leases.snapshot().is_empty());
     }
 }

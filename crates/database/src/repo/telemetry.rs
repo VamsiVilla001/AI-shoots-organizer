@@ -277,11 +277,15 @@ mod tests {
 
         mark_stage_started(&mut conn, shoot.id, JobKind::AnalyseVideo.as_str()).unwrap();
         mark_stage_started(&mut conn, shoot.id, JobKind::AnalyseVideo.as_str()).unwrap();
-        jobs::complete(&mut conn, one).unwrap();
+        let claimed_one = jobs::claim_next(&mut conn, None, "test").unwrap().unwrap();
+        assert_eq!(claimed_one.id, one);
+        let claimed_two = jobs::claim_next(&mut conn, None, "test").unwrap().unwrap();
+        assert_eq!(claimed_two.id, two);
+        assert!(jobs::complete(&mut conn, one, claimed_one.token().unwrap()).unwrap());
         mark_stage_settled(&mut conn, shoot.id, JobKind::AnalyseVideo.as_str(), true).unwrap();
         assert!(latest(&mut conn, shoot.id).unwrap().stages[0].completed_at.is_none());
 
-        jobs::complete(&mut conn, two).unwrap();
+        assert!(jobs::complete(&mut conn, two, claimed_two.token().unwrap()).unwrap());
         mark_stage_settled(&mut conn, shoot.id, JobKind::AnalyseVideo.as_str(), true).unwrap();
         record_sample(&mut conn, shoot.id, Some(42.0), Some(73.0), 0, 1, false).unwrap();
         assert!(finalize_if_settled(&mut conn, shoot.id).unwrap());

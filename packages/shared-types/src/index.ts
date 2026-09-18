@@ -223,7 +223,13 @@ export interface PublishSkwadResult {
 export interface Shoot {
   id: number
   name: string
+  /** Where the scanner reads the folder. Never changes once files are indexed. */
   sourcePath: string
+  /**
+   * Where other machines reach the same folder (usually a UNC path), or null
+   * when the shoot is only reachable from the machine that scanned it.
+   */
+  sharePath: string | null
   status: ShootStatus
   notes: string | null
   createdAt: string
@@ -257,6 +263,8 @@ export interface Media {
   duration: number | null
   fileSize: number
   contentKey: string
+  /** Path below the shoot root, `/`-separated; joined onto `Shoot.sharePath` on other machines. */
+  normalizedRelativePath: string | null
   capturedAt: string | null
   indexedAt: string
   cameraMake: string | null
