@@ -17,6 +17,7 @@
     "package:premiere-panel": "node scripts/package-premiere-panel.mjs",
     "dev:opencv": "npm run opencv:setup && npm run tauri:dev -w @skwad/desktop -- -- --features opencv-tracking",
     "build": "npm run package:premiere-panel && npm run tauri:build -w @skwad/desktop",
+    "build:models": "npm run package:premiere-panel && npm run tauri:build -w @skwad/desktop -- --config src-tauri/tauri.models.conf.json",
     "build:opencv": "npm run package:premiere-panel && npm run opencv:setup && npm run tauri:build -w @skwad/desktop -- -- --features opencv-tracking",
     "web:dev": "npm run dev -w @skwad/desktop",
     "web:build": "npm run build -w @skwad/desktop",

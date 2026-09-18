@@ -69,9 +69,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # Opt-in, and off by default: the two ONNX files are ~191 MB, which is
-      # most of the installer's weight. Without them the app still runs — it
-      # indexes, sorts and exports; only face recognition needs them, and
+      # Opt-in, and off by default: the two ONNX files are ~191 MB, which takes
+      # the installer from 11 MB to 177 MB. Without them the app still runs —
+      # it indexes, sorts and exports; only face recognition needs them, and
       # Settings says so.
       - name: Fetch face models
         if: inputs.with_models
@@ -83,10 +83,12 @@ jobs:
             bash scripts/fetch-models.sh
           fi
 
-      # Runs `package:premiere-panel` first, so a release can never ship
-      # without the .ccx the panel installer needs.
+      # Both run `package:premiere-panel` first, so a release can never ship
+      # without the .ccx the panel installer needs. `build:models` adds the
+      # config overlay that puts the models in `bundle.resources`; the app
+      # installs them into the library folder on first launch.
       - name: Build installer
-        run: npm run build
+        run: ${{ inputs.with_models && 'npm run build:models' || 'npm run build' }}
 
       - name: Collect artefacts
         uses: actions/upload-artifact@v4
@@ -134,6 +136,8 @@ jobs:
 
             **FFmpeg** is still not bundled; it is needed for video, HEIC and
             camera RAW. **Face models** are bundled only when the build asked
-            for them — otherwise fetch them once and Settings will find them.
+            for them — a ~177 MB installer that needs nothing else. Otherwise
+            the installer is ~11 MB, and the models are fetched once per machine
+            with `scripts/fetch-models.ps1`.
 
             These artefacts are unsigned.

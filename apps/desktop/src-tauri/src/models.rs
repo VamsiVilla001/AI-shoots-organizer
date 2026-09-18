@@ -3,13 +3,79 @@
 //! The application is not bound to one model. Any ONNX detector and any ONNX
 //! embedder dropped into the models folder can be selected; the pipeline only
 //! knows the [`FaceDetector`](skwad_face_detection::FaceDetector) and
-//! [`FaceEmbedder`](skwad_face_recognition::FaceEmbedder) traits. Models are not
-//! bundled — they are fetched by `scripts/fetch-models.ps1` — so this module
-//! also has to describe *absence* clearly enough for the UI to explain it.
+//! [`FaceEmbedder`](skwad_face_recognition::FaceEmbedder) traits.
+//!
+//! Models may or may not be bundled. A build made with
+//! `src-tauri/tauri.models.conf.json` carries them and [`seed_from_bundle`]
+//! installs them on first launch; a default build does not, and they are
+//! fetched per machine by `scripts/fetch-models.ps1`. Either way this module
+//! has to describe *absence* clearly enough for the UI to explain it.
 
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
+use tauri::{AppHandle, Manager};
+
+/// Where a models-bundled build puts them, relative to the resource directory.
+const BUNDLED_MODELS: &str = "models";
+
+/// Copies bundled models into the library's models folder, once.
+///
+/// Returns the names it installed. An empty result is the normal, quiet case:
+/// either this build carries no models, or they are already in place.
+///
+/// Deliberately conservative about what it overwrites. A file that is already
+/// there and already the right size is left alone — someone may have put their
+/// own model there on purpose, and re-copying 174 MB on every launch would be
+/// wasteful besides. A file that exists at the *wrong* size is replaced,
+/// because that is what a copy interrupted by a crash or a full disk looks
+/// like, and ONNX Runtime's failure on a truncated model is not obviously a
+/// storage problem.
+pub fn seed_from_bundle(app: &AppHandle, destination: &Path) -> Vec<String> {
+    let Ok(bundled) = app.path().resolve(BUNDLED_MODELS, tauri::path::BaseDirectory::Resource) else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(&bundled) else {
+        // A build without models: nothing to say.
+        return Vec::new();
+    };
+
+    if let Err(error) = std::fs::create_dir_all(destination) {
+        tracing::warn!(%error, directory = %destination.display(), "could not create the models folder");
+        return Vec::new();
+    }
+
+    let mut installed = Vec::new();
+    for entry in entries.flatten() {
+        let source = entry.path();
+        if !source.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("onnx")) {
+            continue;
+        }
+        let Some(name) = source.file_name() else { continue };
+        let target = destination.join(name);
+
+        let source_len = entry.metadata().map(|m| m.len()).unwrap_or(0);
+        if std::fs::metadata(&target).is_ok_and(|m| m.len() == source_len) {
+            continue;
+        }
+
+        // Copy beside the target and rename into place, so an interrupted copy
+        // never leaves a half-written model where the registry will find it and
+        // hand it to ONNX Runtime.
+        let staging = destination.join(format!("{}.partial", name.to_string_lossy()));
+        match std::fs::copy(&source, &staging).and_then(|_| std::fs::rename(&staging, &target)) {
+            Ok(_) => {
+                tracing::info!(model = %name.to_string_lossy(), bytes = source_len, "installed a bundled model");
+                installed.push(name.to_string_lossy().into_owned());
+            }
+            Err(error) => {
+                tracing::warn!(%error, model = %name.to_string_lossy(), "could not install a bundled model");
+                let _ = std::fs::remove_file(&staging);
+            }
+        }
+    }
+    installed
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]

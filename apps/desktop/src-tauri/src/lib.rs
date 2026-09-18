@@ -108,6 +108,24 @@ pub fn run() {
             // thread and cannot fail startup.
             premiere_plugin::ensure_installed(app.handle().clone());
 
+            // A models-bundled build installs them on first launch. On its own
+            // thread because that is ~191 MB to copy and blocking here would
+            // hold the window back on exactly the launch where someone is
+            // deciding whether the app works. Nothing needs them this early:
+            // a fresh library has no shoots, so no analysis job can be waiting
+            // on a model, and by the time anyone imports one this is long done.
+            let seed_handle = app.handle().clone();
+            let models_dir = state.paths.models.clone();
+            std::thread::Builder::new()
+                .name("skwad-models-seed".into())
+                .spawn(move || {
+                    let installed = models::seed_from_bundle(&seed_handle, &models_dir);
+                    if !installed.is_empty() {
+                        tracing::info!(models = ?installed, "installed bundled models");
+                    }
+                })
+                .ok();
+
             // Workers start immediately so an import interrupted by a previous
             // quit resumes without the user having to ask (§18).
             let pool = worker::WorkerPool::start(app.handle().clone(), Arc::clone(&state));

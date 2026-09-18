@@ -36,18 +36,33 @@ cross-compile shortcut.
   is a client of a private server it starts on loopback, so the installer ships
   both binaries; without the sidecar the app opens, says the local server did not
   start, and can do nothing else. `npm run package:win` builds and stages it.
-- **The face models** (~191 MB) — **not currently, on any build path.**
-  `tauri.conf.json` lists only the Premiere panel under `bundle.resources`, and
-  there is no `tauri.models.conf.json` overlay and no `models::seed_from_bundle`
-  to copy them out of a bundle on first launch. An earlier revision of this
-  document described all three; none of them exist in the tree.
-  In practice the models are fetched once per machine (`scripts/fetch-models.ps1`
-  / `.sh`) and live in `<library folder>/models/`, which is where
-  `ModelRegistry` looks. Without them the app still runs — indexing, sorting
-  into groups and exporting need no models at all — and Settings explains what
-  to fetch. Making a self-contained installer means adding the resource entry
-  *and* the seeding code; the `with_models` input on the release workflow
-  fetches them into the build, which is only half of it.
+- **The face models** (~191 MB) — only from `npm run build:models`, which adds
+  the `src-tauri/tauri.models.conf.json` overlay. That puts them in
+  `bundle.resources`, and `models::seed_from_bundle` installs them into
+  `<library folder>/models/` on the first launch that finds them missing.
+
+  | build | installer | first launch |
+  | --- | --- | --- |
+  | `npm run build` | ~11 MB | needs models fetched per machine |
+  | `npm run build:models` | ~177 MB | self-contained |
+
+  It stays an overlay rather than the default for two reasons: the models are
+  gitignored, so a glob matching nothing would make an ordinary `npm run build`
+  fail on any machine that has not fetched them; and most builds do not want to
+  move 191 MB. The release workflow exposes it as the `with_models` input.
+
+  Seeding is conservative. A model already present at the right size is left
+  alone — someone may have put their own there deliberately. One present at the
+  *wrong* size is replaced, because that is what a copy interrupted by a crash
+  or a full disk looks like, and ONNX Runtime's failure on a truncated model
+  does not read as a storage problem. The copy goes to a `.partial` beside the
+  target and is renamed into place, so an interrupted run never leaves a
+  half-written model where `ModelRegistry` would find it. It runs on its own
+  thread: nothing needs a model that early, and blocking would hold the window
+  back on exactly the launch where someone is deciding whether the app works.
+
+  Without models the app still runs — indexing, sorting into groups and
+  exporting need none at all — and Settings explains what to fetch.
 - **FFmpeg** — never bundled (size, and its licence terms). Needed for videos,
   HEIC and camera raw; JPEG/PNG shoots work without it. `brew install ffmpeg`
   on macOS, `winget install Gyan.FFmpeg` on Windows, or point
