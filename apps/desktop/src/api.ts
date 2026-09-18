@@ -407,3 +407,6 @@ export async function localPathFor(item: Pick<Media, 'path' | 'shootId' | 'norma
 /** "Show in folder" for a media row, translated for this machine first. */
 export const revealMedia = async (item: Pick<Media, 'path' | 'shootId' | 'normalizedRelativePath'>) =>
   revealInFolder(await localPathFor(item))
+
+/** The network spelling of a path on a mapped drive, or null when it is not on one (desktop only). */
+export const networkPath = (path: string) => call<string | null>('network_path', { path })

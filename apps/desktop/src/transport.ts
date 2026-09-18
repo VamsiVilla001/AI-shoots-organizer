@@ -119,6 +119,7 @@ const DESKTOP_ONLY: Record<string, string> = {
   reveal_in_folder: 'Opening a folder on this machine',
   open_path: 'Opening a file on this machine',
   open_catalogue_media: 'Opening a catalogue file on this machine',
+  network_path: 'Resolving a mapped drive',
   client_status: 'Worker mode',
   set_server_url: 'Choosing a server',
   restart_for_client_change: 'Restarting the app',

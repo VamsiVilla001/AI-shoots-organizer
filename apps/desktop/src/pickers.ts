@@ -10,7 +10,8 @@
  */
 
 import { open, save } from '@tauri-apps/plugin-dialog'
-import { transport, UnsupportedByTransport } from './transport'
+import * as api from './api'
+import { isTauri, transport, UnsupportedByTransport } from './transport'
 
 export interface FolderRequest {
   title: string
@@ -42,12 +43,23 @@ export function settleFolderRequest(path: string | null) {
   current?.resolve(path)
 }
 
-/** A folder on whichever machine the backend scans, or `null` if cancelled. */
+/**
+ * A folder on whichever machine the backend scans, or `null` if cancelled.
+ *
+ * In a desktop window the operating system's own dialog opens, even on a
+ * client of a server — that is the dialog people expect. A client's pick is
+ * then translated (a mapped drive letter becomes its network path) and the
+ * server is asked whether it can read the folder, because the server is
+ * what scans it; a folder only this machine can see is refused with a
+ * message that says what to do instead.
+ */
 export async function pickFolder(title: string): Promise<string | null> {
   const active = transport()
-  if (active.kind === 'tauri') {
+  if (isTauri()) {
     const picked = await open({ directory: true, multiple: false, title })
-    return typeof picked === 'string' ? picked : null
+    if (typeof picked !== 'string') return null
+    if (active.kind === 'tauri') return picked
+    return shareableWithServer(picked)
   }
   if (!active.browse) throw new UnsupportedByTransport('Choosing a folder')
   if (pending) settleFolderRequest(null)
@@ -86,4 +98,27 @@ export async function pickSavePath(options: {
 /** True when this front door can open local file dialogs at all. */
 export function hasLocalFileDialogs(): boolean {
   return transport().kind === 'tauri'
+}
+
+/**
+ * Turns a folder this machine picked into one the server can scan: a mapped
+ * drive becomes its network path, and the server is asked to list it.
+ */
+async function shareableWithServer(picked: string): Promise<string> {
+  const active = transport()
+  const network = await api.networkPath(picked).catch(() => null)
+  const candidate = network ?? picked
+  const browse = active.browse
+  if (!browse) return candidate
+  try {
+    await browse.list(candidate)
+    return candidate
+  } catch {
+    const hint = network
+      ? `The server cannot open ${candidate}.`
+      : `The server cannot open ${candidate} — it is a folder on this machine, not on the network.`
+    throw new Error(
+      `${hint} Choose the folder through its network location (\\\\server\\share\\…) so the server can read it too.`,
+    )
+  }
 }

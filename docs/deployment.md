@@ -408,7 +408,7 @@ the operator's view.
    | `SKWAD_SERVER_BIND` | `0.0.0.0:8420` to listen on the LAN |
    | `SKWAD_SERVER_LIBRARY` | the library folder (models, auth, caches) |
    | `SKWAD_DATABASE_URL` | `postgres://user:pass@host:5432/skwad` |
-   | `SKWAD_SERVER_MEDIA_ROOTS` | folders shoots may live under — the folder browser clients see |
+   | `SKWAD_SERVER_MEDIA_ROOTS` | optional: confine the folder browser to these folders; unset, clients browse every drive and share the server can read |
    | `SKWAD_SERVER_TLS_CERT` / `_KEY` | PEM pair; use TLS beyond a trusted LAN |
    | `SKWAD_SERVER_LOCAL_ANALYSIS` | `false` on a server with no GPU: it scans, indexes and finishes, and leaves every analysis to enrolled workers |
 

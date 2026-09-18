@@ -31,8 +31,9 @@ pub struct ServerConfig {
     /// `postgres://…`. `None` resolves `database.json` in the library root
     /// the way the desktop does.
     pub database_url: Option<String>,
-    /// Directories a shoot source may live under. The filesystem browser is
-    /// jailed to these; a scan outside them is refused.
+    /// Optional: directories a shoot source may live under. When set, the
+    /// folder browser is confined to these; when empty, a signed-in client
+    /// may browse every drive and share this machine can read.
     pub media_roots: Vec<PathBuf>,
     /// PEM certificate and key. Both or neither.
     pub tls_cert: Option<PathBuf>,

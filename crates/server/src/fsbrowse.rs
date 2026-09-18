@@ -1,11 +1,13 @@
 //! `/api/fs/*` — the client's replacement for a native folder picker.
 //!
 //! A shoot's source path has to be meaningful to the *scanner*, which runs on
-//! this machine, so the picker browses this machine's folders. Every path that
-//! arrives here is canonicalised and confirmed to sit inside a configured
-//! media root before anything is read, so `..`, symlinks and absolute paths
-//! all fail closed. Listing a directory returns its subdirectories and a count
-//! of media files — what the picker needs to show and nothing more.
+//! this machine, so the picker browses this machine's folders — its drives
+//! and any share it can reach, the way a file explorer would. When
+//! `SKWAD_SERVER_MEDIA_ROOTS` is set, browsing is confined to those folders:
+//! every path is canonicalised and confirmed to sit inside one before
+//! anything is read, so `..`, symlinks and absolute paths elsewhere fail
+//! closed. Listing a directory returns its subdirectories and a count of
+//! media files — what the picker needs to show and nothing more.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -14,7 +16,7 @@ use axum::extract::{Query, State};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
-use crate::config::resolve_within_roots;
+use crate::config::{resolve_within_roots, without_verbatim_prefix};
 use crate::error::{blocking, ApiError, ApiResult};
 use crate::state::ServerState;
 
@@ -54,16 +56,21 @@ pub struct ListQuery {
     pub path: String,
 }
 
+/// The places a picker starts from: the configured media roots, or — when
+/// none are configured — every drive this machine has. A share is reached by
+/// typing its UNC path into the folder field.
 pub async fn roots(State(state): State<Arc<ServerState>>) -> ApiResult<Json<Vec<FsRoot>>> {
     let media_roots = state.config.media_roots.clone();
     let listing = blocking(move || {
-        Ok(media_roots
+        let roots = if media_roots.is_empty() { machine_drives() } else { media_roots };
+        Ok(roots
             .iter()
             .map(|root| FsRoot {
                 path: root.display().to_string(),
                 name: root
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string())
+                    .filter(|n| !n.is_empty())
                     .unwrap_or_else(|| root.display().to_string()),
                 available: root.is_dir(),
             })
@@ -73,6 +80,30 @@ pub async fn roots(State(state): State<Arc<ServerState>>) -> ApiResult<Json<Vec<
     Ok(Json(listing))
 }
 
+/// The drives present on this machine, as roots.
+fn machine_drives() -> Vec<PathBuf> {
+    if cfg!(windows) {
+        (b'A'..=b'Z')
+            .map(|letter| PathBuf::from(format!("{}:\\", letter as char)))
+            .filter(|drive| drive.is_dir())
+            .collect()
+    } else {
+        vec![PathBuf::from("/")]
+    }
+}
+
+/// Where browsing may go. With media roots configured, inside them only;
+/// without, anywhere this machine can read — the picker is then the file
+/// explorer the person expected, for the machine that will do the scanning.
+fn resolve_browse_path(requested: &PathBuf, roots: &[PathBuf]) -> ApiResult<PathBuf> {
+    if roots.is_empty() {
+        let canonical = std::fs::canonicalize(requested)
+            .map_err(|e| ApiError::not_found(format!("{}: {e}", requested.display())))?;
+        return Ok(without_verbatim_prefix(canonical));
+    }
+    Ok(resolve_within_roots(requested, roots)?)
+}
+
 pub async fn list(
     State(state): State<Arc<ServerState>>,
     Query(query): Query<ListQuery>,
@@ -80,7 +111,7 @@ pub async fn list(
     let roots = state.config.media_roots.clone();
     let requested = PathBuf::from(&query.path);
     let listing = blocking(move || {
-        let canonical = resolve_within_roots(&requested, &roots)?;
+        let canonical = resolve_browse_path(&requested, &roots)?;
 
         let mut directories = Vec::new();
         let mut media_count = 0usize;
@@ -108,10 +139,11 @@ pub async fn list(
         directories.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
 
         // A parent is only offered while it is still inside a root, so the
-        // picker cannot walk out of the jail one level at a time.
+        // picker cannot walk out of the jail one level at a time. Without
+        // roots the only stop is the top of the drive.
         let parent = canonical
             .parent()
-            .filter(|p| resolve_within_roots(p, &roots).is_ok())
+            .filter(|p| resolve_browse_path(&p.to_path_buf(), &roots).is_ok())
             .map(|p| p.display().to_string());
 
         Ok(FsListing {

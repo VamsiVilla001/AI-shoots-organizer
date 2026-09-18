@@ -253,6 +253,7 @@ pub fn run() {
             commands::set_media_editorial,
             native::reveal_in_folder,
             native::open_path,
+            native::network_path,
             // players
             commands::list_people,
             commands::list_enrolled_people,
