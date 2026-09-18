@@ -80,12 +80,12 @@ pub fn run() {
                     // then vanished. Say it to the person's face instead —
                     // this is the most likely first-run failure now that the
                     // index lives on a server.
-                    let detail = describe_connection_failure(&error, &db_config, &paths.root);
+                    let (title, detail) = describe_connection_failure(&error, &db_config, &paths.root);
                     tracing::error!(%error, "could not open the library database");
                     app.dialog()
                         .message(&detail)
                         .kind(MessageDialogKind::Error)
-                        .title("SKWAD cannot reach its library")
+                        .title(title)
                         .blocking_show();
                     return Err(detail.into());
                 }
@@ -280,6 +280,27 @@ use parking_lot::Mutex;
 
 /// Logs to a rolling file in the app data directory, and to the console during
 /// development. Kept lightweight, as §25 asks.
+/// Where libpq — and so `PgConfig` — looks for the password.
+///
+/// Named rather than hard-coded into the messages because it differs by
+/// platform, and a message that points at the wrong file is worse than one that
+/// points at none.
+fn pgpass_path() -> std::path::PathBuf {
+    if let Some(explicit) = std::env::var_os("PGPASSFILE") {
+        return std::path::PathBuf::from(explicit);
+    }
+    #[cfg(windows)]
+    {
+        let root = std::env::var_os("APPDATA").unwrap_or_default();
+        std::path::PathBuf::from(root).join("postgresql").join("pgpass.conf")
+    }
+    #[cfg(not(windows))]
+    {
+        let home = std::env::var_os("HOME").unwrap_or_default();
+        std::path::PathBuf::from(home).join(".pgpass")
+    }
+}
+
 /// Turns a connection failure into something the person in front of the machine
 /// can act on.
 ///
@@ -287,54 +308,99 @@ use parking_lot::Mutex;
 /// the raw driver error distinguishes none of them: "connection refused" reads
 /// the same whether the server is off, the firewall is shut, or this machine
 /// was never told where to look.
-fn describe_connection_failure(error: &DbError, config: &PgConfig, library_root: &std::path::Path) -> String {
+fn describe_connection_failure(
+    error: &DbError,
+    config: &PgConfig,
+    library_root: &std::path::Path,
+) -> (&'static str, String) {
     let where_it_looked = config.describe();
     let config_file = library_root.join("database.json");
 
-    if !error.is_unavailable() {
-        return format!(
-            "The library database at {where_it_looked} rejected the connection.\n\n\
-             This usually means the password is wrong or the account has no access.\n\
-             The password is read from %APPDATA%\\postgresql\\pgpass.conf.\n\n\
-             Details: {error}"
+    // Checked before unavailability: a server that answered and then refused
+    // for want of a password looks identical to an unreachable one in the
+    // driver's error, and sending someone to check a firewall that is fine is
+    // worse than saying nothing.
+    if error.is_missing_credential() {
+        return (
+            "SKWAD needs a database password",
+            format!(
+                "A database server answered at {where_it_looked}, but SKWAD has no password for it.\n\n\
+                 The password is read from:\n  {}\n\n\
+                 Add a line for this server — host:port:database:user:password — for example:\n  \
+                   {}:{}:{}:{}:<the password>\n\n\
+                 Details: {error}",
+                pgpass_path().display(),
+                config.host,
+                config.port,
+                config.database,
+                config.user
+            ),
+        );
+    }
+
+    if error.is_rejected() {
+        return (
+            "SKWAD was refused by its library",
+            format!(
+                "The database server at {where_it_looked} answered, and refused the connection.\n\n\
+                 Usually one of: the password is wrong, the user does not exist, or the\n\
+                 database does not exist on that server.\n\n\
+                 The password is read from {}.\n\n\
+                 Details: {error}",
+                pgpass_path().display()
+            ),
         );
     }
 
     // Nothing answered. Which advice is useful depends entirely on whether this
     // machine is meant to host the library or reach one elsewhere.
-    if config.is_local() && !config_file.exists() {
-        format!(
-            "SKWAD could not reach a database, and this machine has not been told where to find one.\n\n\
-             It looked for {where_it_looked}, which is the default.\n\n\
-             If the library lives on ANOTHER machine, create:\n  \
-               {}\n  \
-             containing that machine's address — see docs/deployment.md.\n\n\
-             If the library should live on THIS machine, install PostgreSQL 15+ and run\n  \
-               npm run db:setup\n\n\
-             Details: {error}",
-            config_file.display()
+    //
+    // `SKWAD_DATABASE_URL` counts as having been told: it overrides everything,
+    // so pointing at database.json when that is what set the address would send
+    // someone to edit a file that is not being read.
+    let told_by_env = std::env::var_os("SKWAD_DATABASE_URL").is_some();
+    if config.is_local() && !config_file.exists() && !told_by_env {
+        (
+            "SKWAD has not been told where its library is",
+            format!(
+                "SKWAD could not reach a database, and this machine has not been told where to find one.\n\n\
+                 It looked for {where_it_looked}, which is the default.\n\n\
+                 If the library lives on ANOTHER machine, create:\n  \
+                   {}\n  \
+                 containing that machine's address — see docs/deployment.md.\n\n\
+                 If the library should live on THIS machine, install PostgreSQL 15+ and run\n  \
+                   npm run db:setup\n\n\
+                 Details: {error}",
+                config_file.display()
+            ),
         )
     } else if config.is_local() {
-        format!(
-            "SKWAD could not reach its library database at {where_it_looked}.\n\n\
-             The database server on this machine does not appear to be running.\n\
-             Start the \"postgresql\" service, then open SKWAD again.\n\n\
-             Details: {error}"
+        (
+            "SKWAD cannot reach its library",
+            format!(
+                "SKWAD could not reach its library database at {where_it_looked}.\n\n\
+                 The database server on this machine does not appear to be running.\n\
+                 Start the \"postgresql\" service, then open SKWAD again.\n\n\
+                 Details: {error}"
+            ),
         )
     } else {
-        format!(
-            "SKWAD could not reach its library database at {where_it_looked}.\n\n\
-             That machine is configured in:\n  {}\n\n\
-             Check, in this order:\n  \
-               1. that machine is on and its PostgreSQL service is running\n  \
-               2. its firewall allows TCP {} from this machine\n  \
-               3. its pg_hba.conf permits this machine's address\n\n\
-             From this machine, `Test-NetConnection {} -Port {}` should succeed.\n\n\
-             Details: {error}",
-            config_file.display(),
-            config.port,
-            config.host,
-            config.port
+        (
+            "SKWAD cannot reach its library",
+            format!(
+                "SKWAD could not reach its library database at {where_it_looked}.\n\n\
+                 That machine is configured in:\n  {}\n\n\
+                 Check, in this order:\n  \
+                   1. that machine is on and its PostgreSQL service is running\n  \
+                   2. its firewall allows TCP {} from this machine\n  \
+                   3. its pg_hba.conf permits this machine's address\n\n\
+                 From this machine, `Test-NetConnection {} -Port {}` should succeed.\n\n\
+                 Details: {error}",
+                config_file.display(),
+                config.port,
+                config.host,
+                config.port
+            ),
         )
     }
 }

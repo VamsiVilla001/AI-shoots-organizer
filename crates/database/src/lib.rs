@@ -60,14 +60,54 @@ impl DbError {
         DbError::Other(msg.into())
     }
 
-    /// True when the failure was the server being unreachable rather than the
-    /// statement being wrong — the case the UI turns into "start the local
-    /// server" instead of a generic error.
+    // --- why a connection failed -------------------------------------------
+    //
+    // These three are the difference between "your server is down", "this
+    // machine has no password" and "that password is wrong" — problems with
+    // nothing in common, which the pool reports almost identically. Everything
+    // goes through r2d2, whose `Error` flattens the cause to one of three
+    // strings and keeps no SQLSTATE:
+    //
+    //   nothing listening ............ "error connecting to server"
+    //   password required, not given.. "invalid configuration"
+    //   server answered and refused .. "db error"
+    //
+    // Matching text is unpleasant and driver-Display-dependent, so
+    // `config::tests::connection_failures_are_classified_by_cause` pins all
+    // three against a real server: a reworded driver fails the test rather
+    // than silently sending people to check a firewall that is fine.
+
+    /// A server answered, but no password was supplied and it wanted one.
+    ///
+    /// `password` is the only field [`PgConfig::to_postgres_config`] leaves
+    /// unset, so there is nothing else "invalid configuration" can mean here.
+    pub fn is_missing_credential(&self) -> bool {
+        self.to_string().contains("invalid configuration")
+    }
+
+    /// A server answered and rejected us: wrong password, unknown user, no such
+    /// database, no permission.
+    pub fn is_rejected(&self) -> bool {
+        match self {
+            // Reached directly rather than through the pool: a rejected
+            // statement always carries a SQLSTATE.
+            DbError::Postgres(e) => e.code().is_some(),
+            DbError::Pool(_) => self.to_string().contains("db error"),
+            _ => false,
+        }
+    }
+
+    /// Nothing answered — the server is down, unreachable, or firewalled.
+    ///
+    /// This is the case the UI turns into "start the server" or "check the
+    /// network", so the other two have to be ruled out first: both also arrive
+    /// without a SQLSTATE and would otherwise be mistaken for it.
     pub fn is_unavailable(&self) -> bool {
+        if self.is_missing_credential() || self.is_rejected() {
+            return false;
+        }
         match self {
             DbError::Pool(_) => true,
-            // A connection-level failure carries no SQLSTATE; a rejected
-            // statement always does.
             DbError::Postgres(e) => e.code().is_none(),
             _ => false,
         }

@@ -262,6 +262,65 @@ mod tests {
         assert!(!config.describe().contains("secret"), "describe() is logged");
     }
 
+    /// The three connection failures have nothing in common as problems — a
+    /// dead server, a machine with no password, a wrong password — and the pool
+    /// reports them almost identically. `DbError` tells them apart by matching
+    /// the driver's wording, so this pins all three against a real server: a
+    /// driver upgrade that rewords one fails here rather than silently sending
+    /// someone to check a firewall that is fine.
+    ///
+    /// Needs a reachable server, which the test suite already requires.
+    #[test]
+    fn connection_failures_are_classified_by_cause() {
+        let url = std::env::var("SKWAD_TEST_DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432/skwad_test".to_string());
+        let reachable = PgConfig::from_url(&url).expect("valid test url");
+
+        // `Database` is deliberately not `Debug` — it holds a connection pool —
+        // so this unwraps by hand rather than widening its API for a test.
+        let failure = |config: PgConfig| match crate::Database::connect(config) {
+            Ok(_) => panic!("expected the connection to fail"),
+            Err(error) => error,
+        };
+
+        // --- a server that wants a password it was not given ---------------
+        let error = failure(PgConfig {
+            password: None,
+            ..reachable.clone()
+        });
+        assert!(
+            error.is_missing_credential(),
+            "a missing password should be recognised as one, got: {error}"
+        );
+        assert!(!error.is_unavailable(), "the server answered, so not unavailable");
+        assert!(!error.is_rejected(), "it never got as far as being refused");
+
+        // --- a server that answered and refused ----------------------------
+        let error = failure(PgConfig {
+            password: Some("definitely-not-the-password".into()),
+            ..reachable.clone()
+        });
+        assert!(error.is_rejected(), "a bad password is a rejection, got: {error}");
+        assert!(
+            !error.is_unavailable(),
+            "a rejection means the server is up, got: {error}"
+        );
+        assert!(!error.is_missing_credential(), "a password was supplied");
+
+        // --- nothing listening ---------------------------------------------
+        let error = failure(PgConfig {
+            port: 59_999,
+            password: Some("anything".into()),
+            ..reachable
+        });
+        assert!(
+            error.is_unavailable(),
+            "a dead port should read as unavailable: {error}"
+        );
+        assert!(!error.is_missing_credential());
+        assert!(!error.is_rejected());
+    }
+
     #[test]
     fn pgpass_lines_split_on_unescaped_colons_only() {
         assert_eq!(
