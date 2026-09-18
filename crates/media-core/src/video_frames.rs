@@ -49,6 +49,39 @@ impl VideoFrameCache {
         }
     }
 
+    /// Encodes a decoded frame the way [`Self::store`] would, without writing
+    /// it — for a worker that hands its frames to another machine to keep.
+    pub fn encode(image: &RgbImage) -> Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        JpegEncoder::new_with_quality(&mut bytes, REVIEW_FRAME_QUALITY)
+            .encode_image(image)
+            .map_err(|error| MediaError::Io(format!("encode review frame: {error}")))?;
+        Ok(bytes)
+    }
+
+    /// Writes an already-encoded review frame. Idempotent: a frame that is
+    /// already cached is left alone.
+    pub fn store_encoded(&self, jpeg: &[u8], content_key: &str, timestamp: f64) -> Result<()> {
+        let target = self.path_for(content_key, timestamp);
+        if target.is_file() {
+            return Ok(());
+        }
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| MediaError::Io(format!("create {}: {error}", parent.display())))?;
+        }
+        let temporary = target.with_extension(format!(
+            "{}.tmp",
+            TEMPORARY_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::write(&temporary, jpeg).map_err(|error| MediaError::Io(format!("write {}: {error}", temporary.display())))?;
+        std::fs::rename(&temporary, &target).map_err(|error| {
+            let _ = std::fs::remove_file(&temporary);
+            MediaError::Io(format!("place {}: {error}", target.display()))
+        })?;
+        Ok(())
+    }
+
     pub fn store(&self, image: &RgbImage, content_key: &str, timestamp: f64) -> Result<Vec<u8>> {
         let target = self.path_for(content_key, timestamp);
         if let Some(bytes) = self.read(content_key, timestamp)? {

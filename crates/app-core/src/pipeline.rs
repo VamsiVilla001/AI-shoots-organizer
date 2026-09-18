@@ -11,14 +11,15 @@ use std::sync::OnceLock;
 use std::time::Instant;
 
 use image::RgbImage;
-use skwad_database::models::{BoundingBox, Media, MediaMetadata, MediaType, NewFace, ProcessingStatus};
-use skwad_database::repo::{faces, media as media_repo, video as video_repo};
+use skwad_database::models::{BoundingBox, Media, MediaMetadata, MediaType, ProcessingStatus};
+use skwad_database::repo::media as media_repo;
 use skwad_database::Database;
 use skwad_face_detection::{Detection, FaceDetector, Rect, ScrfdDetector};
 use skwad_face_recognition::{ArcFaceEmbedder, Embedding, FaceEmbedder};
 use skwad_media_core::formats::{self, MediaKind};
 use skwad_media_core::{Ffmpeg, Gstreamer, ProxyBackend, ThumbnailCache, VideoFrameCache, VideoProxyCache};
 
+use crate::analysis::{apply_analysis, AnalysisOutput, FaceRecord, ReviewFrame};
 use crate::models::{ModelRegistry, ModelRole};
 use crate::paths::AppPaths;
 use crate::settings::AppSettings;
@@ -161,7 +162,7 @@ impl Engine {
         } else {
             MediaKind::Photo
         };
-        let orientation = source_media_orientation(item, media_kind, self.ffmpeg.as_ref());
+        let orientation = source_media_orientation(path, item.orientation, media_kind, self.ffmpeg.as_ref());
         let image = match media_kind {
             MediaKind::Photo => skwad_media_core::decode::load_image(
                 path,
@@ -209,47 +210,50 @@ impl Engine {
         Ok((embedding.into_vec(), quality))
     }
 
-    /// Full analysis of a still image.
+    /// Full analysis of a still image: compute, then write.
     pub fn analyse_photo(&mut self, db: &Database, item: &Media) -> Result<AnalysisOutcome> {
+        let output = self.compute_photo(Path::new(&item.path), item)?;
+        apply_analysis(db, &self.video_frames, item, output)
+    }
+
+    /// Full analysis of a video: compute, then write.
+    pub fn analyse_video(&mut self, db: &Database, item: &Media) -> Result<AnalysisOutcome> {
+        let output = self.compute_video(Path::new(&item.path), item)?;
+        apply_analysis(db, &self.video_frames, item, output)
+    }
+
+    /// The GPU half of a still image: decode, detect, embed. Writes nothing.
+    ///
+    /// `source` is where the bytes are *on this machine* — the indexed path
+    /// on the server, the share or a downloaded copy on a client worker —
+    /// while `item` supplies the indexed metadata.
+    pub fn compute_photo(&mut self, source: &Path, item: &Media) -> Result<AnalysisOutput> {
         let analysis_started = Instant::now();
-        let path = PathBuf::from(&item.path);
         // Indexing is the normal source of metadata, but reading EXIF again is
         // cheap compared with inference and protects this coordinate system
         // even if a stale database row came from an older build.
-        let orientation = source_media_orientation(item, MediaKind::Photo, self.ffmpeg.as_ref());
-        if i64::from(orientation) != item.orientation {
-            tracing::warn!(
-                media = item.id,
-                indexed = item.orientation,
-                source = orientation,
-                "correcting stale photo orientation before face analysis"
-            );
-            let mut conn = db.conn()?;
-            media_repo::set_orientation(&mut conn, item.id, i64::from(orientation))?;
-        }
+        let orientation = source_media_orientation(source, item.orientation, MediaKind::Photo, self.ffmpeg.as_ref());
 
         let decoded = skwad_media_core::decode::decode_image(
-            &path,
+            source,
             orientation,
             Some(self.settings.analysis_max_dim),
             self.ffmpeg.as_ref(),
         )?;
 
-        // Re-analysis must replace, not append.
-        {
-            let mut conn = db.conn()?;
-            faces::delete_for_media(&mut conn, item.id)?;
-        }
-
         let ai_started = Instant::now();
-        let outcome = self.detect_and_store(db, item, &decoded.image, None)?;
+        let analysed = self.detect_and_embed(&decoded.image)?;
         let ai_elapsed = ai_started.elapsed();
 
-        {
-            let mut conn = db.conn()?;
-            media_repo::set_status(&mut conn, item.id, ProcessingStatus::Analysed, None)?;
-            media_repo::refresh_face_count(&mut conn, item.id)?;
-        }
+        let output = AnalysisOutput {
+            orientation: (i64::from(orientation) != item.orientation).then_some(i64::from(orientation)),
+            faces: records_from(&analysed, &decoded.image, None),
+            sample_times: Vec::new(),
+            skipped: None,
+            embedder_key: self.embedder_key.clone(),
+            frames_analysed: 1,
+            review_frames: Vec::new(),
+        };
         tracing::info!(
             file = %item.filename,
             source_format = %decoded.source_format,
@@ -260,50 +264,35 @@ impl Engine {
             resize_ms = decoded.timings.resize.as_millis(),
             ai_ms = ai_elapsed.as_millis(),
             total_ms = analysis_started.elapsed().as_millis(),
-            faces = outcome.faces_detected,
+            faces = output.faces.len(),
             result = "ok",
             "photo analysis complete"
         );
-        Ok(outcome)
+        Ok(output)
     }
 
-    /// Full analysis of a video: sample frames, then treat each like a photo.
-    pub fn analyse_video(&mut self, db: &Database, item: &Media) -> Result<AnalysisOutcome> {
+    /// The GPU half of a video: sample frames, then treat each like a photo.
+    /// Writes nothing; the review frames come back as encoded JPEGs for
+    /// whoever applies the result to cache.
+    pub fn compute_video(&mut self, source: &Path, item: &Media) -> Result<AnalysisOutput> {
         let analysis_started = Instant::now();
         let Some(ffmpeg) = self.ffmpeg.clone() else {
             return Err(PipelineError::FfmpegUnavailable);
         };
-        let path = PathBuf::from(&item.path);
-        let orientation = source_media_orientation(item, MediaKind::Video, Some(&ffmpeg));
-        if i64::from(orientation) != item.orientation {
-            tracing::warn!(
-                media = item.id,
-                indexed = item.orientation,
-                source = orientation,
-                "correcting stale video orientation before face analysis"
-            );
-            let mut conn = db.conn()?;
-            media_repo::set_orientation(&mut conn, item.id, i64::from(orientation))?;
-        }
+        let orientation = source_media_orientation(source, item.orientation, MediaKind::Video, Some(&ffmpeg));
         let config = self.settings.video_config();
         let dimensions = item
             .width
             .zip(item.height)
             .and_then(|(width, height)| Some((u32::try_from(width).ok()?, u32::try_from(height).ok()?)));
 
-        let plan = skwad_video_analysis::plan_video(&ffmpeg, &path, item.duration, dimensions, &config);
+        let plan = skwad_video_analysis::plan_video(&ffmpeg, source, item.duration, dimensions, &config);
 
-        {
-            let mut conn = db.conn()?;
-            faces::delete_for_media(&mut conn, item.id)?;
-            video_repo::delete_for_media(&mut conn, item.id)?;
-            video_repo::delete_sample_frames(&mut conn, item.id)?;
-        }
-        if let Err(error) = self.video_frames.remove(&item.content_key) {
-            tracing::warn!(video = %item.filename, %error, "could not clear stale review frames");
-        }
-
-        let mut outcome = AnalysisOutcome::default();
+        let mut output = AnalysisOutput {
+            orientation: (i64::from(orientation) != item.orientation).then_some(i64::from(orientation)),
+            embedder_key: self.embedder_key.clone(),
+            ..Default::default()
+        };
         let mut decoded_frames = 0usize;
         let mut previous_frame: Option<PreviousVideoFrame> = None;
         let mut tracked_faces_recovered = 0usize;
@@ -316,34 +305,26 @@ impl Engine {
             match sampled {
                 Ok(frame) => {
                     decoded_frames += 1;
-                    {
-                        let mut conn = db.conn()?;
-                        video_repo::insert_sample_frame(&mut conn, item.id, frame.timestamp)?;
-                    }
+                    output.sample_times.push(frame.timestamp);
                     let mut analysed_faces = self.detect_and_embed(&frame.image)?;
                     if let Some(previous) = previous_frame.as_ref() {
                         tracked_faces_recovered +=
                             self.recover_tracked_faces(previous, &frame.image, &mut analysed_faces);
                     }
-                    let frame_outcome = Self::store_analysed_faces(
-                        db,
-                        item,
-                        &frame.image,
-                        Some(frame.timestamp),
-                        &analysed_faces,
-                        &self.embedder_key,
-                    )?;
-                    if frame_outcome.faces_detected > 0 {
-                        if let Err(error) = self
-                            .video_frames
-                            .store(&frame.image, &item.content_key, frame.timestamp)
-                        {
-                            tracing::warn!(video = %item.filename, at = frame.timestamp, %error, "could not cache tagged review frame");
+                    let records = records_from(&analysed_faces, &frame.image, Some(frame.timestamp));
+                    if !records.is_empty() {
+                        match VideoFrameCache::encode(&frame.image) {
+                            Ok(jpeg) => output.review_frames.push(ReviewFrame {
+                                timestamp: frame.timestamp,
+                                jpeg,
+                            }),
+                            Err(error) => {
+                                tracing::warn!(video = %item.filename, at = frame.timestamp, %error, "could not encode tagged review frame")
+                            }
                         }
                     }
-                    outcome.faces_detected += frame_outcome.faces_detected;
-                    outcome.faces_embedded += frame_outcome.faces_embedded;
-                    outcome.frames_analysed += frame_outcome.frames_analysed;
+                    output.faces.extend(records);
+                    output.frames_analysed += 1;
                     previous_frame = Some(PreviousVideoFrame {
                         image: frame.image,
                         faces: analysed_faces,
@@ -364,7 +345,7 @@ impl Engine {
         {
             let decode_started = Instant::now();
             let decoded =
-                skwad_video_analysis::decoder::decode_plan(&ffmpeg, &path, &plan, item.duration, orientation, &config);
+                skwad_video_analysis::decoder::decode_plan(&ffmpeg, source, &plan, item.duration, orientation, &config);
             let decode_time = decode_started.elapsed();
             let mut analysis_time = std::time::Duration::ZERO;
             for frame in decoded.frames {
@@ -380,7 +361,7 @@ impl Engine {
                 |entry| {
                     (
                         entry.at,
-                        skwad_video_analysis::sample_frame(&ffmpeg, &path, entry, orientation, &config),
+                        skwad_video_analysis::sample_frame(&ffmpeg, source, entry, orientation, &config),
                     )
                 },
                 &mut consume_frame,
@@ -388,17 +369,11 @@ impl Engine {
             (timings.decode, timings.waiting, timings.analysis, 1)
         };
 
-        {
-            let mut conn = db.conn()?;
-            media_repo::set_status(&mut conn, item.id, ProcessingStatus::Analysed, None)?;
-            media_repo::refresh_face_count(&mut conn, item.id)?;
-        }
-
         tracing::info!(
             video = %item.filename,
             planned = plan.len(),
             decoded = decoded_frames,
-            faces = outcome.faces_detected,
+            faces = output.faces.len(),
             tracked_faces_recovered,
             tracking_backend = ?skwad_video_analysis::tracking::backend(),
             prefetch,
@@ -409,20 +384,7 @@ impl Engine {
             total_ms = analysis_started.elapsed().as_millis(),
             "video analysed"
         );
-        Ok(outcome)
-    }
-
-    /// Detects faces in one frame, embeds them in a single batch, and writes
-    /// the rows. `frame_time` is `None` for stills.
-    fn detect_and_store(
-        &mut self,
-        db: &Database,
-        item: &Media,
-        image: &RgbImage,
-        frame_time: Option<f64>,
-    ) -> Result<AnalysisOutcome> {
-        let analysed = self.detect_and_embed(image)?;
-        Self::store_analysed_faces(db, item, image, frame_time, &analysed, &self.embedder_key)
+        Ok(output)
     }
 
     /// Detects and embeds every face in an arbitrary image with no `Media` row
@@ -540,97 +502,62 @@ impl Engine {
         recovered
     }
 
-    fn store_analysed_faces(
-        db: &Database,
-        item: &Media,
-        image: &RgbImage,
-        frame_time: Option<f64>,
-        analysed_faces: &[AnalysedFace],
-        embedder_key: &str,
-    ) -> Result<AnalysisOutcome> {
-        if analysed_faces.is_empty() {
-            return Ok(AnalysisOutcome {
-                frames_analysed: 1,
-                ..Default::default()
-            });
-        }
-
-        let (width, height) = image.dimensions();
-        let mut outcome = AnalysisOutcome {
-            frames_analysed: 1,
-            ..Default::default()
-        };
-
-        let mut conn = db.conn()?;
-        for analysed in analysed_faces {
-            let detection = &analysed.detection;
-            let (x, y, w, h) = detection.bbox.normalised(width, height);
-            let embedding = analysed
-                .embedding
-                .as_ref()
-                .map(|embedding| embedding.as_slice().to_vec());
-            if embedding.is_some() {
-                outcome.faces_embedded += 1;
-            }
-
-            let face_id = faces::insert(
-                &mut conn,
-                &NewFace {
-                    media_id: item.id,
-                    shoot_id: item.shoot_id,
-                    bbox: BoundingBox { x, y, w, h },
-                    landmarks: detection
-                        .landmarks
-                        .map(|lm| lm.iter().flat_map(|(px, py)| [*px, *py]).collect::<Vec<f32>>()),
-                    detection_confidence: detection.score as f64,
-                    embedding,
-                    quality: Some(detection.quality(width, height)),
-                    frame_time,
-                    crop_path: None,
-                    model_key: Some(embedder_key.to_string()),
-                },
-            )?;
-            outcome.faces_detected += 1;
-
-            // Videos additionally get a timeline entry, filled in with a person
-            // once recognition runs.
-            if let Some(at) = frame_time {
-                video_repo::insert(&mut conn, item.id, None, Some(face_id), at, detection.score as f64)?;
-            }
-        }
-
-        Ok(outcome)
-    }
-
-    /// Routes to the photo or video path based on the file's type.
-    pub fn analyse(&mut self, db: &Database, item: &Media) -> Result<AnalysisOutcome> {
-        match formats::classify(Path::new(&item.path)).map(|(kind, _)| kind) {
+    /// The GPU half for whichever kind of file this is. `source` is where the
+    /// bytes are on this machine; see [`Self::compute_photo`].
+    pub fn compute(&mut self, source: &Path, item: &Media) -> Result<AnalysisOutput> {
+        match formats::classify(source).map(|(kind, _)| kind) {
             Some(MediaKind::Video) => {
                 if !self.settings.video_enabled {
-                    let mut conn = db.conn()?;
-                    media_repo::set_status(
-                        &mut conn,
-                        item.id,
-                        ProcessingStatus::Skipped,
-                        Some("video analysis is off"),
-                    )?;
-                    return Ok(AnalysisOutcome::default());
+                    return Ok(AnalysisOutput {
+                        skipped: Some("video analysis is off".into()),
+                        embedder_key: self.embedder_key.clone(),
+                        ..Default::default()
+                    });
                 }
-                self.analyse_video(db, item)
+                self.compute_video(source, item)
             }
-            Some(MediaKind::Photo) => self.analyse_photo(db, item),
-            None => Err(PipelineError::Other(format!("unsupported file: {}", item.path))),
+            Some(MediaKind::Photo) => self.compute_photo(source, item),
+            None => Err(PipelineError::Other(format!("unsupported file: {}", source.display()))),
         }
     }
+
+    /// Routes to the photo or video path based on the file's type: compute,
+    /// then write into this library.
+    pub fn analyse(&mut self, db: &Database, item: &Media) -> Result<AnalysisOutcome> {
+        let output = self.compute(Path::new(&item.path), item)?;
+        apply_analysis(db, &self.video_frames, item, output)
+    }
+}
+
+/// Turns detections into the portable face records a `faces` row is made
+/// from: normalised boxes, pixel-space landmarks, raw embedding vectors.
+pub fn records_from(analysed: &[AnalysedFace], image: &RgbImage, frame_time: Option<f64>) -> Vec<FaceRecord> {
+    let (width, height) = image.dimensions();
+    analysed
+        .iter()
+        .map(|face| {
+            let detection = &face.detection;
+            let (x, y, w, h) = detection.bbox.normalised(width, height);
+            FaceRecord {
+                bbox: BoundingBox { x, y, w, h },
+                landmarks: detection
+                    .landmarks
+                    .map(|lm| lm.iter().flat_map(|(px, py)| [*px, *py]).collect::<Vec<f32>>()),
+                detection_confidence: detection.score as f64,
+                embedding: face.embedding.as_ref().map(|e| e.as_slice().to_vec()),
+                quality: detection.quality(width, height),
+                frame_time,
+            }
+        })
+        .collect()
 }
 
 /// Reads orientation from the source immediately before pixels are decoded.
 /// A missing/invalid orientation falls back to the indexed value so a transient
 /// source-read failure cannot turn a valid rotation into the default upright
 /// orientation. The decode path reports missing or unsupported files itself.
-fn source_media_orientation(item: &Media, expected_kind: MediaKind, ffmpeg: Option<&Ffmpeg>) -> u16 {
-    let indexed = item.orientation.clamp(1, 8) as u16;
-    let path = Path::new(&item.path);
+fn source_media_orientation(path: &Path, indexed: i64, expected_kind: MediaKind, ffmpeg: Option<&Ffmpeg>) -> u16 {
+    let indexed = indexed.clamp(1, 8) as u16;
     let Some((kind, _)) = formats::classify(path) else {
         return indexed;
     };
@@ -949,7 +876,7 @@ mod tests {
             "the fresh database row recreates the stale-metadata window"
         );
         assert_eq!(
-            source_media_orientation(&item, MediaKind::Photo, None),
+            source_media_orientation(Path::new(&item.path), item.orientation, MediaKind::Photo, None),
             6,
             "source EXIF must win at analysis time"
         );
