@@ -3510,3 +3510,11 @@ dialog.modal-backdrop::backdrop {
 .pw-tag-filter .tag-value-input { min-width: 200px; }
 .pw-bulk-tag { align-items: center; }
 .collection-tags { margin-bottom: 12px; }
+
+.tag-filter { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.tag-filter select { max-width: 220px; }
+.tag-plus { white-space: nowrap; }
+.tag-inline-add { flex: 1 1 160px; min-width: 140px; }
+.pw-tag-collect { align-items: center; }
+
+.pw-add-by-tag { align-items: center; margin-top: 8px; }

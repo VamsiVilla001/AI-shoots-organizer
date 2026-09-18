@@ -18,7 +18,7 @@ import { FaceCrop } from '../components/FaceCrop'
 import { MediaGrid } from '../components/MediaGrid'
 import { ProgressPanel } from '../components/ProgressPanel'
 import { Modal } from '../components/Modal'
-import { TagNamesDatalist, TagPicker } from '../components/TagPicker'
+import { TagFilter, TagNamesDatalist, TagPicker } from '../components/TagPicker'
 import { useUi } from '../store'
 
 /**
@@ -63,6 +63,8 @@ function AlbumsBody({ shootId, onAddToCollection, withTags = false }: { shootId:
   const [namingCluster, setNamingCluster] = useState<ClusterSummary | null>(null)
   const [selectedPersonIds, setSelectedPersonIds] = useState<number[]>([])
   const [search, setSearch] = useState('')
+  // The Tag → Value filter on the Auto tags view; empty value means off.
+  const [tagFilter, setTagFilter] = useState<{ tag: string; value: string }>({ tag: '', value: '' })
 
   const shoot = useQuery({ queryKey: ['shoots', shootId], queryFn: () => api.getShoot(shootId) })
   const albums = useQuery({ queryKey: ['albums', shootId], queryFn: () => api.listAlbums(shootId) })
@@ -70,6 +72,27 @@ function AlbumsBody({ shootId, onAddToCollection, withTags = false }: { shootId:
     queryKey: ['clusters', shootId],
     queryFn: () => api.listClusters(shootId, false),
   })
+  // Tags on every group at once, for the filter: one request rather than
+  // one per card. The cards keep their own per-asset queries for editing.
+  const albumKeys = useMemo(() => (albums.data ?? []).map(albumTagKey), [albums.data])
+  const clusterKeys = useMemo(() => (clusters.data ?? []).map(clusterTagKey), [clusters.data])
+  const albumTags = useQuery({
+    queryKey: ['assetTags', 'album', 'batch', shootId, albumKeys.length],
+    queryFn: () => api.assetsTags('album', albumKeys),
+    enabled: withTags && albumKeys.length > 0,
+  })
+  const clusterTags = useQuery({
+    queryKey: ['assetTags', 'cluster', 'batch', shootId, clusterKeys.length],
+    queryFn: () => api.assetsTags('cluster', clusterKeys),
+    enabled: withTags && clusterKeys.length > 0,
+  })
+  const carriesTag = (key: string, lookup: Record<string, { tag: string; value: string }[]> | undefined) => {
+    if (!tagFilter.value) return true
+    const wanted = tagFilter.value.trim().toLowerCase()
+    return (lookup?.[key] ?? []).some(
+      (item) => item.value.toLowerCase() === wanted && (!tagFilter.tag || item.tag.toLowerCase() === tagFilter.tag.toLowerCase()),
+    )
+  }
   // Only for the search: an album carries person ids, not the team they play
   // for, and a shoot is usually easier to remember by team than by roster.
   const people = useQuery({ queryKey: ['people'], queryFn: () => api.listPeople(null) })
@@ -100,9 +123,10 @@ function AlbumsBody({ shootId, onAddToCollection, withTags = false }: { shootId:
     // that is what makes "Gods Reign" find every player on it, and it works on a
     // pairing album too, where either player's team should count.
     const matches = (album: Album) =>
-      query === '' ||
-      album.name.toLowerCase().includes(query) ||
-      album.personIds.some((id) => teamOf.get(id)?.includes(query))
+      (query === '' ||
+        album.name.toLowerCase().includes(query) ||
+        album.personIds.some((id) => teamOf.get(id)?.includes(query))) &&
+      carriesTag(albumTagKey(album), albumTags.data)
 
     const ofType = (type: Album['albumType']) => all.filter((a) => a.albumType === type)
     const allPlayers = ofType('player')
@@ -117,19 +141,21 @@ function AlbumsBody({ shootId, onAddToCollection, withTags = false }: { shootId:
       // Already ordered by size from the backend; sortOrder holds the bucket.
       groupSize: ofType('groupSize').filter(matches),
     }
-  }, [albums.data, query, teamOf])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [albums.data, query, teamOf, tagFilter, albumTags.data])
 
   // A cluster is searchable by the label the app gave it ("Unknown Person 7")
   // and by the player it has been matched to but not yet confirmed as.
   const visibleClusters = useMemo(() => {
-    const all = clusters.data ?? []
+    const all = (clusters.data ?? []).filter((cluster) => carriesTag(clusterTagKey(cluster), clusterTags.data))
     if (query === '') return all
     return all.filter(
       (cluster) =>
         cluster.label.toLowerCase().includes(query) ||
         (cluster.personName ?? '').toLowerCase().includes(query),
     )
-  }, [clusters.data, query])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [clusters.data, query, tagFilter, clusterTags.data])
 
   /** What the search is hiding, so a thin screen never looks like an empty one. */
   const counts = useMemo(() => {
@@ -205,6 +231,7 @@ function AlbumsBody({ shootId, onAddToCollection, withTags = false }: { shootId:
           style={{ minWidth: 280 }}
           spellCheck={false}
         />
+        {withTags && <TagFilter tag={tagFilter.tag} value={tagFilter.value} onChange={setTagFilter} compact />}
         {query !== '' ? (
           <>
             <button className="small" onClick={() => setSearch('')}>
@@ -433,7 +460,7 @@ function AlbumCard({
           {formatCount(album.photoCount)} photos · {formatCount(album.videoCount)} videos
         </span>
       </div>
-      {withTags && <TagPicker kind="album" assetKey={albumTagKey(album)} compact />}
+      {withTags && <TagPicker kind="album" assetKey={albumTagKey(album)} groupId={album.id} compact />}
       <div style={{ marginTop: 10 }} onClick={(e) => e.stopPropagation()}>
         {onAddToCollection ? <button className="small primary" onClick={() => onAddToCollection(album)}>Add to collection</button> : <button className="small" disabled={toGroup.isPending} onClick={() => toGroup.mutate()}>{toGroup.isPending ? 'Adding…' : 'Make this a group'}</button>}
       </div>
@@ -458,7 +485,7 @@ function ClusterCard({ cluster, onName, withTags = false }: { cluster: ClusterSu
           {formatCount(cluster.mediaCount)} media · {formatCount(cluster.faceCount)} faces
         </span>
       </div>
-      {withTags && <TagPicker kind="cluster" assetKey={clusterTagKey(cluster)} compact />}
+      {withTags && <TagPicker kind="cluster" assetKey={clusterTagKey(cluster)} groupId={cluster.id} compact />}
       <div style={{ marginTop: 10 }} onClick={(e) => e.stopPropagation()}>
         <button className="small primary" onClick={onName}>
           Name this person

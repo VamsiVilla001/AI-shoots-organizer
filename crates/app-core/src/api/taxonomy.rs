@@ -113,6 +113,55 @@ pub fn suggest_tag_values(ctx: &Ctx, tag: Option<String>, query: String, limit: 
     Ok(taxonomy::suggest(&mut conn, tag.as_deref(), &query, limit.unwrap_or(20))?)
 }
 
+
+// --- groups: a tag on a group is a tag on its files ------------------------------
+
+/// Attaches `tag = value` to an automatic group *and* to every file in it,
+/// so the tag is on the images, not only on the card. `group_id` is the
+/// album or cluster row; `key` is the stable key the card stores under.
+pub fn assign_group_tag(ctx: &Ctx, kind: String, group_id: i64, key: String, tag: String, value: String) -> Result<Vec<AssetTag>> {
+    if kind != "album" && kind != "cluster" {
+        return Err(bad("only albums and clusters are groups"));
+    }
+    let mut conn = ctx.state.db.conn()?;
+    let media: Vec<String> = taxonomy::group_media_ids(&mut conn, &kind, group_id)?
+        .into_iter()
+        .map(|id| id.to_string())
+        .collect();
+    taxonomy::assign(&mut conn, &kind, &key, &tag, &value)?;
+    taxonomy::assign_many(&mut conn, "media", &media, &tag, &value)?;
+    Ok(taxonomy::for_asset(&mut conn, &kind, &key)?)
+}
+
+/// The reverse: detaches the value from the group and from its files.
+pub fn unassign_group_tag(ctx: &Ctx, kind: String, group_id: i64, key: String, value_id: i64) -> Result<Vec<AssetTag>> {
+    if kind != "album" && kind != "cluster" {
+        return Err(bad("only albums and clusters are groups"));
+    }
+    let mut conn = ctx.state.db.conn()?;
+    let media: Vec<String> = taxonomy::group_media_ids(&mut conn, &kind, group_id)?
+        .into_iter()
+        .map(|id| id.to_string())
+        .collect();
+    taxonomy::unassign(&mut conn, &kind, &key, value_id)?;
+    taxonomy::unassign_many(&mut conn, "media", &media, value_id)?;
+    Ok(taxonomy::for_asset(&mut conn, &kind, &key)?)
+}
+
+/// Every file carrying a tag value, as media rows — what a collection built
+/// from that value is made of.
+pub fn media_with_tag(ctx: &Ctx, tag: Option<String>, value: String) -> Result<Vec<skwad_database::models::Media>> {
+    let mut conn = ctx.state.db.conn()?;
+    let ids = taxonomy::media_ids_with_value(&mut conn, tag.as_deref(), &value)?;
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids {
+        if let Some(row) = skwad_database::repo::media::get_by_id(&mut conn, id)? {
+            out.push(row);
+        }
+    }
+    Ok(out)
+}
+
 // --- import and export -------------------------------------------------------------
 
 /// What an import file turned out to contain, before anything is saved.

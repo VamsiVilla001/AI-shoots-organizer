@@ -1,6 +1,6 @@
 import { useEffect, useState, type MouseEvent, type ReactNode } from 'react'
-import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
-import type { Group } from '@skwad/shared-types'
+import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
+import type { Group, Media } from '@skwad/shared-types'
 import * as api from '../api'
 import { thumbUrl } from '../media'
 import { useUi } from '../store'
@@ -9,7 +9,7 @@ import { ExportCollectionDialog } from './exportCollection'
 import { WorkspaceDialog } from './WorkspaceDialog'
 import { RosterImport } from '../components/RosterImport'
 import { MediaBrowser } from './mediaBrowser'
-import { TagNamesDatalist, TagPicker } from '../components/TagPicker'
+import { TagFilter, TagNamesDatalist, TagPicker } from '../components/TagPicker'
 import {
   createProjectDraft,
   PROJECT_TYPES,
@@ -227,8 +227,8 @@ export function Collections({ projects, save, replaceMembers, loading, saving, p
       {search.trim() && visibleChildren.length === 0 && <NoMatches noun="collections" onClear={() => setSearch('')} />}
       {!collection && currentChildren.length === 0 && <div className="pw-empty"><h2>Ready for your first collection</h2><p>Select media or find a person in your library, then add their collection here.</p>{canEdit && <div className="actions"><button onClick={() => setLinking(true)}>Add existing collection</button><button className="primary" onClick={onProcess}>Open media library</button></div>}</div>}
       {collection && collection.notes && <p className="pw-collection-notes">{collection.notes}</p>}
-      {collection && collection.sources.length > 0 && <section className={currentChildren.length > 0 ? 'pw-media-section' : undefined} aria-labelledby="collection-media"><h2 id="collection-media" className="pw-section-heading">Media in this collection</h2><CollectionMedia key={collection.id} collection={collection} onExport={() => setExporting(collection)} /></section>}
-      {collection && collection.sources.length === 0 && currentChildren.length === 0 && <div className="pw-empty"><h2>This collection is empty</h2><p>Create a collection here, or add an existing collection from your processed media.</p>{canEdit && <div className="actions"><button onClick={() => setLinking(true)}>Add existing</button><button className="primary" onClick={() => setCreatingCollection(true)}>New collection</button></div>}</div>}
+      {collection && collection.sources.length > 0 && <section className={currentChildren.length > 0 ? 'pw-media-section' : undefined} aria-labelledby="collection-media"><h2 id="collection-media" className="pw-section-heading">Media in this collection</h2><CollectionMedia key={collection.id} collection={collection} onExport={() => setExporting(collection)} addByTag={canEdit && project ? (media) => addMediaToCollection(media, project, collection, projects, act, client) : undefined} /></section>}
+      {collection && collection.sources.length === 0 && currentChildren.length === 0 && <div className="pw-empty"><h2>This collection is empty</h2><p>Create a collection here, add an existing collection from your processed media, or fill it from a tag.</p>{canEdit && <div className="actions"><button onClick={() => setLinking(true)}>Add existing</button><button className="primary" onClick={() => setCreatingCollection(true)}>New collection</button></div>}{canEdit && project && <AddByTag onAdd={(media) => addMediaToCollection(media, project, collection, projects, act, client)} />}</div>}
     </>}
 
     {exporting && <ExportCollectionDialog collection={exporting} onClose={() => setExporting(null)} />}
@@ -295,7 +295,7 @@ function Cover({ mediaId, label }: { mediaId?: number | null; label: string }) {
   return <div className="pw-cover">{mediaId != null && !failed ? <img src={thumbUrl(mediaId)} alt="" loading="lazy" onError={() => setFailed(true)} /> : <span>{label}</span>}</div>
 }
 
-function CollectionMedia({ collection, onExport }: { collection: ProjectCollection; onExport: () => void }) {
+function CollectionMedia({ collection, onExport, addByTag }: { collection: ProjectCollection; onExport: () => void; addByTag?: (media: Media[]) => Promise<number> }) {
   const [index, setIndex] = useState(0)
   const source = collection.sources[index]
   const shoots = useQuery({ queryKey: ['shoots'], queryFn: api.listShoots })
@@ -303,7 +303,7 @@ function CollectionMedia({ collection, onExport }: { collection: ProjectCollecti
   // The source picker only chooses what to *browse*; exporting always takes
   // the whole collection, which is what "export this collection" means to
   // someone handing the folder on.
-  return <><div className="pw-toolbar">{collection.sources.length > 1 && <label>Media source <select value={index} onChange={event => setIndex(Number(event.target.value))}>{collection.sources.map((item, sourceIndex) => <option key={`${item.shootId}-${item.groupId}`} value={sourceIndex}>{shoots.data?.find(shoot => shoot.id === item.shootId)?.name ?? `Source ${sourceIndex + 1}`}</option>)}</select></label>}<button className="primary" onClick={onExport}>Export collection</button></div><div className="card collection-tags"><TagNamesDatalist /><TagPicker kind="collection" assetKey={collection.id} compact label="Collection tags" /></div><MediaBrowser key={`${source.shootId}-${source.groupId}`} shootId={source.shootId} groupId={source.groupId} /></>
+  return <><div className="pw-toolbar">{collection.sources.length > 1 && <label>Media source <select value={index} onChange={event => setIndex(Number(event.target.value))}>{collection.sources.map((item, sourceIndex) => <option key={`${item.shootId}-${item.groupId}`} value={sourceIndex}>{shoots.data?.find(shoot => shoot.id === item.shootId)?.name ?? `Source ${sourceIndex + 1}`}</option>)}</select></label>}<button className="primary" onClick={onExport}>Export collection</button></div><div className="card collection-tags">{addByTag && <AddByTag onAdd={addByTag} />}<TagNamesDatalist /><TagPicker kind="collection" assetKey={collection.id} compact label="Collection tags" /></div><MediaBrowser key={`${source.shootId}-${source.groupId}`} shootId={source.shootId} groupId={source.groupId} /></>
 }
 
 function ProjectDialog({ project, canManageAccess = true, onClose, onSave, onDelete }: { project?: Project; canManageAccess?: boolean; onClose: () => void; onSave: (name: string, kind: string, visibility: ProjectVisibility) => void; onDelete?: () => void }) {
@@ -400,3 +400,22 @@ function duplicateCollectionTree(project: Project, collection: ProjectCollection
 function cloneCollectionTree(source: Project, collection: ProjectCollection, destination: Project, parentId: string | null, name: string, notes: string | null): ProjectCollection[] { const originals = [collection, ...descendantsOf(source, collection.id)]; const ids = new Map(originals.map(item => [item.id, crypto.randomUUID()])); const stamp = new Date().toISOString(); return originals.map((item, index) => ({ ...item, id: ids.get(item.id)!, projectId: destination.id, name: index === 0 ? name : item.name, notes: index === 0 ? notes : item.notes, parentId: index === 0 ? parentId : ids.get(item.parentId!)!, sortOrder: index === 0 ? childrenOf(destination, parentId).length : item.sortOrder, createdAt: stamp, updatedAt: stamp })) }
 function deleteProject(project: Project, projects: Project[], act: (projects: Project[]) => void, after: () => void) { if (window.confirm(`Delete the project “${project.name}”? Its media, imports, and original groups will remain available.`)) { act(projects.filter(item => item.id !== project.id)); after() } }
 function removeCollection(project: Project, collection: ProjectCollection, projects: Project[], act: (projects: Project[]) => void, after: () => void) { const subtree = new Set([collection.id, ...descendantsOf(project, collection.id).map(item => item.id)]); if (window.confirm(`Remove “${collection.name}” and its nested collections from this project? Their media and original groups remain in the library.`)) { act(projects.map(item => item.id === project.id ? { ...item, collections: item.collections.filter(child => !subtree.has(child.id)) } : item)); after() } }
+
+/**
+ * Fills a collection from a tag: choose Tag and Value, see how many files
+ * carry it, add them all. The files join the collection's source group for
+ * their own shoot, exactly as a selection would.
+ */
+function AddByTag({ onAdd }: { onAdd: (media: Media[]) => Promise<number> }) {
+  const [open, setOpen] = useState(false)
+  const [filter, setFilter] = useState<{ tag: string; value: string }>({ tag: '', value: '' })
+  const notice = useUi(state => state.pushNotice)
+  const matching = useQuery({ queryKey: ['mediaWithTag', filter], queryFn: () => api.mediaWithTag(filter.tag || null, filter.value), enabled: open && Boolean(filter.value) })
+  const add = useMutation({
+    mutationFn: async () => onAdd(matching.data ?? []),
+    onSuccess: (added: number) => { notice({ level: 'success', message: added > 0 ? `Added ${added} file${added === 1 ? '' : 's'} tagged ${filter.tag ? `${filter.tag}: ` : ''}${filter.value}.` : 'Every file with that tag was already in this collection.' }); setOpen(false) },
+    onError: (error: unknown) => notice({ level: 'error', message: String(error) }),
+  })
+  if (!open) return <button onClick={() => setOpen(true)}>Add media by tag…</button>
+  return <div className="pw-toolbar pw-add-by-tag"><TagFilter tag={filter.tag} value={filter.value} onChange={setFilter} compact />{filter.value && <span className="hint">{matching.isPending ? 'Counting…' : `${matching.data?.length ?? 0} file${(matching.data?.length ?? 0) === 1 ? '' : 's'} carry it`}</span>}<button className="primary" disabled={!filter.value || add.isPending || (matching.data?.length ?? 0) === 0} onClick={() => add.mutate()}>{add.isPending ? 'Adding…' : 'Add them'}</button><button onClick={() => setOpen(false)}>Cancel</button></div>
+}

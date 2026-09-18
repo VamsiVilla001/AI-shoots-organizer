@@ -73,6 +73,11 @@ interface UiState {
   collectionExport: CollectionExportJob | null
   /** What Cut/Copy is holding, if anything. */
   clipboard: WorkspaceClipboard | null
+  /**
+   * The tag a collection is being built from, so the dialog can name the
+   * collection after it and put the tag on the collection once it exists.
+   */
+  pendingCollectionTag: { tag: string | null; value: string } | null
   /** Person ids handed from Albums to the Export screen; null means no filter. */
   exportPersonIds: number[] | null
   notices: Notice[]
@@ -89,6 +94,7 @@ interface UiState {
   setExportProgress: (event: ExportProgressEvent | null) => void
   setCollectionExport: (job: CollectionExportJob | null) => void
   setClipboard: (clipboard: WorkspaceClipboard | null) => void
+  setPendingCollectionTag: (pending: { tag: string | null; value: string } | null) => void
   pushNotice: (notice: NoticeEvent) => void
   dismissNotice: (id: number) => void
   openViewer: (mediaId: number, preferVideoFaces?: boolean) => void
@@ -106,6 +112,7 @@ export const useUi = create<UiState>((set) => ({
   exportProgress: null,
   collectionExport: null,
   clipboard: null,
+  pendingCollectionTag: null,
   exportPersonIds: null,
   notices: [],
   viewerMediaId: null,
@@ -141,6 +148,7 @@ export const useUi = create<UiState>((set) => ({
   setExportProgress: (event) => set({ exportProgress: event }),
   setCollectionExport: (job) => set({ collectionExport: job }),
   setClipboard: (clipboard) => set({ clipboard }),
+  setPendingCollectionTag: (pendingCollectionTag) => set({ pendingCollectionTag }),
 
   pushNotice: (notice) =>
     set((state) => {

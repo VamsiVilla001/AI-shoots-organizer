@@ -13,7 +13,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { TagSummary, TaxonomyPreview } from '@skwad/shared-types'
 import * as api from '../api'
 import { useUi } from '../store'
-import { TAG_KEYS, TagValueInput } from './TagPicker'
+import { TAG_KEYS } from './TagPicker'
 
 export function TaxonomyImportButton({ className }: { className?: string }) {
   const upload = useRef<HTMLInputElement>(null)
@@ -265,7 +265,8 @@ function TagRow({
             <button type="button" aria-label={`Remove ${item.value}`} onClick={() => onRemoveValue(item.id, item.value, item.uses)}>×</button>
           </span>
         ))}
-        <TagValueInput tag={tag.name} value={value} onChange={setValue} onSubmit={submitValue} placeholder="Add a value…" className="inline" />
+        <input className="tag-inline-add" value={value} placeholder="Add a value…" spellCheck={false} onChange={(event) => setValue(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); submitValue() } }} />
+        {value.trim() && <button type="button" className="small" onClick={submitValue}>+ Add</button>}
       </div>
     </div>
   )

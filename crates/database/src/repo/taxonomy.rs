@@ -363,6 +363,71 @@ pub fn import(conn: &mut dyn Db, entries: &[TaxonomyEntry]) -> Result<TaxonomyIm
     Ok(summary)
 }
 
+// --- groups: a tag on a group is a tag on its files -------------------------------
+
+/// The media ids an automatic group is made of: an album's rows, or every
+/// file a cluster's faces appear in.
+pub fn group_media_ids(conn: &mut dyn Db, kind: &str, group_id: i64) -> Result<Vec<i64>> {
+    let sql = match kind {
+        "album" => "SELECT media_id FROM album_media WHERE album_id = $1",
+        "cluster" => "SELECT DISTINCT media_id FROM faces WHERE cluster_id = $1",
+        other => return Err(DbError::other(format!("`{other}` is not a group kind"))),
+    };
+    conn.rows(sql, params![group_id])?
+        .iter()
+        .map(|row| super::at(row, 0))
+        .collect()
+}
+
+/// Attaches one value to many assets of one kind in a single statement.
+pub fn assign_many(conn: &mut dyn Db, kind: &str, keys: &[String], tag: &str, value: &str) -> Result<usize> {
+    check_kind(kind)?;
+    if keys.is_empty() {
+        return Ok(0);
+    }
+    let tag_id = upsert_tag(conn, tag)?;
+    let value_id = upsert_value(conn, tag_id, value)?;
+    let n = conn.exec(
+        "INSERT INTO asset_tags (tag_value_id, asset_kind, asset_key, created_at)
+         SELECT $1, $2, k, $4 FROM unnest($3::text[]) AS k
+         ON CONFLICT DO NOTHING",
+        params![value_id, kind, keys, now()],
+    )?;
+    Ok(n as usize)
+}
+
+/// Detaches one value from many assets of one kind.
+pub fn unassign_many(conn: &mut dyn Db, kind: &str, keys: &[String], value_id: i64) -> Result<usize> {
+    check_kind(kind)?;
+    if keys.is_empty() {
+        return Ok(0);
+    }
+    let n = conn.exec(
+        "DELETE FROM asset_tags WHERE tag_value_id = $1 AND asset_kind = $2 AND asset_key = ANY($3)",
+        params![value_id, kind, keys],
+    )?;
+    Ok(n as usize)
+}
+
+/// Media ids carrying `value` (under `tag`, or any tag when `None`) — what
+/// a collection built from a tag is made of.
+pub fn media_ids_with_value(conn: &mut dyn Db, tag: Option<&str>, value: &str) -> Result<Vec<i64>> {
+    let value = clean(value);
+    let tag = tag.map(clean).unwrap_or_default();
+    conn.rows(
+        "SELECT DISTINCT a.asset_key::bigint AS media_id
+           FROM asset_tags a
+           JOIN tag_values v ON v.id = a.tag_value_id
+           JOIN tags t ON t.id = v.tag_id
+          WHERE a.asset_kind = 'media' AND v.value = $2 AND ($1 = '' OR t.name = $1)
+          ORDER BY media_id",
+        params![tag, value],
+    )?
+    .iter()
+    .map(|row| super::at(row, 0))
+    .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -6,9 +6,14 @@ import { createProjectDraft, PROJECT_TYPES, type CollectionSource, type Project,
 import { WorkspaceDialog } from './WorkspaceDialog'
 import { addMediaToCollection } from './collectionOps'
 import { GROUP_CHANGE_KEYS, invalidateKeys } from '../queryKeys'
+import { useUi } from '../store'
 
 export function PublishCollection({ media, projects, save, onClose, onPublished }: { media: Media[]; projects: Project[]; save: (projects: Project[]) => void; onClose: () => void; onPublished: (id: string) => void }) {
-  const [name, setName] = useState('')
+  // Built from a tag: the collection is offered under the value's name and
+  // carries the tag once it exists.
+  const pendingTag = useUi(state => state.pendingCollectionTag)
+  const setPendingTag = useUi(state => state.setPendingCollectionTag)
+  const [name, setName] = useState(pendingTag?.value ?? '')
   const editableProjects = projects.filter(project => project.status === 'active' && project.accessRole !== 'viewer')
   const [projectId, setProjectId] = useState(editableProjects[0]?.id ?? 'new')
   const [parentId, setParentId] = useState('root')
@@ -47,6 +52,10 @@ export function PublishCollection({ media, projects, save, onClose, onPublished 
       const id = projectId === 'new' ? crypto.randomUUID() : projectId
       const stamp = new Date().toISOString()
       const collection = { id: crypto.randomUUID(), projectId: id, name: name.trim(), parentId: projectId === 'new' || parentId === 'root' ? null : parentId, notes: null, sortOrder: 0, sources: [...sources.current], createdAt: stamp, updatedAt: stamp }
+      if (pendingTag) {
+        await api.assignTag('collection', collection.id, pendingTag.tag ?? 'Tag', pendingTag.value).catch(() => {})
+        setPendingTag(null)
+      }
       if (projectId === 'new') {
         const project = createProjectDraft(projectName.trim(), kind, visibility)
         collection.projectId = project.id
@@ -62,7 +71,7 @@ export function PublishCollection({ media, projects, save, onClose, onPublished 
     } finally { publishing.current = false; setBusy(false) }
   }
   const started = sources.current.length > 0
-  return <WorkspaceDialog title="Create collection" onClose={() => { if (!busy) onClose() }}><form onSubmit={e => { e.preventDefault(); void publish() }}>
+  return <WorkspaceDialog title="Create collection" onClose={() => { if (!busy) { setPendingTag(null); onClose() } }}><form onSubmit={e => { e.preventDefault(); void publish() }}>
     <p>{media.length} selected files. Your media stays in the library and can belong to other collections.</p>
     <label className="field">Collection name<input autoFocus required maxLength={120} value={name} disabled={busy || started} onChange={e => setName(e.target.value)} placeholder="e.g. Finals highlights" /></label>
     <label className="field">Project<select value={projectId} disabled={busy} onChange={e => { setProjectId(e.target.value); setParentId('root') }}>{editableProjects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}<option value="new">Create a new project</option></select></label>
@@ -81,6 +90,8 @@ export function PublishCollection({ media, projects, save, onClose, onPublished 
  * covered before.
  */
 export function AddToExistingCollection({ media, projects, save, onClose, onAdded }: { media: Media[]; projects: Project[]; save: (projects: Project[]) => void; onClose: () => void; onAdded: (projectId: string, collectionId: string, added: number) => void }) {
+  const pendingTag = useUi(state => state.pendingCollectionTag)
+  const setPendingTag = useUi(state => state.setPendingCollectionTag)
   const editableProjects = projects.filter(project => project.status === 'active' && project.accessRole !== 'viewer')
   const [projectId, setProjectId] = useState(editableProjects.find(project => project.collections.length > 0)?.id ?? editableProjects[0]?.id ?? '')
   const [collectionId, setCollectionId] = useState('')
@@ -100,13 +111,17 @@ export function AddToExistingCollection({ media, projects, save, onClose, onAdde
     setBusy(true); setError('')
     try {
       const added = await addMediaToCollection(media, project, collection, projects, save, client)
+      if (pendingTag) {
+        await api.assignTag('collection', collection.id, pendingTag.tag ?? 'Tag', pendingTag.value).catch(() => {})
+        setPendingTag(null)
+      }
       onAdded(project.id, collection.id, added)
     } catch (e) {
       setError(String(e))
     } finally { adding.current = false; setBusy(false) }
   }
 
-  return <WorkspaceDialog title="Add to existing collection" onClose={() => { if (!busy) onClose() }}><form onSubmit={e => { e.preventDefault(); void submit() }}>
+  return <WorkspaceDialog title="Add to existing collection" onClose={() => { if (!busy) { setPendingTag(null); onClose() } }}><form onSubmit={e => { e.preventDefault(); void submit() }}>
     <p>{media.length} selected file{media.length === 1 ? '' : 's'}. Your media stays in the library and can belong to more than one collection.</p>
     <label className="field">Project<select value={projectId} disabled={busy} onChange={e => { setProjectId(e.target.value); setCollectionId('') }}>{editableProjects.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
     <label className="field">Collection<select required value={collectionId} disabled={busy || options.length === 0} onChange={e => setCollectionId(e.target.value)}><option value="">Choose a collection…</option>{options.map(({ collection: item, depth }) => <option key={item.id} value={item.id}>{`${'— '.repeat(depth)}${item.name}`}</option>)}</select></label>

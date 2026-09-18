@@ -212,6 +212,9 @@ macro_rules! command_registry {
             assign_tag(kind: String, key: String, tag: String, value: String) -> Vec<AssetTag> = $crate::api::taxonomy::assign_tag;
             assign_tag_to_many(kind: String, keys: Vec<String>, tag: String, value: String) -> usize = $crate::api::taxonomy::assign_tag_to_many;
             unassign_tag(kind: String, key: String, value_id: i64) -> Vec<AssetTag> = $crate::api::taxonomy::unassign_tag;
+            assign_group_tag(kind: String, group_id: i64, key: String, tag: String, value: String) -> Vec<AssetTag> = $crate::api::taxonomy::assign_group_tag;
+            unassign_group_tag(kind: String, group_id: i64, key: String, value_id: i64) -> Vec<AssetTag> = $crate::api::taxonomy::unassign_group_tag;
+            media_with_tag(tag: Option<String>, value: String) -> Vec<Media> = $crate::api::taxonomy::media_with_tag;
             suggest_tag_values(tag: Option<String>, query: String, limit: Option<i64>) -> Vec<TagSuggestion> = $crate::api::taxonomy::suggest_tag_values;
             preview_taxonomy_text(source: String, text: String) -> TaxonomyPreview = $crate::api::taxonomy::preview_taxonomy_text;
             import_taxonomy_text(source: String, text: String) -> TaxonomyImportSummary = $crate::api::taxonomy::import_taxonomy_text;

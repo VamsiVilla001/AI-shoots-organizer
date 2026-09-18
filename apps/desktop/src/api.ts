@@ -440,3 +440,9 @@ export const previewTaxonomyText = (source: string, text: string) =>
 export const importTaxonomyText = (source: string, text: string) =>
   call<TaxonomyImportSummary>('import_taxonomy_text', { source, text })
 export const exportTaxonomy = (format: 'csv' | 'json') => call<string>('export_taxonomy', { format })
+export const assignGroupTag = (kind: 'album' | 'cluster', groupId: number, key: string, tag: string, value: string) =>
+  call<AssetTag[]>('assign_group_tag', { kind, groupId, key, tag, value })
+export const unassignGroupTag = (kind: 'album' | 'cluster', groupId: number, key: string, valueId: number) =>
+  call<AssetTag[]>('unassign_group_tag', { kind, groupId, key, valueId })
+/** Every file carrying a tag value (under one tag, or any when null). */
+export const mediaWithTag = (tag: string | null, value: string) => call<Media[]>('media_with_tag', { tag, value })
