@@ -51,6 +51,10 @@ pub struct AnalysisOutcome {
 pub struct Engine {
     detector: ScrfdDetector,
     embedder: ArcFaceEmbedder,
+    /// Content hash of the embedder weights — written into every face row
+    /// this engine produces, so its vectors are only ever compared with
+    /// vectors from the same model. See `models.rs`.
+    embedder_key: String,
     ffmpeg: Option<Ffmpeg>,
     video_frames: VideoFrameCache,
     settings: AppSettings,
@@ -102,9 +106,10 @@ impl Engine {
         let detector_path = registry
             .resolve(ModelRole::Detector, settings.detector_model.as_deref())
             .ok_or_else(|| PipelineError::ModelsUnavailable(status.message.clone()))?;
-        let embedder_path = registry
-            .resolve(ModelRole::Embedder, settings.embedder_model.as_deref())
+        let embedder_info = registry
+            .resolve_info(ModelRole::Embedder, settings.embedder_model.as_deref())
             .ok_or_else(|| PipelineError::ModelsUnavailable(status.message.clone()))?;
+        let embedder_path = PathBuf::from(&embedder_info.path);
 
         let session_config = settings.session_config();
         let detector = ScrfdDetector::load(&detector_path, settings.detector_config(), &session_config)
@@ -115,6 +120,7 @@ impl Engine {
         Ok(Self {
             detector,
             embedder,
+            embedder_key: embedder_info.hash,
             ffmpeg: discover_ffmpeg(settings),
             video_frames: VideoFrameCache::new(paths.face_cache.join("video_frames")),
             settings: settings.clone(),
@@ -127,6 +133,11 @@ impl Engine {
 
     pub fn embedder_name(&self) -> &str {
         self.embedder.name()
+    }
+
+    /// The cohort every embedding from this engine belongs to.
+    pub fn embedder_key(&self) -> &str {
+        &self.embedder_key
     }
 
     pub fn ffmpeg(&self) -> Option<&Ffmpeg> {
@@ -314,8 +325,14 @@ impl Engine {
                         tracked_faces_recovered +=
                             self.recover_tracked_faces(previous, &frame.image, &mut analysed_faces);
                     }
-                    let frame_outcome =
-                        Self::store_analysed_faces(db, item, &frame.image, Some(frame.timestamp), &analysed_faces)?;
+                    let frame_outcome = Self::store_analysed_faces(
+                        db,
+                        item,
+                        &frame.image,
+                        Some(frame.timestamp),
+                        &analysed_faces,
+                        &self.embedder_key,
+                    )?;
                     if frame_outcome.faces_detected > 0 {
                         if let Err(error) = self
                             .video_frames
@@ -405,7 +422,7 @@ impl Engine {
         frame_time: Option<f64>,
     ) -> Result<AnalysisOutcome> {
         let analysed = self.detect_and_embed(image)?;
-        Self::store_analysed_faces(db, item, image, frame_time, &analysed)
+        Self::store_analysed_faces(db, item, image, frame_time, &analysed, &self.embedder_key)
     }
 
     /// Detects and embeds every face in an arbitrary image with no `Media` row
@@ -529,6 +546,7 @@ impl Engine {
         image: &RgbImage,
         frame_time: Option<f64>,
         analysed_faces: &[AnalysedFace],
+        embedder_key: &str,
     ) -> Result<AnalysisOutcome> {
         if analysed_faces.is_empty() {
             return Ok(AnalysisOutcome {
@@ -569,7 +587,7 @@ impl Engine {
                     quality: Some(detection.quality(width, height)),
                     frame_time,
                     crop_path: None,
-                    model_key: None,
+                    model_key: Some(embedder_key.to_string()),
                 },
             )?;
             outcome.faces_detected += 1;

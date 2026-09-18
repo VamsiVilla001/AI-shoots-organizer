@@ -41,8 +41,8 @@ pub fn insert(conn: &mut dyn Db, face: &NewFace) -> Result<i64> {
     let row = conn.row_one(
         "INSERT INTO faces (media_id, shoot_id, embedding, embedding_dim,
                             bbox_x, bbox_y, bbox_w, bbox_h, landmarks,
-                            detection_confidence, quality, frame_time, crop_path, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                            detection_confidence, quality, frame_time, crop_path, created_at, model_key)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
          RETURNING id",
         params![
             face.media_id,
@@ -59,6 +59,7 @@ pub fn insert(conn: &mut dyn Db, face: &NewFace) -> Result<i64> {
             face.frame_time,
             face.crop_path,
             now(),
+            face.model_key,
         ],
     )?;
     get(&row, "id")
@@ -73,8 +74,8 @@ pub fn insert_manual(conn: &mut dyn Db, face: &NewFace) -> Result<i64> {
     let row = conn.row_one(
         "INSERT INTO faces (media_id, shoot_id, embedding, embedding_dim,
                             bbox_x, bbox_y, bbox_w, bbox_h, landmarks,
-                            detection_confidence, source, quality, frame_time, crop_path, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, 1.0, 'manual', $9, $10, NULL, $11)
+                            detection_confidence, source, quality, frame_time, crop_path, created_at, model_key)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, 1.0, 'manual', $9, $10, NULL, $11, $12)
          RETURNING id",
         params![
             face.media_id,
@@ -88,6 +89,7 @@ pub fn insert_manual(conn: &mut dyn Db, face: &NewFace) -> Result<i64> {
             face.quality,
             face.frame_time,
             now(),
+            face.model_key,
         ],
     )?;
     get(&row, "id")
@@ -119,6 +121,9 @@ pub struct FaceVector {
     pub person_id: Option<i64>,
     pub embedding: Vec<f32>,
     pub quality: f64,
+    /// The embedder cohort this vector belongs to. Vectors from different
+    /// cohorts live in different spaces and must never be compared.
+    pub model_key: Option<String>,
 }
 
 fn map_vector(row: &Row) -> Result<Option<FaceVector>> {
@@ -133,8 +138,12 @@ fn map_vector(row: &Row) -> Result<Option<FaceVector>> {
         person_id: get(row, "person_id")?,
         embedding,
         quality: get::<Option<f64>>(row, "quality")?.unwrap_or(0.0),
+        model_key: get(row, "model_key")?,
     }))
 }
+
+/// The columns every vector query selects.
+const VECTOR_COLUMNS: &str = "id, media_id, frame_time, person_id, embedding, quality, model_key";
 
 fn collect_vectors(rows: Vec<Row>) -> Result<Vec<FaceVector>> {
     Ok(rows
@@ -150,14 +159,14 @@ fn collect_vectors(rows: Vec<Row>) -> Result<Vec<FaceVector>> {
 /// player face library described in §6.
 pub fn library_vectors(conn: &mut dyn Db) -> Result<Vec<FaceVector>> {
     collect_vectors(conn.rows(
-        "SELECT id, media_id, frame_time, person_id, embedding, quality FROM faces
+        &format!("SELECT {VECTOR_COLUMNS} FROM faces
           WHERE person_id IS NOT NULL AND assignment = 'confirmed' AND embedding IS NOT NULL
             -- A named cluster is a hypothesis, not dozens of independently
             -- reviewed reference photos. Only its reviewed cover may train
             -- recognition; individually tagged faces have no cluster.
             AND (cluster_id IS NULL OR id = (
                 SELECT c.cover_face_id FROM clusters c WHERE c.id = faces.cluster_id
-            ))",
+            ))"),
         params![],
     )?)
 }
@@ -166,8 +175,8 @@ pub fn library_vectors(conn: &mut dyn Db) -> Result<Vec<FaceVector>> {
 /// enrolled person against media that predates their enrollment.
 pub fn reference_vectors_for_person(conn: &mut dyn Db, person_id: i64) -> Result<Vec<FaceVector>> {
     collect_vectors(conn.rows(
-        "SELECT id, media_id, frame_time, person_id, embedding, quality FROM faces
-          WHERE person_id = $1 AND assignment = 'confirmed' AND embedding IS NOT NULL",
+        &format!("SELECT {VECTOR_COLUMNS} FROM faces
+          WHERE person_id = $1 AND assignment = 'confirmed' AND embedding IS NOT NULL"),
         params![person_id],
     )?)
 }
@@ -175,18 +184,18 @@ pub fn reference_vectors_for_person(conn: &mut dyn Db, person_id: i64) -> Result
 /// Embeddings in one shoot that still belong to nobody — the input to clustering.
 pub fn unassigned_vectors(conn: &mut dyn Db, shoot_id: i64) -> Result<Vec<FaceVector>> {
     collect_vectors(conn.rows(
-        "SELECT id, media_id, frame_time, person_id, embedding, quality FROM faces
+        &format!("SELECT {VECTOR_COLUMNS} FROM faces
           WHERE shoot_id = $1 AND person_id IS NULL
             AND assignment NOT IN ('ignored', 'rejected') AND embedding IS NOT NULL
-          ORDER BY id",
+          ORDER BY id"),
         params![shoot_id],
     )?)
 }
 
 pub fn vectors_for_media(conn: &mut dyn Db, media_id: i64) -> Result<Vec<FaceVector>> {
     collect_vectors(conn.rows(
-        "SELECT id, media_id, frame_time, person_id, embedding, quality FROM faces
-          WHERE media_id = $1 AND embedding IS NOT NULL",
+        &format!("SELECT {VECTOR_COLUMNS} FROM faces
+          WHERE media_id = $1 AND embedding IS NOT NULL"),
         params![media_id],
     )?)
 }
@@ -399,6 +408,54 @@ pub fn query(conn: &mut dyn Db, q: &FaceQuery) -> Result<Vec<FaceWithContext>> {
 pub fn clear_all_embeddings(conn: &mut dyn Db) -> Result<usize> {
     let cleared = conn.exec("UPDATE faces SET embedding = NULL, embedding_dim = NULL", params![])?;
     Ok(cleared as usize)
+}
+
+/// How many embeddings were produced by an embedder other than `current_key`,
+/// and which files they belong to.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StaleEmbeddings {
+    pub faces: i64,
+    pub media: i64,
+}
+
+/// Counts embeddings that are not in the current embedder's cohort — the
+/// pre-versioning `NULL` cohort included — optionally within one shoot.
+///
+/// Manual reference faces count too: a person enrolled under an older model
+/// cannot be recognised by the current one until re-embedded.
+pub fn stale_embeddings(conn: &mut dyn Db, current_key: &str, shoot_id: Option<i64>) -> Result<StaleEmbeddings> {
+    let row = conn.row_one(
+        "SELECT COUNT(*), COUNT(DISTINCT media_id) FROM faces
+          WHERE embedding IS NOT NULL
+            AND model_key IS DISTINCT FROM $1
+            AND ($2::bigint IS NULL OR shoot_id = $2::bigint)",
+        params![current_key, shoot_id],
+    )?;
+    Ok(StaleEmbeddings {
+        faces: super::at(&row, 0)?,
+        media: super::at(&row, 1)?,
+    })
+}
+
+/// The media whose embeddings need redoing under `current_key`, grouped by
+/// shoot so the caller can queue per-shoot finishing stages.
+pub fn media_with_stale_embeddings(
+    conn: &mut dyn Db,
+    current_key: &str,
+    shoot_id: Option<i64>,
+) -> Result<Vec<(i64, i64)>> {
+    conn.rows(
+        "SELECT DISTINCT shoot_id, media_id FROM faces
+          WHERE embedding IS NOT NULL
+            AND model_key IS DISTINCT FROM $1
+            AND ($2::bigint IS NULL OR shoot_id = $2::bigint)
+          ORDER BY shoot_id, media_id",
+        params![current_key, shoot_id],
+    )?
+    .iter()
+    .map(|row| Ok((super::at(row, 0)?, super::at(row, 1)?)))
+    .collect()
 }
 
 #[cfg(test)]

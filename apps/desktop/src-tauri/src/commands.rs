@@ -116,6 +116,63 @@ pub fn model_status(state: State<'_, Arc<AppState>>) -> Result<ModelStatus> {
         .status(settings.detector_model.as_deref(), settings.embedder_model.as_deref()))
 }
 
+/// Which embedder the library is currently using, and how much of the
+/// library was embedded by something else.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmbeddingCohorts {
+    /// Content hash of the embedder in use; `None` when no embedder resolves.
+    pub current_key: Option<String>,
+    /// Embeddings produced by a different (or unknown) embedder. They cannot
+    /// be compared with current ones, so the people in them are invisible to
+    /// recognition until re-embedded.
+    pub stale_faces: i64,
+    pub stale_media: i64,
+}
+
+/// Reports embeddings that predate the current embedder — the "N faces were
+/// embedded with an older model" line in Settings.
+#[tauri::command]
+pub fn embedding_cohorts(state: State<'_, Arc<AppState>>, shoot_id: Option<i64>) -> Result<EmbeddingCohorts> {
+    let settings = state.settings();
+    let current = ModelRegistry::new(&state.paths.models)
+        .resolve_info(crate::models::ModelRole::Embedder, settings.embedder_model.as_deref())
+        .map(|m| m.hash);
+    let Some(current_key) = current else {
+        return Ok(EmbeddingCohorts {
+            current_key: None,
+            stale_faces: 0,
+            stale_media: 0,
+        });
+    };
+    let mut conn = state.db.conn()?;
+    let stale = faces::stale_embeddings(&mut conn, &current_key, shoot_id)?;
+    Ok(EmbeddingCohorts {
+        current_key: Some(current_key),
+        stale_faces: stale.faces,
+        stale_media: stale.media,
+    })
+}
+
+/// Requeues analysis for every file whose embeddings came from an older
+/// embedder, so the whole library ends up in one cohort again. Returns how
+/// many files were queued.
+#[tauri::command]
+pub fn reembed_stale_faces(app: AppHandle, state: State<'_, Arc<AppState>>, shoot_id: Option<i64>) -> Result<usize> {
+    let settings = state.settings();
+    let current_key = ModelRegistry::new(&state.paths.models)
+        .resolve_info(crate::models::ModelRole::Embedder, settings.embedder_model.as_deref())
+        .map(|m| m.hash)
+        .ok_or_else(|| err("no face embedder is installed, so nothing can be re-embedded"))?;
+    let queued = stages::queue_reembed(&state.db, &current_key, shoot_id)?;
+    for shoot in &queued.shoots {
+        state.resume_shoot(*shoot);
+        events::shoot_changed(&app, *shoot, "reembedding");
+    }
+    state.set_paused(false);
+    Ok(queued.media)
+}
+
 // ---------------------------------------------------------------------------
 // Shoots
 // ---------------------------------------------------------------------------
@@ -581,6 +638,8 @@ struct ReferenceSample {
     embedding: Vec<f32>,
     quality: f64,
     frame_time: Option<f64>,
+    /// The embedder that produced `embedding`; see `faces.model_key`.
+    model_key: String,
 }
 
 /// Pre-registers a person from reference photos or a reference video, taken
@@ -711,6 +770,7 @@ pub async fn enroll_person(
                     embedding: face.embedding.expect("filtered above").into_vec(),
                     quality: face.detection.quality(width, height),
                     frame_time: Some(frame.timestamp),
+                    model_key: engine.embedder_key().to_string(),
                 });
             }
 
@@ -822,6 +882,7 @@ fn reference_sample_from_photo(
         embedding: face.embedding.expect("filtered above").into_vec(),
         quality,
         frame_time: None,
+        model_key: engine.embedder_key().to_string(),
     }))
 }
 
@@ -851,7 +912,7 @@ fn write_reference_samples(
                     quality: Some(sample.quality),
                     frame_time: sample.frame_time,
                     crop_path: None,
-                    model_key: None,
+                    model_key: Some(sample.model_key.clone()),
                 },
             )?;
             faces::assign(conn, face_id, person_id, Some(1.0))?;
@@ -1725,7 +1786,7 @@ pub async fn add_manual_face(
                     quality: Some(quality),
                     frame_time,
                     crop_path: None,
-                    model_key: None,
+                    model_key: Some(engine.embedder_key().to_string()),
                 },
             )?;
 

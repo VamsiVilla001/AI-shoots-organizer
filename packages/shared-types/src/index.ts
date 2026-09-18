@@ -748,6 +748,8 @@ export interface ModelInfo {
   path: string
   sizeBytes: number
   role: ModelRole
+  /** BLAKE3 of the file contents — the model's identity across machines. */
+  hash: string
 }
 
 export interface ModelStatus {
@@ -755,8 +757,18 @@ export interface ModelStatus {
   available: ModelInfo[]
   detector: string | null
   embedder: string | null
+  detectorHash: string | null
+  embedderHash: string | null
   ready: boolean
   message: string
+}
+
+/** Which embedder the library uses now, and how much of it predates that embedder. */
+export interface EmbeddingCohorts {
+  currentKey: string | null
+  /** Faces embedded by a different or unknown model; invisible to recognition until re-embedded. */
+  staleFaces: number
+  staleMedia: number
 }
 
 export interface AppInfo {

@@ -15,6 +15,7 @@ import type {
   AppSettings,
   BoundingBox,
   ClusterSummary,
+  EmbeddingCohorts,
   EnrollDirectoryResult,
   EnrollPersonResult,
   ExportOptions,
@@ -83,6 +84,10 @@ export const getSettings = () => call<AppSettings>('get_settings')
 export const updateSettings = (settings: AppSettings) =>
   call<AppSettings>('update_settings', { settings })
 export const modelStatus = () => call<ModelStatus>('model_status')
+export const embeddingCohorts = (shootId?: number) =>
+  call<EmbeddingCohorts>('embedding_cohorts', { shootId: shootId ?? null })
+export const reembedStaleFaces = (shootId?: number) =>
+  call<number>('reembed_stale_faces', { shootId: shootId ?? null })
 export const catalogueSessionStatus = () => call<CatalogueSessionStatus>('catalogue_session_status')
 export const signInSkwad = (email: string, password: string) =>
   call<CatalogueSessionStatus>('sign_in_skwad', { email, password })

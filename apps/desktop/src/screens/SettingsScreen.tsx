@@ -55,6 +55,16 @@ export function SettingsScreen() {
     },
     onError: (e) => pushNotice({ level: 'error', message: String(e) }),
   })
+  const cohorts = useQuery({ queryKey: ['embeddingCohorts'], queryFn: () => api.embeddingCohorts() })
+  const reembed = useMutation({
+    mutationFn: (shootId?: number) => api.reembedStaleFaces(shootId),
+    onSuccess: (count) => {
+      queryClient.invalidateQueries({ queryKey: ['embeddingCohorts'] })
+      queryClient.invalidateQueries({ queryKey: ['shoots'] })
+      pushNotice({ level: 'success', message: `Queued ${count} ${count === 1 ? 'file' : 'files'} for re-embedding.` })
+    },
+    onError: (e) => pushNotice({ level: 'error', message: String(e) }),
+  })
   const clearEmbeddings = useMutation({ mutationFn: api.clearAllEmbeddings })
   const clearEverything = useMutation({
     mutationFn: api.clearAllRecognitionData,
@@ -178,9 +188,24 @@ export function SettingsScreen() {
           <div className="hint">{info.data?.models.message}</div>
           {info.data?.models.available.map((model) => (
             <div key={model.name} className="hint mono">
-              {model.name} · {formatBytes(model.sizeBytes)} · {model.role}
+              {model.name} · {formatBytes(model.sizeBytes)} · {model.role} · {model.hash.slice(0, 12)}
             </div>
           ))}
+          {cohorts.data && cohorts.data.staleFaces > 0 && (
+            <div className="hint" style={{ marginTop: 6 }}>
+              {cohorts.data.staleFaces} {cohorts.data.staleFaces === 1 ? 'face was' : 'faces were'} embedded with an
+              older model across {cohorts.data.staleMedia} {cohorts.data.staleMedia === 1 ? 'file' : 'files'}. They
+              cannot be compared with current embeddings until re-embedded.{' '}
+              <button
+                type="button"
+                className="button small"
+                disabled={reembed.isPending}
+                onClick={() => reembed.mutate(undefined)}
+              >
+                {reembed.isPending ? 'Queuing…' : 'Re-embed now'}
+              </button>
+            </div>
+          )}
           <div className="hint">
             FFmpeg: {info.data?.ffmpegAvailable ? (info.data.ffmpegVersion ?? 'found') : 'not found — HEIC and video analysis need it'}
           </div>

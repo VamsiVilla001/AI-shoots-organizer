@@ -1,4 +1,4 @@
-//! Model discovery (§14).
+//! Model discovery (§14) and identity.
 //!
 //! The application is not bound to one model. Any ONNX detector and any ONNX
 //! embedder dropped into the models folder can be selected; the pipeline only
@@ -10,14 +10,30 @@
 //! installs them on first launch; a default build does not, and they are
 //! fetched per machine by `scripts/fetch-models.ps1`. Either way this module
 //! has to describe *absence* clearly enough for the UI to explain it.
+//!
+//! ## Identity
+//!
+//! Filenames are hints, not identities. Two machines can each hold a file
+//! matching `w600k_r50` that are different weights, producing embeddings in
+//! different vector spaces — and nothing errors, recognition just quietly
+//! degrades. So every model also carries a content hash, computed once and
+//! cached against `(size, mtime)` the way `content_key` is for media, and every
+//! embedding written to the database records the hash of the embedder that
+//! produced it (`faces.model_key`). Vectors are only ever compared within one
+//! cohort, and a worker whose hashes differ from the library's is refused work.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
 /// Where a models-bundled build puts them, relative to the resource directory.
 const BUNDLED_MODELS: &str = "models";
+
+/// The hash cache, beside the models it describes. Rehashing 183 MB on every
+/// registry call would be noticeable; a `(size, mtime)` check is not.
+const HASH_CACHE: &str = ".model-hashes.json";
 
 /// Copies bundled models into the library's models folder, once.
 ///
@@ -35,7 +51,13 @@ pub fn seed_from_bundle(app: &AppHandle, destination: &Path) -> Vec<String> {
     let Ok(bundled) = app.path().resolve(BUNDLED_MODELS, tauri::path::BaseDirectory::Resource) else {
         return Vec::new();
     };
-    let Ok(entries) = std::fs::read_dir(&bundled) else {
+    seed_from_directory(&bundled, destination)
+}
+
+/// The Tauri-free half of [`seed_from_bundle`]: copies every `.onnx` under
+/// `bundled` into `destination` that is missing or the wrong size.
+pub fn seed_from_directory(bundled: &Path, destination: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(bundled) else {
         // A build without models: nothing to say.
         return Vec::new();
     };
@@ -77,7 +99,7 @@ pub fn seed_from_bundle(app: &AppHandle, destination: &Path) -> Vec<String> {
     installed
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ModelRole {
     Detector,
@@ -85,13 +107,17 @@ pub enum ModelRole {
     Unknown,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelInfo {
     pub name: String,
     pub path: String,
     pub size_bytes: u64,
     pub role: ModelRole,
+    /// BLAKE3 of the file's contents, hex. The model's identity everywhere
+    /// else in the system: `faces.model_key`, the worker handshake, the
+    /// download URL.
+    pub hash: String,
 }
 
 /// Filename fragments that identify a detector. Covers the SCRFD and
@@ -124,17 +150,54 @@ pub fn classify(file_name: &str) -> ModelRole {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelStatus {
     pub models_directory: String,
     pub available: Vec<ModelInfo>,
     pub detector: Option<String>,
     pub embedder: Option<String>,
+    /// Content hashes of the resolved pair — what a worker must match.
+    pub detector_hash: Option<String>,
+    pub embedder_hash: Option<String>,
     /// True when both a detector and an embedder are resolvable — i.e. the
     /// face pipeline can actually run.
     pub ready: bool,
     pub message: String,
+}
+
+/// One cached hash: valid while the file's size and mtime are unchanged.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct CachedHash {
+    size: u64,
+    modified: u64,
+    hash: String,
+}
+
+fn modified_secs(meta: &std::fs::Metadata) -> u64 {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Hashes a whole file with BLAKE3, streaming so a 170 MB model never sits on
+/// the heap in one piece. Runs at memory bandwidth; a full model pair takes
+/// well under a second, and it only happens when a file changes.
+pub fn hash_file(path: &Path) -> std::io::Result<String> {
+    use std::io::Read;
+    let mut hasher = blake3::Hasher::new();
+    let mut file = std::fs::File::open(path)?;
+    let mut buffer = vec![0u8; 1 << 20];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hasher.finalize().to_hex().to_string())
 }
 
 #[derive(Debug, Clone)]
@@ -153,25 +216,81 @@ impl ModelRegistry {
         &self.directory
     }
 
-    /// Every `.onnx` file in the models folder, classified by filename.
+    fn cache_path(&self) -> PathBuf {
+        self.directory.join(HASH_CACHE)
+    }
+
+    fn load_cache(&self) -> HashMap<String, CachedHash> {
+        std::fs::read(self.cache_path())
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default()
+    }
+
+    fn store_cache(&self, cache: &HashMap<String, CachedHash>) {
+        if let Ok(json) = serde_json::to_vec_pretty(cache) {
+            if let Err(error) = std::fs::write(self.cache_path(), json) {
+                tracing::debug!(%error, "could not write the model hash cache; models will be rehashed next time");
+            }
+        }
+    }
+
+    /// Every `.onnx` file in the models folder, classified by filename and
+    /// identified by content hash.
     pub fn list(&self) -> Vec<ModelInfo> {
         let Ok(entries) = std::fs::read_dir(&self.directory) else {
             return Vec::new();
         };
 
+        let mut cache = self.load_cache();
+        let mut cache_changed = false;
+
         let mut models: Vec<ModelInfo> = entries
             .flatten()
             .filter(|e| e.path().extension().is_some_and(|ext| ext.eq_ignore_ascii_case("onnx")))
-            .map(|entry| {
+            .filter_map(|entry| {
                 let name = entry.file_name().to_string_lossy().to_string();
-                ModelInfo {
+                let meta = entry.metadata().ok()?;
+                let (size, modified) = (meta.len(), modified_secs(&meta));
+                let hash = match cache.get(&name) {
+                    Some(cached) if cached.size == size && cached.modified == modified => cached.hash.clone(),
+                    _ => {
+                        let hash = match hash_file(&entry.path()) {
+                            Ok(hash) => hash,
+                            Err(error) => {
+                                tracing::warn!(model = %name, %error, "could not hash a model; it will be skipped");
+                                return None;
+                            }
+                        };
+                        cache.insert(
+                            name.clone(),
+                            CachedHash {
+                                size,
+                                modified,
+                                hash: hash.clone(),
+                            },
+                        );
+                        cache_changed = true;
+                        hash
+                    }
+                };
+                Some(ModelInfo {
                     role: classify(&name),
-                    size_bytes: entry.metadata().map(|m| m.len()).unwrap_or(0),
+                    size_bytes: size,
                     path: entry.path().display().to_string(),
                     name,
-                }
+                    hash,
+                })
             })
             .collect();
+
+        // Forget files that are gone, so the cache does not grow forever.
+        let present: std::collections::HashSet<&str> = models.iter().map(|m| m.name.as_str()).collect();
+        let before = cache.len();
+        cache.retain(|name, _| present.contains(name.as_str()));
+        if cache_changed || cache.len() != before {
+            self.store_cache(&cache);
+        }
 
         models.sort_by(|a, b| a.name.cmp(&b.name));
         models
@@ -181,11 +300,16 @@ impl ModelRegistry {
     /// otherwise the largest candidate — larger SCRFD and ArcFace variants are
     /// consistently the more accurate ones.
     pub fn resolve(&self, role: ModelRole, preferred: Option<&str>) -> Option<PathBuf> {
+        self.resolve_info(role, preferred).map(|m| PathBuf::from(m.path))
+    }
+
+    /// As [`resolve`](Self::resolve), with the model's identity attached.
+    pub fn resolve_info(&self, role: ModelRole, preferred: Option<&str>) -> Option<ModelInfo> {
         let available = self.list();
 
         if let Some(name) = preferred.map(|n| n.trim()).filter(|n| !n.is_empty()) {
             if let Some(found) = available.iter().find(|m| m.name.eq_ignore_ascii_case(name)) {
-                return Some(PathBuf::from(&found.path));
+                return Some(found.clone());
             }
             // A model named in settings that has since been deleted should not
             // silently fall back to a different one without a trace.
@@ -196,16 +320,21 @@ impl ModelRegistry {
         }
 
         available
-            .iter()
+            .into_iter()
             .filter(|m| m.role == role)
             .max_by_key(|m| m.size_bytes)
-            .map(|m| PathBuf::from(&m.path))
+    }
+
+    /// Finds a model by content hash — how a worker asks the server for the
+    /// exact file the library was embedded with.
+    pub fn find_by_hash(&self, hash: &str) -> Option<ModelInfo> {
+        self.list().into_iter().find(|m| m.hash.eq_ignore_ascii_case(hash))
     }
 
     pub fn status(&self, preferred_detector: Option<&str>, preferred_embedder: Option<&str>) -> ModelStatus {
         let available = self.list();
-        let detector = self.resolve(ModelRole::Detector, preferred_detector);
-        let embedder = self.resolve(ModelRole::Embedder, preferred_embedder);
+        let detector = self.resolve_info(ModelRole::Detector, preferred_detector);
+        let embedder = self.resolve_info(ModelRole::Embedder, preferred_embedder);
         let ready = detector.is_some() && embedder.is_some();
 
         let message = if ready {
@@ -227,8 +356,10 @@ impl ModelRegistry {
         ModelStatus {
             models_directory: self.directory.display().to_string(),
             available,
-            detector: detector.map(|p| p.display().to_string()),
-            embedder: embedder.map(|p| p.display().to_string()),
+            detector: detector.as_ref().map(|m| m.path.clone()),
+            embedder: embedder.as_ref().map(|m| m.path.clone()),
+            detector_hash: detector.map(|m| m.hash),
+            embedder_hash: embedder.map(|m| m.hash),
             ready,
             message,
         }
@@ -319,6 +450,8 @@ mod tests {
         let (_dir, registry) = registry_with(&[("det_10g.onnx", 500), ("w600k_r50.onnx", 900)]);
         let status = registry.status(None, None);
         assert!(status.ready);
+        assert!(status.detector_hash.is_some());
+        assert_ne!(status.detector_hash, status.embedder_hash);
     }
 
     #[test]
@@ -326,6 +459,35 @@ mod tests {
         let registry = ModelRegistry::new("Z:\\definitely-not-here");
         assert!(registry.list().is_empty());
         assert!(!registry.status(None, None).ready);
+    }
+
+    /// Identity is the content, not the name: the same bytes under two names
+    /// are one model, and a file that changes gets a new hash even though its
+    /// name did not.
+    #[test]
+    fn models_are_identified_by_content_and_the_hash_is_cached() {
+        let (dir, registry) = registry_with(&[("w600k_r50.onnx", 64), ("copy_of_w600k_r50.onnx", 64)]);
+        let listed = registry.list();
+        assert_eq!(listed[0].hash, listed[1].hash, "same bytes, same identity");
+        assert_eq!(listed[0].hash.len(), 64, "blake3 hex");
+        assert!(registry.find_by_hash(&listed[0].hash).is_some());
+
+        let cache = registry.load_cache();
+        assert_eq!(cache.len(), 2, "both hashes cached on first listing");
+
+        // A rewritten file with different contents and a bumped mtime is a
+        // different model.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        std::fs::write(dir.path().join("w600k_r50.onnx"), vec![1u8; 64]).unwrap();
+        let relisted = registry.list();
+        let changed = relisted.iter().find(|m| m.name == "w600k_r50.onnx").unwrap();
+        let unchanged = relisted.iter().find(|m| m.name == "copy_of_w600k_r50.onnx").unwrap();
+        assert_ne!(changed.hash, unchanged.hash);
+        assert_eq!(unchanged.hash, listed[1].hash);
+
+        std::fs::remove_file(dir.path().join("copy_of_w600k_r50.onnx")).unwrap();
+        registry.list();
+        assert_eq!(registry.load_cache().len(), 1, "a removed model leaves the cache");
     }
 
     /// A minimal scratch directory that cleans itself up, so the crate does not

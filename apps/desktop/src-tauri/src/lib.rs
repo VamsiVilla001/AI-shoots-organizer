@@ -170,6 +170,8 @@ pub fn run() {
             commands::get_settings,
             commands::update_settings,
             commands::model_status,
+            commands::embedding_cohorts,
+            commands::reembed_stale_faces,
             commands::list_projects,
             commands::save_project,
             commands::delete_project,

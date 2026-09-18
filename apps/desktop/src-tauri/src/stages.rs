@@ -218,10 +218,41 @@ pub struct RecogniseReport {
     pub faces_auto_confirmed: usize,
 }
 
+/// Vectors split by the embedder that produced them. Two cohorts live in two
+/// different vector spaces, so every comparison — matching or clustering —
+/// happens inside one cohort and never across.
+type Cohorts = std::collections::BTreeMap<Option<String>, Vec<skwad_database::repo::faces::FaceVector>>;
+
+fn by_cohort(vectors: Vec<skwad_database::repo::faces::FaceVector>) -> Cohorts {
+    let mut cohorts = Cohorts::new();
+    for vector in vectors {
+        cohorts.entry(vector.model_key.clone()).or_default().push(vector);
+    }
+    cohorts
+}
+
+/// Groups vectors by the exact frame they came from, so each sampled
+/// timestamp of a video is resolved independently. Grouping only by media id
+/// treated an entire video as one group photo and prevented the same player
+/// from matching at more than one sampled timestamp.
+fn by_frame(
+    vectors: Vec<skwad_database::repo::faces::FaceVector>,
+) -> std::collections::BTreeMap<(i64, Option<u64>), Vec<skwad_database::repo::faces::FaceVector>> {
+    let mut frames = std::collections::BTreeMap::new();
+    for vector in vectors {
+        frames
+            .entry((vector.media_id, vector.frame_time.map(f64::to_bits)))
+            .or_insert_with(Vec::new)
+            .push(vector);
+    }
+    frames
+}
+
 /// Compares every unidentified face against the player library (§6).
 ///
 /// Matching happens per image rather than per face so the "one player cannot
-/// appear twice in the same frame" rule can be applied.
+/// appear twice in the same frame" rule can be applied, and per embedder
+/// cohort so vectors from two different models are never compared.
 pub fn recognise_shoot(db: &Database, shoot_id: i64, settings: &AppSettings) -> Result<RecogniseReport> {
     let (library, unassigned) = {
         let mut conn = db.conn()?;
@@ -232,60 +263,65 @@ pub fn recognise_shoot(db: &Database, shoot_id: i64, settings: &AppSettings) -> 
         )
     };
 
-    let matcher = FaceMatcher::build(
-        library
-            .into_iter()
-            .filter_map(|v| v.person_id.map(|person_id| (person_id, v.embedding))),
-    );
-
     let mut report = RecogniseReport {
-        library_players: matcher.player_count(),
-        library_samples: matcher.total_samples(),
         faces_examined: unassigned.len(),
         ..Default::default()
     };
 
-    if matcher.is_empty() || unassigned.is_empty() {
-        // Nothing to match against yet — everything falls through to clustering,
-        // which is exactly the intended behaviour for a first-ever shoot.
-        return Ok(report);
-    }
-
-    // Group by actual frame so each timestamp in a video is resolved
-    // independently. Grouping only by media id incorrectly treated an entire
-    // video as one group photo and prevented the same player from matching at
-    // more than one sampled timestamp.
-    let mut by_frame: std::collections::BTreeMap<(i64, Option<u64>), Vec<skwad_database::repo::faces::FaceVector>> =
-        std::collections::BTreeMap::new();
-    for vector in unassigned {
-        by_frame
-            .entry((vector.media_id, vector.frame_time.map(f64::to_bits)))
-            .or_default()
-            .push(vector);
-    }
-
+    let mut library = by_cohort(library);
     let config = settings.matcher_config();
     let auto_confirm = settings.auto_confirm_above;
 
-    db.transaction(|conn| {
-        for (_, group) in by_frame {
-            let embeddings: Vec<Vec<f32>> = group.iter().map(|v| v.embedding.clone()).collect();
-            for (vector, matched) in group.iter().zip(matcher.match_frame(&embeddings, &config)) {
-                let Some(matched) = matched else { continue };
-                report.faces_matched += 1;
+    for (cohort, unassigned) in by_cohort(unassigned) {
+        let matcher = FaceMatcher::build(
+            library
+                .remove(&cohort)
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|v| v.person_id.map(|person_id| (person_id, v.embedding))),
+        );
+        report.library_players += matcher.player_count();
+        report.library_samples += matcher.total_samples();
+        if matcher.is_empty() {
+            // Nothing to match against in this cohort — everything falls
+            // through to clustering, which is exactly the intended behaviour
+            // for a first-ever shoot (and for a freshly changed model).
+            continue;
+        }
 
-                // Auto-confirmation is off by default: §10 is explicit that AI
-                // results should not be treated as final without review.
-                if auto_confirm < 1.0 && matched.similarity >= auto_confirm {
-                    faces::assign(conn, vector.face_id, matched.person_id, Some(matched.similarity as f64))?;
-                    report.faces_auto_confirmed += 1;
-                } else {
-                    faces::set_suggestion(conn, vector.face_id, matched.person_id, matched.similarity as f64)?;
+        db.transaction(|conn| {
+            for (_, group) in by_frame(unassigned) {
+                let embeddings: Vec<Vec<f32>> = group.iter().map(|v| v.embedding.clone()).collect();
+                for (vector, matched) in group.iter().zip(matcher.match_frame(&embeddings, &config)) {
+                    let Some(matched) = matched else { continue };
+                    report.faces_matched += 1;
+
+                    // Auto-confirmation is off by default: §10 is explicit that AI
+                    // results should not be treated as final without review.
+                    if auto_confirm < 1.0 && matched.similarity >= auto_confirm {
+                        faces::assign(conn, vector.face_id, matched.person_id, Some(matched.similarity as f64))?;
+                        report.faces_auto_confirmed += 1;
+                    } else {
+                        faces::set_suggestion(conn, vector.face_id, matched.person_id, matched.similarity as f64)?;
+                    }
                 }
             }
-        }
-        Ok(())
-    })?;
+            Ok(())
+        })?;
+    }
+    // Library players in cohorts with nothing to match still count as known.
+    for remaining in library.into_values() {
+        let matcher = FaceMatcher::build(
+            remaining
+                .into_iter()
+                .filter_map(|v| v.person_id.map(|person_id| (person_id, v.embedding))),
+        );
+        report.library_players += matcher.player_count();
+        report.library_samples += matcher.total_samples();
+    }
+    if report.faces_matched == 0 {
+        return Ok(report);
+    }
 
     // Carry the identifications through to the video timeline.
     {
@@ -349,30 +385,24 @@ pub fn match_person_in_shoot(db: &Database, shoot_id: i64, person_id: i64, setti
         return Ok(0);
     }
 
-    let matcher = FaceMatcher::build(reference.into_iter().map(|v| (person_id, v.embedding)));
-
-    let mut by_frame: std::collections::BTreeMap<(i64, Option<u64>), Vec<skwad_database::repo::faces::FaceVector>> =
-        std::collections::BTreeMap::new();
-    for vector in unassigned {
-        by_frame
-            .entry((vector.media_id, vector.frame_time.map(f64::to_bits)))
-            .or_default()
-            .push(vector);
-    }
-
+    let mut reference = by_cohort(reference);
     let config = settings.matcher_config();
     let mut new_suggestions = 0usize;
-    db.transaction(|conn| {
-        for (_, group) in by_frame {
-            let embeddings: Vec<Vec<f32>> = group.iter().map(|v| v.embedding.clone()).collect();
-            for (vector, matched) in group.iter().zip(matcher.match_frame(&embeddings, &config)) {
-                let Some(matched) = matched else { continue };
-                faces::set_suggestion(conn, vector.face_id, matched.person_id, matched.similarity as f64)?;
-                new_suggestions += 1;
+    for (cohort, unassigned) in by_cohort(unassigned) {
+        let Some(samples) = reference.remove(&cohort) else { continue };
+        let matcher = FaceMatcher::build(samples.into_iter().map(|v| (person_id, v.embedding)));
+        db.transaction(|conn| {
+            for (_, group) in by_frame(unassigned) {
+                let embeddings: Vec<Vec<f32>> = group.iter().map(|v| v.embedding.clone()).collect();
+                for (vector, matched) in group.iter().zip(matcher.match_frame(&embeddings, &config)) {
+                    let Some(matched) = matched else { continue };
+                    faces::set_suggestion(conn, vector.face_id, matched.person_id, matched.similarity as f64)?;
+                    new_suggestions += 1;
+                }
             }
-        }
-        Ok(())
-    })?;
+            Ok(())
+        })?;
+    }
 
     Ok(new_suggestions)
 }
@@ -400,33 +430,38 @@ pub fn cluster_shoot(db: &Database, shoot_id: i64, settings: &AppSettings) -> Re
         return Ok(ClusterReport::default());
     }
 
-    let embeddings: Vec<Vec<f32>> = vectors.iter().map(|v| v.embedding.clone()).collect();
-    let result = cluster_faces(&embeddings, &settings.cluster_config());
+    // One clustering pass per embedder cohort: two models' vectors are not
+    // comparable, so a face embedded under an older model can only ever group
+    // with other faces from that model. Cluster numbering runs on across
+    // cohorts so labels stay unique within the shoot.
+    let mut report = ClusterReport::default();
+    let mut next_label = 1usize;
+    for (_, vectors) in by_cohort(vectors) {
+        let embeddings: Vec<Vec<f32>> = vectors.iter().map(|v| v.embedding.clone()).collect();
+        let result = cluster_faces(&embeddings, &settings.cluster_config());
+        report.faces_left_alone += result.unclustered.len();
+        report.clusters_created += result.cluster_count();
 
-    let mut report = ClusterReport {
-        faces_left_alone: result.unclustered.len(),
-        clusters_created: result.cluster_count(),
-        ..Default::default()
-    };
-
-    db.transaction(|conn| {
-        for (index, cluster) in result.clusters.iter().enumerate() {
-            let cluster_id = clusters::create(conn, shoot_id, &format!("Unknown Person {}", index + 1))?;
-            for member in &cluster.members {
-                if let Some(vector) = vectors.get(*member) {
-                    faces::set_cluster(conn, vector.face_id, Some(cluster_id))?;
-                    report.faces_clustered += 1;
+        db.transaction(|conn| {
+            for cluster in &result.clusters {
+                let cluster_id = clusters::create(conn, shoot_id, &format!("Unknown Person {next_label}"))?;
+                next_label += 1;
+                for member in &cluster.members {
+                    if let Some(vector) = vectors.get(*member) {
+                        faces::set_cluster(conn, vector.face_id, Some(cluster_id))?;
+                        report.faces_clustered += 1;
+                    }
                 }
             }
-        }
-        // Faces too isolated to group keep no stale cluster from a previous run.
-        for index in &result.unclustered {
-            if let Some(vector) = vectors.get(*index) {
-                faces::set_cluster(conn, vector.face_id, None)?;
+            // Faces too isolated to group keep no stale cluster from a previous run.
+            for index in &result.unclustered {
+                if let Some(vector) = vectors.get(*index) {
+                    faces::set_cluster(conn, vector.face_id, None)?;
+                }
             }
-        }
-        Ok(())
-    })?;
+            Ok(())
+        })?;
+    }
 
     {
         let mut conn = db.conn()?;
@@ -486,6 +521,56 @@ pub fn reset_analysis(db: &Database, shoot_id: i64) -> Result<()> {
     Ok(())
 }
 
+/// What [`queue_reembed`] scheduled.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReembedQueued {
+    pub media: usize,
+    pub shoots: Vec<i64>,
+}
+
+/// Requeues analysis for every file whose embeddings came from an embedder
+/// other than `current_key`, plus the finishing stages of each affected
+/// shoot. Re-analysis replaces a file's detected faces, so the stale vectors
+/// are gone once the job runs; reviewer-drawn faces are kept but their
+/// vectors stay in the old cohort until redrawn.
+pub fn queue_reembed(db: &Database, current_key: &str, shoot_id: Option<i64>) -> Result<ReembedQueued> {
+    let stale = {
+        let mut conn = db.conn()?;
+        faces::media_with_stale_embeddings(&mut conn, current_key, shoot_id)?
+    };
+    let mut queued = ReembedQueued::default();
+    for batch in stale.chunks(SCAN_DB_BATCH_SIZE) {
+        let added = db.transaction(|conn| {
+            let mut added = 0usize;
+            for (shoot_id, media_id) in batch {
+                let Some(item) = media_repo::get_by_id(conn, *media_id)? else { continue };
+                let (kind, job_priority) = if item.media_type == MediaType::Video.as_str() {
+                    (JobKind::AnalyseVideo, priority::ANALYSE_VIDEO)
+                } else {
+                    (JobKind::AnalysePhoto, priority::ANALYSE_PHOTO)
+                };
+                if jobs::enqueue_unique(conn, *shoot_id, kind, Some(*media_id), job_priority)?.is_some() {
+                    added += 1;
+                }
+            }
+            Ok(added)
+        })?;
+        queued.media += added;
+    }
+    let mut shoots: Vec<i64> = stale.iter().map(|(shoot, _)| *shoot).collect();
+    shoots.dedup();
+    {
+        let mut conn = db.conn()?;
+        for shoot in &shoots {
+            queue_finishing_stages(&mut conn, *shoot)?;
+            shoots::set_status(&mut conn, *shoot, ShootStatus::Processing)?;
+        }
+    }
+    queued.shoots = shoots;
+    Ok(queued)
+}
+
 /// Queues analysis for anything in the shoot that is not finished.
 pub fn queue_pending_work(db: &Database, shoot_id: i64) -> Result<usize> {
     let pending = {
@@ -537,6 +622,16 @@ mod tests {
     }
 
     fn add_face(db: &Database, shoot_id: i64, filename: &str, embedding: Vec<f32>) -> (i64, i64) {
+        add_face_in_cohort(db, shoot_id, filename, embedding, None)
+    }
+
+    fn add_face_in_cohort(
+        db: &Database,
+        shoot_id: i64,
+        filename: &str,
+        embedding: Vec<f32>,
+        model_key: Option<&str>,
+    ) -> (i64, i64) {
         let mut conn = db.conn().unwrap();
         let media_id = media_repo::upsert(
             &mut conn,
@@ -570,7 +665,7 @@ mod tests {
                 quality: Some(0.7),
                 frame_time: None,
                 crop_path: None,
-                model_key: None,
+                model_key: model_key.map(String::from),
             },
         )
         .unwrap();
@@ -763,6 +858,63 @@ mod tests {
         assert_eq!(face.person_id, None);
     }
 
+    /// Two embedders' vectors live in different spaces. Identical numbers from
+    /// different cohorts must neither match nor cluster together, however
+    /// similar they look.
+    #[test]
+    fn vectors_from_different_embedders_are_never_compared() {
+        let db = Database::open_test().unwrap();
+        let shoot_id = seed_shoot(&db);
+
+        let (_, known) = add_face_in_cohort(&db, shoot_id, "known.jpg", unit(vec![1.0, 0.0, 0.0]), Some("model-a"));
+        {
+            let mut conn = db.conn().unwrap();
+            let person = people::get_or_create(&mut conn, "Jonathan", None).unwrap();
+            faces::assign(&mut conn, known, person.id, Some(1.0)).unwrap();
+        }
+        let (_, same_cohort) =
+            add_face_in_cohort(&db, shoot_id, "a.jpg", unit(vec![0.99, 0.05, 0.0]), Some("model-a"));
+        let (_, other_cohort) =
+            add_face_in_cohort(&db, shoot_id, "b.jpg", unit(vec![0.99, 0.05, 0.0]), Some("model-b"));
+        let (_, legacy) = add_face(&db, shoot_id, "c.jpg", unit(vec![0.99, 0.05, 0.0]));
+
+        let report = recognise_shoot(&db, shoot_id, &AppSettings::default()).unwrap();
+        assert_eq!(report.faces_matched, 1, "only the same-cohort face can match");
+        let mut conn = db.conn().unwrap();
+        assert_eq!(faces::get_by_id(&mut conn, same_cohort).unwrap().unwrap().assignment, "suggested");
+        assert_eq!(faces::get_by_id(&mut conn, other_cohort).unwrap().unwrap().assignment, "unassigned");
+        assert_eq!(faces::get_by_id(&mut conn, legacy).unwrap().unwrap().assignment, "unassigned");
+        drop(conn);
+
+        // Clustering: five near-identical vectors in each of two cohorts make
+        // two clusters, never one.
+        let shoot_b = seed_shoot(&db);
+        for i in 0..5 {
+            add_face_in_cohort(&db, shoot_b, &format!("a{i}.jpg"), unit(vec![1.0, 0.02 * i as f32, 0.0]), Some("model-a"));
+            add_face_in_cohort(&db, shoot_b, &format!("b{i}.jpg"), unit(vec![1.0, 0.02 * i as f32, 0.0]), Some("model-b"));
+        }
+        let report = cluster_shoot(&db, shoot_b, &AppSettings::default()).unwrap();
+        assert_eq!(report.clusters_created, 2);
+        assert_eq!(report.faces_clustered, 10);
+        let mut conn = db.conn().unwrap();
+        let labels: Vec<String> = clusters::list_summaries(&mut conn, shoot_b, false)
+            .unwrap()
+            .into_iter()
+            .map(|s| s.cluster.label)
+            .collect();
+        assert_eq!(labels, vec!["Unknown Person 1", "Unknown Person 2"]);
+
+        // The stale-cohort report and the re-embed queue see exactly the
+        // faces that are not in the current cohort.
+        let stale = faces::stale_embeddings(&mut conn, "model-a", None).unwrap();
+        assert_eq!(stale.faces, 1 + 1 + 5, "model-b faces plus the legacy NULL one");
+        assert_eq!(stale.media, 7);
+        drop(conn);
+        let queued = queue_reembed(&db, "model-a", None).unwrap();
+        assert_eq!(queued.media, 7);
+        assert_eq!(queued.shoots, vec![shoot_id, shoot_b]);
+    }
+
     #[test]
     fn reference_selection_keeps_the_best_and_caps_good_extras() {
         let samples = (0..12)
@@ -773,6 +925,7 @@ mod tests {
                 person_id: Some(7),
                 embedding: vec![1.0, 0.0],
                 quality: if face_id == 11 { 0.95 } else { 0.7 },
+                model_key: None,
             })
             .chain(std::iter::once(skwad_database::repo::faces::FaceVector {
                 face_id: 99,
@@ -781,6 +934,7 @@ mod tests {
                 person_id: Some(8),
                 embedding: vec![0.0, 1.0],
                 quality: 0.2,
+                model_key: None,
             }))
             .collect();
 
