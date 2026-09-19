@@ -127,6 +127,16 @@ jobs:
         shell: bash
         run: npm ci || npm install --no-audit --no-fund
 
+      # The RAW decoder crate has no macOS libraries; build LibRaw here and
+      # hand its location to the build (see the script for the why).
+      - name: Build LibRaw for macOS
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          arch="${{ matrix.target }}"
+          arch="${arch%%-*}"            # x86_64-apple-darwin -> x86_64; empty -> host
+          bash scripts/ci/macos-libraw.sh "${arch:-$(uname -m)}" >> "$GITHUB_ENV"
+
       # The two ONNX files are ~191 MB and take the installer from ~11 MB to
       # ~190 MB. Without them the app indexes, sorts and exports; only face
       # recognition needs them, and Settings says so.
