@@ -1,6 +1,6 @@
 import { useEffect, useState, type MouseEvent, type ReactNode } from 'react'
 import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
-import type { Group, Media } from '@skwad/shared-types'
+import type { Group, Media, SmartNode } from '@skwad/shared-types'
 import * as api from '../api'
 import { thumbUrl } from '../media'
 import { useUi } from '../store'
@@ -10,6 +10,8 @@ import { WorkspaceDialog } from './WorkspaceDialog'
 import { RosterImport } from '../components/RosterImport'
 import { MediaBrowser } from './mediaBrowser'
 import { TagFilter, TagNamesDatalist, TagPicker } from '../components/TagPicker'
+import { SmartCollections } from './smartCollections'
+import { AddToExistingCollection, PublishCollection } from './publishCollection'
 import {
   createProjectDraft,
   PROJECT_TYPES,
@@ -19,7 +21,7 @@ import {
   type ProjectVisibility,
 } from './model'
 
-type ProjectView = 'personal' | 'shared' | 'organisation' | 'archived'
+type ProjectView = 'personal' | 'shared' | 'organisation' | 'archived' | 'smart'
 
 export function Collections({ projects, save, replaceMembers, loading, saving, projectId, setProjectId, onProcess }: {
   projects: Project[]
@@ -43,6 +45,9 @@ export function Collections({ projects, save, replaceMembers, loading, saving, p
   const [projectMenu, setProjectMenu] = useState<{ projectId: string; x: number; y: number } | null>(null)
   const [collectionId, setCollectionId] = useState<string | null>(null)
   const [exporting, setExporting] = useState<ProjectCollection | null>(null)
+  // A smart collection being saved into a project, or added to one.
+  const [smartSave, setSmartSave] = useState<Media[] | null>(null)
+  const [smartAdd, setSmartAdd] = useState<Media[] | null>(null)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const clipboard = useUi(state => state.clipboard)
   const setClipboard = useUi(state => state.setClipboard)
@@ -200,17 +205,18 @@ export function Collections({ projects, save, replaceMembers, loading, saving, p
 
     {!project && <>
       <div className="pw-tabs pw-project-tabs" role="tablist" aria-label="Project views">
-        {([['organisation', 'Organisation'], ['shared', 'Shared'], ['personal', 'Personal'], ['archived', 'Archived']] as const).map(([id, label]) => <button key={id} role="tab" aria-selected={view === id} onClick={() => { setView(id); setSearch('') }}>{label}<span>{projects.filter(projectItem => inView(projectItem, id)).length}</span></button>)}
+        {([['organisation', 'Organisation'], ['shared', 'Shared'], ['personal', 'Personal'], ['smart', 'Smart'], ['archived', 'Archived']] as const).map(([id, label]) => <button key={id} role="tab" aria-selected={view === id} onClick={() => { setView(id); setSearch('') }}>{label}<span>{projects.filter(projectItem => inView(projectItem, id)).length}</span></button>)}
       </div>
-      <div className="pw-toolbar"><label className="pw-search"><span className="sr-only">Search projects</span><input type="search" placeholder="Search projects…" value={search} onChange={event => setSearch(event.target.value)} /></label><span>{viewProjects.length} project{viewProjects.length === 1 ? '' : 's'}</span></div>
-      {loading && <p className="pw-loading" role="status">Loading projects…</p>}
-      {!loading && <div className="pw-card-grid">{visibleProjects.map(item => {
+      {view !== 'smart' && <div className="pw-toolbar"><label className="pw-search"><span className="sr-only">Search projects</span><input type="search" placeholder="Search projects…" value={search} onChange={event => setSearch(event.target.value)} /></label><span>{viewProjects.length} project{viewProjects.length === 1 ? '' : 's'}</span></div>}
+      {view === 'smart' && <SmartCollections onCollect={setSmartSave} onAddToExisting={setSmartAdd} />}
+      {view !== 'smart' && loading && <p className="pw-loading" role="status">Loading projects…</p>}
+      {view !== 'smart' && !loading && <div className="pw-card-grid">{visibleProjects.map(item => {
         const linked = item.collections.flatMap(resolve)
         const roots = childrenOf(item, null)
         return <CollectionCard key={item.id} name={item.name} label={item.kind} mediaId={item.coverMediaId ?? linked.find(group => group.coverMediaId !== null)?.coverMediaId} meta={`${item.mediaCount || linked.reduce((sum, group) => sum + group.mediaCount, 0)} media · ${roots.length} main collection${roots.length === 1 ? '' : 's'}`} detail={`${accessLabel(item)} · ${formatUpdated(item.updatedAt)}`} selected={selectedIds.has(item.id)} onSelect={additive => selectCard(item.id, additive)} onOpen={() => openProject(item.id)} onActions={event => openProjectMenu(item, event)} onContextMenu={event => openProjectMenu(item, event)} />
       })}</div>}
-      {!loading && viewProjects.length === 0 && <ProjectEmpty view={view} onCreate={() => setCreatingProject(true)} />}
-      {viewProjects.length > 0 && visibleProjects.length === 0 && <NoMatches noun="projects" onClear={() => setSearch('')} />}
+      {view !== 'smart' && !loading && viewProjects.length === 0 && <ProjectEmpty view={view} onCreate={() => setCreatingProject(true)} />}
+      {view !== 'smart' && viewProjects.length > 0 && visibleProjects.length === 0 && <NoMatches noun="projects" onClear={() => setSearch('')} />}
       <div className="pw-library-callout"><div><strong>Your media is always available</strong><p>Find a person, revisit processed files, or make another collection in Media Processing.</p></div><button onClick={onProcess}>Open media library</button></div>
     </>}
 
@@ -231,6 +237,8 @@ export function Collections({ projects, save, replaceMembers, loading, saving, p
       {collection && collection.sources.length === 0 && currentChildren.length === 0 && <div className="pw-empty"><h2>This collection is empty</h2><p>Create a collection here, add an existing collection from your processed media, or fill it from a tag.</p>{canEdit && <div className="actions"><button onClick={() => setLinking(true)}>Add existing</button><button className="primary" onClick={() => setCreatingCollection(true)}>New collection</button></div>}{canEdit && project && <AddByTag onAdd={(media) => addMediaToCollection(media, project, collection, projects, act, client)} />}</div>}
     </>}
 
+    {smartSave && <PublishCollection media={smartSave} projects={projects} save={act} onClose={() => setSmartSave(null)} onPublished={id => { setSmartSave(null); openProject(id); notice({ level: 'success', message: 'Smart collection saved to the project.' }) }} />}
+    {smartAdd && <AddToExistingCollection media={smartAdd} projects={projects} save={act} onClose={() => setSmartAdd(null)} onAdded={(_projectId, _collectionId, added) => { setSmartAdd(null); notice({ level: 'success', message: added > 0 ? `Added ${added} file${added === 1 ? '' : 's'} to the collection.` : 'Those files were already in that collection.' }) }} />}
     {exporting && <ExportCollectionDialog collection={exporting} onClose={() => setExporting(null)} />}
 
     {folderMenu && project && menuCollection && <FolderContextMenu x={folderMenu.x} y={folderMenu.y} name={menuCollection.name} pasteLabel={pasteLabel} onClose={() => setFolderMenu(null)} onOpen={() => openCollection(menuCollection.id)} onCut={() => setClipboardCollection(menuCollection, 'cut')} onCopy={() => setClipboardCollection(menuCollection, 'copy')} onPaste={() => void paste(menuCollection)} onEdit={() => setEditingCollection(menuCollection)} onCreate={() => { openCollection(menuCollection.id); setCreatingCollection(true) }} onAddExisting={() => { openCollection(menuCollection.id); setLinking(true) }} onSendToPremiere={() => {
@@ -303,7 +311,7 @@ function CollectionMedia({ collection, onExport, addByTag }: { collection: Proje
   // The source picker only chooses what to *browse*; exporting always takes
   // the whole collection, which is what "export this collection" means to
   // someone handing the folder on.
-  return <><div className="pw-toolbar">{collection.sources.length > 1 && <label>Media source <select value={index} onChange={event => setIndex(Number(event.target.value))}>{collection.sources.map((item, sourceIndex) => <option key={`${item.shootId}-${item.groupId}`} value={sourceIndex}>{shoots.data?.find(shoot => shoot.id === item.shootId)?.name ?? `Source ${sourceIndex + 1}`}</option>)}</select></label>}<button className="primary" onClick={onExport}>Export collection</button></div><div className="card collection-tags">{addByTag && <AddByTag onAdd={addByTag} />}<TagNamesDatalist /><TagPicker kind="collection" assetKey={collection.id} compact label="Collection tags" /></div><MediaBrowser key={`${source.shootId}-${source.groupId}`} shootId={source.shootId} groupId={source.groupId} /></>
+  return <><div className="pw-toolbar">{collection.sources.length > 1 && <label>Media source <select value={index} onChange={event => setIndex(Number(event.target.value))}>{collection.sources.map((item, sourceIndex) => <option key={`${item.shootId}-${item.groupId}`} value={sourceIndex}>{shoots.data?.find(shoot => shoot.id === item.shootId)?.name ?? `Source ${sourceIndex + 1}`}</option>)}</select></label>}<button className="primary" onClick={onExport}>Export collection</button></div><div className="card collection-tags">{addByTag && <AddByTag onAdd={addByTag} />}<TagNamesDatalist /><TagPicker kind="collection" assetKey={collection.id} compact label="Collection tags" /><TagsInCollection groupId={source.groupId} /></div><MediaBrowser key={`${source.shootId}-${source.groupId}`} shootId={source.shootId} groupId={source.groupId} /></>
 }
 
 function ProjectDialog({ project, canManageAccess = true, onClose, onSave, onDelete }: { project?: Project; canManageAccess?: boolean; onClose: () => void; onSave: (name: string, kind: string, visibility: ProjectVisibility) => void; onDelete?: () => void }) {
@@ -418,4 +426,17 @@ function AddByTag({ onAdd }: { onAdd: (media: Media[]) => Promise<number> }) {
   })
   if (!open) return <button onClick={() => setOpen(true)}>Add media by tag…</button>
   return <div className="pw-toolbar pw-add-by-tag"><TagFilter tag={filter.tag} value={filter.value} onChange={setFilter} compact />{filter.value && <span className="hint">{matching.isPending ? 'Counting…' : `${matching.data?.length ?? 0} file${(matching.data?.length ?? 0) === 1 ? '' : 's'} carry it`}</span>}<button className="primary" disabled={!filter.value || add.isPending || (matching.data?.length ?? 0) === 0} onClick={() => add.mutate()}>{add.isPending ? 'Adding…' : 'Add them'}</button><button onClick={() => setOpen(false)}>Cancel</button></div>
+}
+
+/**
+ * The tags found on a collection's files, with counts — the taxonomy as it
+ * applies to what is actually in here, whether it arrived through a tagged
+ * group on Auto tags or a tag put on files directly.
+ */
+function TagsInCollection({ groupId }: { groupId: number }) {
+  const tags = useQuery({ queryKey: ['tagsInGroup', groupId], queryFn: () => api.tagsInGroup(groupId) })
+  const byTag = new Map<string, SmartNode[]>()
+  for (const node of tags.data ?? []) byTag.set(node.tag, [...(byTag.get(node.tag) ?? []), node])
+  if (tags.isPending || byTag.size === 0) return null
+  return <div className="tags-in-collection"><span className="tag-picker-label">Tags on these files</span><div className="tag-chips">{[...byTag.entries()].map(([tag, nodes]) => <span key={tag} className="tag-group"><span className="tag-group-name">{tag}</span>{nodes.map(node => <span key={node.value} className="tag-chip" title={`${node.mediaCount} file${node.mediaCount === 1 ? '' : 's'}`}>{node.value}<small>{node.mediaCount}</small></span>)}</span>)}</div></div>
 }

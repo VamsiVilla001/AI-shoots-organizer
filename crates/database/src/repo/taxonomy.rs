@@ -521,6 +521,111 @@ pub fn propagate_group_tags(conn: &mut dyn Db, shoot_id: Option<i64>) -> Result<
 }
 
 
+// --- smart collections: the taxonomy as a tree of media --------------------------
+
+/// One tag = value pair, as a filter. `name` may be `None` to match the
+/// value under any tag.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TagFilter {
+    pub name: Option<String>,
+    pub value: String,
+}
+
+/// One node of the smart tree: a tag value and how many files carry it
+/// within the current selection.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SmartNode {
+    pub tag: String,
+    pub value: String,
+    pub media_count: i64,
+}
+
+/// `AND`-ed `EXISTS` clauses restricting media row alias `m` (with `m.id`)
+/// to files carrying every filter. Parameters are appended to `args` in
+/// order; `next` is the number of the first parameter to use.
+pub fn media_filters_sql(filters: &[TagFilter], next: usize) -> (String, Vec<String>) {
+    let mut clauses = Vec::new();
+    let mut params = Vec::new();
+    for (index, filter) in filters.iter().enumerate() {
+        let tag_param = next + index * 2;
+        let value_param = tag_param + 1;
+        clauses.push(media_filter_sql(tag_param, value_param));
+        params.push(filter.name.as_deref().map(clean).unwrap_or_default());
+        params.push(clean(&filter.value));
+    }
+    (clauses.join(" AND "), params)
+}
+
+/// The tag values present on files matching `filters`, with counts —
+/// restricted to one tag when `group_by` names it. Pairs already in
+/// `filters` are left out, since every file has them.
+pub fn smart_nodes(conn: &mut dyn Db, filters: &[TagFilter], group_by: Option<&str>) -> Result<Vec<SmartNode>> {
+    let group_by = group_by.map(clean).unwrap_or_default();
+    // $1 is the grouping tag; the filter parameters follow.
+    let (where_filters, params) = media_filters_sql(filters, 2);
+    let filter_clause = if where_filters.is_empty() { String::new() } else { format!(" AND {where_filters}") };
+    let sql = format!(
+        "SELECT t.name, v.value, COUNT(DISTINCT m.id) AS media_count
+           FROM media m
+           JOIN asset_tags a ON a.asset_kind = 'media' AND a.asset_key = m.id::text
+           JOIN tag_values v ON v.id = a.tag_value_id
+           JOIN tags t ON t.id = v.tag_id
+          WHERE ($1 = '' OR t.name = $1){filter_clause}
+          GROUP BY t.name, v.value
+          ORDER BY t.name, media_count DESC, v.value"
+    );
+    let mut args: Vec<Box<dyn postgres::types::ToSql + Sync>> = vec![Box::new(group_by)];
+    for param in params {
+        args.push(Box::new(param));
+    }
+    let refs: Vec<&(dyn postgres::types::ToSql + Sync)> = args.iter().map(|a| a.as_ref()).collect();
+    let rows = conn.rows(&sql, &refs)?;
+    let mut out = Vec::new();
+    for row in &rows {
+        let node = SmartNode {
+            tag: get(row, "name")?,
+            value: get(row, "value")?,
+            media_count: get(row, "media_count")?,
+        };
+        let already = filters.iter().any(|f| {
+            f.value.eq_ignore_ascii_case(&node.value)
+                && f.name.as_deref().map_or(true, |n| n.eq_ignore_ascii_case(&node.tag))
+        });
+        if !already {
+            out.push(node);
+        }
+    }
+    Ok(out)
+}
+
+/// Tag values on the files of one manual group, with counts — what a
+/// collection page shows as "tags in this collection".
+pub fn tags_in_group(conn: &mut dyn Db, group_id: i64) -> Result<Vec<SmartNode>> {
+    conn.rows(
+        "SELECT t.name, v.value, COUNT(DISTINCT i.media_id) AS media_count
+           FROM media_group_items i
+           JOIN asset_tags a ON a.asset_kind = 'media' AND a.asset_key = i.media_id::text
+           JOIN tag_values v ON v.id = a.tag_value_id
+           JOIN tags t ON t.id = v.tag_id
+          WHERE i.group_id = $1
+          GROUP BY t.name, v.value
+          ORDER BY t.name, media_count DESC, v.value",
+        params![group_id],
+    )?
+    .iter()
+    .map(|row| {
+        Ok(SmartNode {
+            tag: get(row, "name")?,
+            value: get(row, "value")?,
+            media_count: get(row, "media_count")?,
+        })
+    })
+    .collect()
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -679,5 +784,53 @@ mod tests {
         assert_eq!(media_ids_with_value(&mut conn, Some("Venue"), "Arena").unwrap(), ids[..2].to_vec());
         assert_eq!(media_ids_with_value(&mut conn, None, "Nebula").unwrap(), vec![ids[2]]);
         assert_eq!(propagate_group_tags(&mut conn, None).unwrap(), 0, "idempotent");
+    }
+
+    #[test]
+    fn smart_nodes_count_files_under_each_value_within_the_selection() {
+        let db = Database::open_test().unwrap();
+        let mut conn = db.conn().unwrap();
+        // Three files: two Nebula (one Final, one Semi), one Velocity (Final).
+        assign(&mut conn, "media", "1", "Company", "Nebula").unwrap();
+        assign(&mut conn, "media", "1", "Stage", "Final").unwrap();
+        assign(&mut conn, "media", "2", "Company", "Nebula").unwrap();
+        assign(&mut conn, "media", "2", "Stage", "Semi").unwrap();
+        assign(&mut conn, "media", "3", "Company", "Velocity").unwrap();
+        assign(&mut conn, "media", "3", "Stage", "Final").unwrap();
+        // `media` rows must exist for the join: fake three.
+        for id in 1i64..=3 {
+            conn.exec(
+                "INSERT INTO shoots (id, name, source_path, status, created_at, updated_at) VALUES (100, 'S', 'C:/s', 'completed', 'now', 'now') ON CONFLICT DO NOTHING",
+                params![],
+            )
+            .unwrap();
+            conn.exec(
+                "INSERT INTO media (id, shoot_id, path, filename, media_type, extension, file_size, content_key, indexed_at, processing_status)
+                 VALUES ($1, 100, $2, $2, 'photo', 'jpg', 1, $2, 'now', 'analysed') ON CONFLICT DO NOTHING",
+                params![id, format!("f{id}.jpg")],
+            )
+            .unwrap();
+        }
+        let top = smart_nodes(&mut conn, &[], Some("Company")).unwrap();
+        assert_eq!(top.len(), 2);
+        assert_eq!((top[0].value.as_str(), top[0].media_count), ("Nebula", 2));
+        assert_eq!((top[1].value.as_str(), top[1].media_count), ("Velocity", 1));
+
+        let inside = smart_nodes(&mut conn, &[TagFilter { name: Some("Company".into()), value: "Nebula".into() }], None).unwrap();
+        assert_eq!(
+            inside.iter().map(|n| (n.tag.as_str(), n.value.as_str(), n.media_count)).collect::<Vec<_>>(),
+            vec![("Stage", "Final", 1), ("Stage", "Semi", 1)],
+            "the Company filter itself is not repeated"
+        );
+        let deeper = smart_nodes(
+            &mut conn,
+            &[
+                TagFilter { name: Some("Company".into()), value: "Nebula".into() },
+                TagFilter { name: Some("Stage".into()), value: "Final".into() },
+            ],
+            None,
+        )
+        .unwrap();
+        assert!(deeper.is_empty(), "nothing left to split by: {deeper:?}");
     }
 }

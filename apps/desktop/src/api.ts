@@ -20,6 +20,8 @@ import type {
   TagSummary,
   TaxonomyImportSummary,
   TaxonomyPreview,
+  TagFilterPair,
+  SmartNode,
   Album,
   AppInfo,
   AppSettings,
@@ -448,3 +450,10 @@ export const unassignGroupTag = (kind: 'album' | 'cluster', groupId: number, key
 export const mediaWithTag = (tag: string | null, value: string) => call<Media[]>('media_with_tag', { tag, value })
 /** Writes every group's tags onto the files now in the group (library-wide, or one collection). */
 export const propagateGroupTags = (shootId?: number | null) => call<number>('propagate_group_tags', { shootId: shootId ?? null })
+/** The next level of the smart tree: tag values on files carrying every filter, optionally one tag only. */
+export const smartNodes = (filters: TagFilterPair[], groupBy?: string | null) =>
+  call<SmartNode[]>('smart_nodes', { filters, groupBy: groupBy ?? null })
+/** Every file carrying all the filters, for saving a smart node as a collection. */
+export const mediaWithTags = (filters: TagFilterPair[]) => call<Media[]>('media_with_tags', { filters })
+/** Tag values on the files of one manual group, with counts. */
+export const tagsInGroup = (groupId: number) => call<SmartNode[]>('tags_in_group', { groupId })

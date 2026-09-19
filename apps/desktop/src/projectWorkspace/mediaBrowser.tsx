@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import type { Media } from '@skwad/shared-types'
+import type { Media, TagFilterPair } from '@skwad/shared-types'
 import * as api from '../api'
 import { MediaGrid } from '../components/MediaGrid'
 import { TAG_KEYS, TagFilter, TagPairEditor } from '../components/TagPicker'
@@ -8,7 +8,7 @@ import { useUi } from '../store'
 
 const PAGE_SIZE = 120
 
-export function MediaBrowser({ shootId, excludeShootId, groupId, personId, fixedTag, onCollect, onAddToExisting }: { shootId?: number; excludeShootId?: number; groupId?: number; personId?: number; /** Pins the browser to one tag value; the filter control is hidden. */ fixedTag?: { tag: string | null; value: string }; onCollect?: (media: Media[]) => void; onAddToExisting?: (media: Media[]) => void }) {
+export function MediaBrowser({ shootId, excludeShootId, groupId, personId, fixedTag, fixedTags, onCollect, onAddToExisting }: { shootId?: number; excludeShootId?: number; groupId?: number; personId?: number; /** Pins the browser to one tag value; the filter control is hidden. */ fixedTag?: { tag: string | null; value: string }; /** Pins the browser to files carrying every one of these. */ fixedTags?: TagFilterPair[]; onCollect?: (media: Media[]) => void; onAddToExisting?: (media: Media[]) => void }) {
   const [search, setSearch] = useState('')
   const [query, setQuery] = useState('')
   const [type, setType] = useState('all')
@@ -30,9 +30,9 @@ export function MediaBrowser({ shootId, excludeShootId, groupId, personId, fixed
   const setClipboard = useUi(s => s.setClipboard)
   useEffect(() => { const timer = setTimeout(() => { setQuery(search.trim()); setOffset(0) }, 250); return () => clearTimeout(timer) }, [search])
   const people = useQuery({ queryKey: ['people', shootId ?? null], queryFn: () => api.listPeople(shootId) })
-  const media = useQuery({ queryKey: ['media', shootId ?? null, excludeShootId ?? null, personId ?? null, 'workspace', groupId, query, type, person, offset, quality, rating, pickState, sort, tagFilter], queryFn: () => api.listMedia({
+  const media = useQuery({ queryKey: ['media', shootId ?? null, excludeShootId ?? null, personId ?? null, 'workspace', groupId, query, type, person, offset, quality, rating, pickState, sort, tagFilter, fixedTags], queryFn: () => api.listMedia({
     shootId, excludeShootId, groupId, search: query || null, mediaType: type === 'all' ? null : type as 'photo' | 'video',
-    tagValue: tagFilter.value || null, tagName: tagFilter.value ? tagFilter.tag || null : null,
+    tagValue: tagFilter.value || null, tagName: tagFilter.value ? tagFilter.tag || null : null, tagFilters: fixedTags ?? [],
     personId: personId ?? (person === 'all' || person === 'unknown' ? null : Number(person)), onlyUnidentified: personId === undefined && person === 'unknown',
     onlyBestShots: quality === 'best', onlyDuplicates: quality === 'duplicates', minRating: rating || null, pickState: pickState === 'all' ? null : pickState, sort,
     offset, limit: PAGE_SIZE,
@@ -97,7 +97,7 @@ export function MediaBrowser({ shootId, excludeShootId, groupId, personId, fixed
         <button type="button" role="tab" aria-pressed={type === 'video'} onClick={() => filter(() => setType('video'))}>Videos</button>
       </div>
       {personId === undefined && <label><span className="sr-only">Find a person</span><select value={person} onChange={e => filter(() => setPerson(e.target.value))}><option value="all">Find a person</option><option value="unknown">Unidentified people</option>{people.data?.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></label>}
-      {!fixedTag && <TagFilter tag={tagFilter.tag} value={tagFilter.value} onChange={next => filter(() => setTagFilter(next))} compact />}
+      {!fixedTag && !fixedTags && <TagFilter tag={tagFilter.tag} value={tagFilter.value} onChange={next => filter(() => setTagFilter(next))} compact />}
       <button aria-expanded={advanced} onClick={() => setAdvanced(!advanced)}>More filters</button>
     </div>
     {advanced && <div className="pw-toolbar pw-filter-details"><label>Quality <select value={quality} onChange={e => filter(() => setQuality(e.target.value))}><option value="all">All media</option><option value="best">Best shots</option><option value="duplicates">Duplicates</option></select></label><label>Rating <select value={rating} onChange={e => filter(() => setRating(Number(e.target.value)))}><option value={0}>Any rating</option>{[1, 2, 3, 4, 5].map(n => <option key={n} value={n}>{n}+ stars</option>)}</select></label><label>Flag <select value={pickState} onChange={e => filter(() => setPickState(e.target.value as typeof pickState))}><option value="all">Any flag</option><option value="pick">Picks</option><option value="reject">Rejects</option><option value="none">Unflagged</option></select></label><label>Sort <select value={sort} onChange={e => filter(() => setSort(e.target.value as typeof sort))}><option value="capturedAt">Date captured</option><option value="filename">Filename</option><option value="quality">Quality</option><option value="rating">Rating</option></select></label></div>}

@@ -23,7 +23,7 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
-pub use skwad_database::repo::taxonomy::{AssetTag, TagSuggestion, TagSummary, TaxonomyEntry, TaxonomyImportSummary};
+pub use skwad_database::repo::taxonomy::{AssetTag, SmartNode, TagFilter, TagSuggestion, TagSummary, TaxonomyEntry, TaxonomyImportSummary};
 use skwad_database::repo::taxonomy;
 
 use crate::api::{ApiError, Ctx, Result};
@@ -168,6 +168,53 @@ pub fn media_with_tag(ctx: &Ctx, tag: Option<String>, value: String) -> Result<V
 pub fn propagate_group_tags(ctx: &Ctx, shoot_id: Option<i64>) -> Result<usize> {
     let mut conn = ctx.state.db.conn()?;
     Ok(taxonomy::propagate_group_tags(&mut conn, shoot_id)?)
+}
+
+
+// --- smart collections ------------------------------------------------------------
+
+/// The next level of the smart tree: tag values on the files matching
+/// `filters`, restricted to `group_by` when given. With no filters and a
+/// primary tag, this is the top level — one node per value of that tag.
+pub fn smart_nodes(ctx: &Ctx, filters: Vec<TagFilter>, group_by: Option<String>) -> Result<Vec<SmartNode>> {
+    let mut conn = ctx.state.db.conn()?;
+    Ok(taxonomy::smart_nodes(&mut conn, &filters, group_by.as_deref())?)
+}
+
+/// Every file carrying all of `filters`, for saving a smart node as a
+/// real collection.
+pub fn media_with_tags(ctx: &Ctx, filters: Vec<TagFilter>) -> Result<Vec<skwad_database::models::Media>> {
+    if filters.is_empty() {
+        return Err(bad("choose at least one tag value"));
+    }
+    let mut conn = ctx.state.db.conn()?;
+    let mut out = Vec::new();
+    let page = 500;
+    let mut offset = 0;
+    loop {
+        let rows = skwad_database::repo::media::query(
+            &mut conn,
+            &skwad_database::models::MediaQuery {
+                tag_filters: filters.clone(),
+                limit: Some(page),
+                offset: Some(offset),
+                ..Default::default()
+            },
+        )?;
+        let n = rows.len() as i64;
+        out.extend(rows);
+        if n < page || offset > 100_000 {
+            break;
+        }
+        offset += page;
+    }
+    Ok(out)
+}
+
+/// Tag values on the files of one manual group, with counts.
+pub fn tags_in_group(ctx: &Ctx, group_id: i64) -> Result<Vec<SmartNode>> {
+    let mut conn = ctx.state.db.conn()?;
+    Ok(taxonomy::tags_in_group(&mut conn, group_id)?)
 }
 
 

@@ -170,3 +170,16 @@
 .pw-tag-row > .pw-tag-delete:hover { color: var(--error, #e66); border-color: var(--error, #e66); }
 .pw-tag-row > .pw-tag-delete svg { width: 16px; height: 16px; }
 .pw-tag-row > button:nth-last-child(2) { flex-shrink: 0; margin-right: 8px; }
+
+/* Smart collections: the taxonomy as a tree of media. */
+.pw-smart { display: flex; flex-direction: column; gap: 12px; }
+.pw-smart-path { margin: 0 8px; }
+.pw-smart-actions { display: inline-flex; gap: 8px; margin-left: auto; }
+.pw-smart-sections { display: flex; flex-direction: column; gap: 18px; }
+.pw-smart-section h3 { margin: 0 0 8px; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted-foreground); }
+.pw-smart-card { display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg-raised); }
+.pw-smart-card .pw-card-open { display: flex; flex-direction: column; gap: 4px; }
+.pw-smart-card strong { font-size: 16px; }
+.pw-smart-card small { color: var(--muted-foreground); font-size: 11px; }
+.pw-smart-card > button.small { align-self: flex-start; }
+.tags-in-collection { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }

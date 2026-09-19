@@ -693,6 +693,8 @@ pub struct MediaQuery {
     /// otherwise the value is matched under any tag).
     pub tag_value: Option<String>,
     pub tag_name: Option<String>,
+    /// Several tag values a file must all carry — a smart collection's path.
+    pub tag_filters: Vec<crate::repo::taxonomy::TagFilter>,
     /// capturedAt (default) | quality | rating | filename.
     pub sort: Option<String>,
     pub limit: Option<i64>,

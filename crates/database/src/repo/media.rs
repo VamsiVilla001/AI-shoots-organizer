@@ -540,6 +540,13 @@ pub fn query(conn: &mut dyn Db, q: &MediaQuery) -> Result<Vec<Media>> {
         args.push(Box::new(q.tag_name.as_deref().map(str::trim).unwrap_or_default().to_string()));
         args.push(Box::new(value.to_string()));
     }
+    if !q.tag_filters.is_empty() {
+        let (clause, params) = super::taxonomy::media_filters_sql(&q.tag_filters, args.len() + 1);
+        wheres.push(clause);
+        for param in params {
+            args.push(Box::new(param));
+        }
+    }
 
     if !wheres.is_empty() {
         sql.push_str(" WHERE ");

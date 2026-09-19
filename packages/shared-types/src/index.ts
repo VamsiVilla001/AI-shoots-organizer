@@ -679,6 +679,8 @@ export interface MediaQuery {
   /** Only media carrying this tag value; `tagName` narrows it to one tag. */
   tagValue?: string | null
   tagName?: string | null
+  /** Several tag values a file must all carry — a smart collection's path. */
+  tagFilters?: TagFilterPair[]
   sort?: 'capturedAt' | 'quality' | 'rating' | 'filename' | null
   limit?: number | null
   offset?: number | null
@@ -1025,4 +1027,17 @@ export interface TaxonomyImportSummary {
   valuesCreated: number
   tagsSeen: number
   valuesSeen: number
+}
+
+/** One tag = value pair as a filter; `name` null matches the value under any tag. */
+export interface TagFilterPair {
+  name: string | null
+  value: string
+}
+
+/** One node of the smart-collection tree: a tag value and its file count within the selection. */
+export interface SmartNode {
+  tag: string
+  value: string
+  mediaCount: number
 }

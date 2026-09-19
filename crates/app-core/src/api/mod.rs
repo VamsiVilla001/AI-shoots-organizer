@@ -216,6 +216,9 @@ macro_rules! command_registry {
             unassign_group_tag(kind: String, group_id: i64, key: String, value_id: i64) -> Vec<AssetTag> = $crate::api::taxonomy::unassign_group_tag;
             media_with_tag(tag: Option<String>, value: String) -> Vec<Media> = $crate::api::taxonomy::media_with_tag;
             propagate_group_tags(shoot_id: Option<i64>) -> usize = $crate::api::taxonomy::propagate_group_tags;
+            smart_nodes(filters: Vec<TagFilter>, group_by: Option<String>) -> Vec<SmartNode> = $crate::api::taxonomy::smart_nodes;
+            media_with_tags(filters: Vec<TagFilter>) -> Vec<Media> = $crate::api::taxonomy::media_with_tags;
+            tags_in_group(group_id: i64) -> Vec<SmartNode> = $crate::api::taxonomy::tags_in_group;
             suggest_tag_values(tag: Option<String>, query: String, limit: Option<i64>) -> Vec<TagSuggestion> = $crate::api::taxonomy::suggest_tag_values;
             preview_taxonomy_text(source: String, text: String) -> TaxonomyPreview = $crate::api::taxonomy::preview_taxonomy_text;
             import_taxonomy_text(source: String, text: String) -> TaxonomyImportSummary = $crate::api::taxonomy::import_taxonomy_text;
