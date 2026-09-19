@@ -148,7 +148,7 @@ jobs:
       - name: Build installer
         shell: bash
         env:
-          CARGO_BUILD_TARGET: ${{ matrix.target }}
+          CROSS_TARGET: ${{ matrix.target }}
           # Optional code signing; every one of these may be left unset.
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -158,8 +158,10 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           script=$([ "$WITH_MODELS" = "true" ] && echo build:models || echo build)
-          if [ -n "${{ matrix.target }}" ]; then
-            npm run "$script" -- --target "${{ matrix.target }}"
+          if [ -n "$CROSS_TARGET" ]; then
+            # Only set for a cross build: cargo refuses an empty target.
+            export CARGO_BUILD_TARGET="$CROSS_TARGET"
+            npm run "$script" -- --target "$CROSS_TARGET"
           else
             npm run "$script"
           fi
