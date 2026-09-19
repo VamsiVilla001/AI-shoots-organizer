@@ -71,7 +71,11 @@ Cflags: -I\${includedir}
 PC
 
 echo "built LibRaw ${version} for ${arch} in ${prefix}" >&2
-# What the build needs: pkg-config must find libraw.pc, and the linker must
-# find libraw.a and the libstdc++.a stub.
+# What the build needs: pkg-config must find libraw.pc; the linker must find
+# libraw.a and the libstdc++.a stub; zlib (which macOS ships) must be on the
+# link line for LibRaw's deflate-DNG path, since the crate does not add it;
+# and every C object should target the same macOS version as the app.
 echo "PKG_CONFIG_PATH=${prefix}/lib/pkgconfig"
 echo "LIBRARY_PATH=${prefix}/lib"
+echo "RUSTFLAGS=-C link-arg=-lz"
+echo "MACOSX_DEPLOYMENT_TARGET=11.0"

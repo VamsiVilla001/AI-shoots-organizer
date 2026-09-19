@@ -63,6 +63,7 @@ jobs:
   build:
     name: ${{ matrix.label }}
     runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.optional == true }}
     strategy:
       # One platform failing should not hide whether the others work.
       fail-fast: false
@@ -82,6 +83,8 @@ jobs:
             # Cross-built on the same arm64 runner for 2019-era Intel Macs.
             target: x86_64-apple-darwin
             bundles: target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
+            # A cross build that fails must not hold up the other two.
+            optional: true
           - os: windows-latest
             label: Windows x64
             artifact: skwad-windows-x64
