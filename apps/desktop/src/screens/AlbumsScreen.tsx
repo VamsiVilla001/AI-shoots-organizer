@@ -18,7 +18,7 @@ import { FaceCrop } from '../components/FaceCrop'
 import { MediaGrid } from '../components/MediaGrid'
 import { ProgressPanel } from '../components/ProgressPanel'
 import { Modal } from '../components/Modal'
-import { TagFilter, TagNamesDatalist, TagPicker } from '../components/TagPicker'
+import { TAG_KEYS, TagFilter, TagNamesDatalist, TagPicker, useTaxonomy } from '../components/TagPicker'
 import { useUi } from '../store'
 
 /**
@@ -495,14 +495,61 @@ function ClusterCard({ cluster, onName, withTags = false }: { cluster: ClusterSu
   )
 }
 
-/** Naming a cluster is the moment the app "learns" a player (§7). */
+/**
+ * Naming a cluster is the moment the app "learns" a player (§7).
+ *
+ * The name is picked from what the studio already imported — the roster
+ * (Auto team-up) and any person-type tag in the taxonomy (Player, Person…)
+ * — or from people already named. A name that is in none of them is typed
+ * in, and is then stored the same way: the person is created, the name is
+ * recorded under the person tag in the taxonomy so it is in the list next
+ * time (and in an export), and the group's files are tagged with it.
+ */
 function NameClusterModal({ cluster, onClose }: { cluster: ClusterSummary; onClose: () => void }) {
+  const [choice, setChoice] = useState('')
   const [name, setName] = useState('')
   const [team, setTeam] = useState('')
   const [error, setError] = useState<string | null>(null)
   const queryClient = useQueryClient()
   const pushNotice = useUi((s) => s.pushNotice)
   const people = useQuery({ queryKey: ['people'], queryFn: () => api.listPeople(null) })
+  const roster = useQuery({ queryKey: ['roster'], queryFn: api.listRoster })
+  const taxonomy = useTaxonomy()
+
+  // The tag names are people-shaped: whichever the studio already has wins,
+  // and "Player" is created when none does.
+  const personTag = useMemo(() => {
+    const tags = taxonomy.data ?? []
+    return tags.find((t) => /^(player|players|person|people|name|names|talent|athlete|member|artist)$/i.test(t.name))?.name ?? 'Player'
+  }, [taxonomy.data])
+
+  // Every name on offer, grouped by where it came from. The same name in
+  // two places is listed once, under the first.
+  const options = useMemo(() => {
+    const seen = new Set<string>()
+    const take = (label: string, entries: { name: string; team: string | null; detail?: string }[]) => {
+      const rows = entries.filter((e) => {
+        const key = e.name.trim().toLowerCase()
+        if (!key || seen.has(key)) return false
+        seen.add(key)
+        return true
+      })
+      return rows.length ? [{ label, rows }] : []
+    }
+    return [
+      ...take('From the roster', (roster.data ?? []).map((r) => ({ name: r.playerName || r.ign, team: r.team || null, detail: [r.ign !== (r.playerName || r.ign) ? r.ign : '', r.team].filter(Boolean).join(' · ') }))),
+      ...take(`From the ${personTag} tag`, (taxonomy.data ?? []).filter((t) => t.name.toLowerCase() === personTag.toLowerCase()).flatMap((t) => t.values.map((v) => ({ name: v.value, team: null })))),
+      ...take('Already named', (people.data ?? []).map((p) => ({ name: p.name, team: p.team || null, detail: p.team || '' }))),
+    ]
+  }, [roster.data, taxonomy.data, people.data, personTag])
+
+  const pick = (value: string) => {
+    setChoice(value)
+    if (value === '__new') { setName(''); setTeam(''); return }
+    const row = options.flatMap((g) => g.rows).find((r) => r.name === value)
+    setName(row?.name ?? '')
+    setTeam(row?.team ?? '')
+  }
 
   // The faces themselves, not the photos they came from: a cover photo with
   // four people in it does not say which one this group is.
@@ -512,13 +559,27 @@ function NameClusterModal({ cluster, onClose }: { cluster: ClusterSummary; onClo
   })
 
   const nameIt = useMutation({
-    mutationFn: () => api.nameCluster(cluster.id, name.trim(), team.trim() || null),
+    mutationFn: async () => {
+      const finalName = name.trim()
+      const person = await api.nameCluster(cluster.id, finalName, team.trim() || null)
+      // Stored as taxonomy too: the name joins the person tag's values, and
+      // the group's files carry it, so smart collections and the tag filters
+      // see this person from now on. Never fatal — the naming itself is done.
+      try {
+        await api.assignGroupTag('cluster', cluster.id, clusterTagKey(cluster), personTag, finalName)
+      } catch (e) {
+        console.warn('could not tag the group with the person name', e)
+      }
+      return person
+    },
     onSuccess: async (person) => {
       pushNotice({
         level: 'success',
         message: `${cluster.faceCount} faces added to ${person.name}'s library.`,
       })
       await queryClient.invalidateQueries({ queryKey: ['clusters'] })
+      await queryClient.invalidateQueries({ queryKey: TAG_KEYS.tags })
+      await queryClient.invalidateQueries({ queryKey: ['assetTags'] })
       await api.regenerateAlbums(cluster.shootId)
       await queryClient.invalidateQueries({ queryKey: ['albums'] })
       onClose()
@@ -526,20 +587,15 @@ function NameClusterModal({ cluster, onClose }: { cluster: ClusterSummary; onClo
     onError: (e) => setError(String(e)),
   })
 
+  const isNew = choice === '__new'
+  const known = options.flatMap((g) => g.rows).some((r) => r.name.toLowerCase() === name.trim().toLowerCase())
+
   return (
     <Modal title={`Who is ${cluster.label}?`} onClose={onClose}>
       {(samples.data?.length ?? 0) > 0 && (
         <div className="face-sample-strip">
           {samples.data?.map((face) => (
-            <div
-              key={face.id}
-              className="face-sample"
-              title={face.mediaFilename}
-              // 62px is too small to tell two people apart, which is the only
-              // question this dialog asks. Inline rather than in styles.css
-              // because that file currently carries uncommitted work.
-              style={{ width: 112, height: 112 }}
-            >
+            <div key={face.id} className="face-sample" title={face.mediaFilename} style={{ width: 112, height: 112 }}>
               <FaceCrop mediaId={face.mediaId} bbox={face.bbox} />
             </div>
           ))}
@@ -552,17 +608,34 @@ function NameClusterModal({ cluster, onClose }: { cluster: ClusterSummary; onClo
       </div>
       <label className="field">
         <span>Player name</span>
-        <input
-          autoFocus
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          placeholder="Jonathan"
-          list="known-players"
-        />
-        <datalist id="known-players">
-          {people.data?.map((p) => <option key={p.id} value={p.name} />)}
-        </datalist>
+        <select autoFocus value={choice} onChange={(e) => pick(e.target.value)}>
+          <option value="">Choose a name…</option>
+          {options.map((group) => (
+            <optgroup key={group.label} label={group.label}>
+              {group.rows.map((row) => (
+                <option key={row.name} value={row.name}>
+                  {row.name}{row.detail ? ` — ${row.detail}` : ''}
+                </option>
+              ))}
+            </optgroup>
+          ))}
+          <option value="__new">Not in the list — type a new name…</option>
+        </select>
+        {options.length === 0 && !roster.isPending && !taxonomy.isPending && (
+          <span className="hint">No imported names yet. Import a roster (Settings → Auto team-up) or a tag list with a {personTag} tag on Auto tags, or type a name below.</span>
+        )}
       </label>
+      {isNew && (
+        <label className="field">
+          <span>New name</span>
+          <input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="Jonathan" spellCheck={false} />
+          <span className="hint">
+            {known
+              ? 'This name is already in the list — pick it above instead.'
+              : `Saved as a person, and added to the ${personTag} tag in the taxonomy so it is in the list next time.`}
+          </span>
+        </label>
+      )}
       <label className="field">
         <span>Team (optional)</span>
         <input value={team} onChange={(e) => setTeam(e.target.value)} placeholder="Gods Reign" />
@@ -570,7 +643,7 @@ function NameClusterModal({ cluster, onClose }: { cluster: ClusterSummary; onClo
       {error && <div style={{ color: 'var(--error)', fontSize: 13 }}>{error}</div>}
       <div className="buttons">
         <button onClick={onClose}>Cancel</button>
-        <button className="primary" disabled={!name.trim() || nameIt.isPending} onClick={() => nameIt.mutate()}>
+        <button className="primary" disabled={!name.trim() || (isNew && known) || nameIt.isPending} onClick={() => nameIt.mutate()}>
           {nameIt.isPending ? 'Saving…' : 'Confirm'}
         </button>
       </div>
