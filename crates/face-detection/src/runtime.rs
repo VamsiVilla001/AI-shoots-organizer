@@ -188,8 +188,8 @@ fn providers_for(accelerator: Accelerator) -> Vec<ort::ep::ExecutionProviderDisp
         if matches!(accelerator, Accelerator::Auto | Accelerator::DirectMl) {
             providers.push(ort::ep::DirectML::default().build());
         }
-        // Apple Silicon only: the CoreML provider has no prebuilt Intel
-        // binaries, so an Intel Mac runs the CPU provider (see Cargo.toml).
+        // Apple Silicon only: ort-sys has no prebuilt Intel Mac binaries, so
+        // the CoreML feature is scoped to aarch64 (see Cargo.toml).
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         if matches!(accelerator, Accelerator::Auto | Accelerator::CoreMl) {
             providers.push(ort::ep::CoreML::default().build());

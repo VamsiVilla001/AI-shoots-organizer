@@ -6,8 +6,8 @@
 # GNU-toolchain assumption: macOS has no libstdc++ (it ships libc++). So
 # this script, run before `cargo build` on the macOS runners:
 #
-#   1. builds LibRaw 0.22.2 from source as a static library for the target
-#      architecture (native arm64, or x86_64 for the Intel .dmg);
+#   1. builds LibRaw 0.22.2 from source as a static library for the runner's
+#      architecture (arm64; the workflow builds Apple Silicon only);
 #   2. writes a `libraw.pc` so the crate's build script takes its
 #      "system libraw via pkg-config" path, which links `-lraw` without
 #      pointing the linker at the bundled ELF archives;

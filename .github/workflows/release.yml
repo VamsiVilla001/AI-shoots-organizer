@@ -3,22 +3,28 @@ name: Release
 # Builds the installers on GitHub's machines and attaches them to a release.
 #
 # macOS cannot be cross-compiled from Windows: the .dmg needs Apple's toolchain
-# and, for a signed build, `codesign`. So the Mac builds run on GitHub's macOS
-# runners — one Apple Silicon .dmg and one Intel .dmg — and the Windows
-# installer is built alongside so a release carries all three from one commit.
+# and, for a signed build, `codesign`. So the Mac build runs on GitHub's macOS
+# runner and the Windows installer is built alongside, so a release carries
+# both from one commit.
+#
+# Apple Silicon only. ONNX Runtime's Rust bindings (ort-sys) ship prebuilt
+# libraries for aarch64-apple-darwin, Windows and Linux, but none at all for
+# x86_64-apple-darwin, so an Intel .dmg would need ONNX Runtime compiled from
+# source on every run (40+ minutes) plus a bundled dylib. Not worth it for
+# Macs Apple stopped selling in 2020.
 #
 # How to release:
 #
 #   git push origin release/beta-v1.0.0
-#       -> EVERY commit on a release/<tag> branch builds all three and puts
+#       -> EVERY commit on a release/<tag> branch builds both and puts
 #          them on the pre-release for <tag>, moving the tag to that commit.
 #          Nothing else to do: commit, push, and the installers follow.
 #   git tag beta-v1.0.1 && git push origin beta-v1.0.1
-#       -> builds all three, publishes a pre-release named after the tag
+#       -> builds both, publishes a pre-release named after the tag
 #   git tag v1.0.0 && git push origin v1.0.0
-#       -> builds all three, creates a DRAFT release for you to check and publish
+#       -> builds both, creates a DRAFT release for you to check and publish
 #   Actions -> Release -> Run workflow
-#       -> builds all three as run artefacts; give it a tag name to attach
+#       -> builds both as run artefacts; give it a tag name to attach
 #          them to that tag's release instead
 #
 # The artefacts are UNSIGNED unless the Apple secrets below are set. macOS
@@ -63,7 +69,6 @@ jobs:
   build:
     name: ${{ matrix.label }}
     runs-on: ${{ matrix.os }}
-    continue-on-error: ${{ matrix.optional == true }}
     strategy:
       # One platform failing should not hide whether the others work.
       fail-fast: false
@@ -73,23 +78,11 @@ jobs:
             label: macOS (Apple Silicon)
             artifact: skwad-macos-arm64
             suffix: macos-arm64.dmg
-            # Native: the runner is arm64, so no --target is needed.
-            target: ""
             bundles: target/release/bundle/dmg/*.dmg
-          - os: macos-14
-            label: macOS (Intel)
-            artifact: skwad-macos-x64
-            suffix: macos-x64.dmg
-            # Cross-built on the same arm64 runner for 2019-era Intel Macs.
-            target: x86_64-apple-darwin
-            bundles: target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
-            # A cross build that fails must not hold up the other two.
-            optional: true
           - os: windows-latest
             label: Windows x64
             artifact: skwad-windows-x64
             suffix: x64-setup.exe
-            target: ""
             bundles: target/release/bundle/nsis/*.exe
 
     steps:
@@ -114,14 +107,12 @@ jobs:
           cache: npm
 
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
 
       # The Rust build dominates the job; without this every run is ~20 minutes
       # of recompiling ONNX Runtime and Tauri from scratch.
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.os }}-${{ matrix.target }}
+          key: ${{ matrix.os }}
 
       # `npm ci` is exact and fast; when the lock file has drifted from a
       # package.json it falls back to a plain install rather than failing the
@@ -135,10 +126,7 @@ jobs:
       - name: Build LibRaw for macOS
         if: runner.os == 'macOS'
         shell: bash
-        run: |
-          arch="${{ matrix.target }}"
-          arch="${arch%%-*}"            # x86_64-apple-darwin -> x86_64; empty -> host
-          bash scripts/ci/macos-libraw.sh "${arch:-$(uname -m)}" >> "$GITHUB_ENV"
+        run: bash scripts/ci/macos-libraw.sh >> "$GITHUB_ENV"
 
       # The two ONNX files are ~191 MB and take the installer from ~11 MB to
       # ~190 MB. Without them the app indexes, sorts and exports; only face
@@ -155,13 +143,10 @@ jobs:
 
       # `build` / `build:models` package the Premiere panel, build and stage
       # `skwad-server` beside the app (under server/ in the bundle), then build
-      # the desktop with the config overlays. For the Intel Mac the server is
-      # cross-built too: CARGO_BUILD_TARGET steers cargo and the staging
-      # script, --target steers Tauri.
+      # the desktop with the config overlays.
       - name: Build installer
         shell: bash
         env:
-          CROSS_TARGET: ${{ matrix.target }}
           # Optional code signing; every one of these may be left unset.
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -175,14 +160,7 @@ jobs:
           for v in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
             if [ -z "${!v:-}" ]; then unset "$v"; fi
           done
-          script=$([ "$WITH_MODELS" = "true" ] && echo build:models || echo build)
-          if [ -n "$CROSS_TARGET" ]; then
-            # Only set for a cross build: cargo refuses an empty target.
-            export CARGO_BUILD_TARGET="$CROSS_TARGET"
-            npm run "$script" -- --target "$CROSS_TARGET"
-          else
-            npm run "$script"
-          fi
+          if [ "$WITH_MODELS" = "true" ]; then npm run build:models; else npm run build; fi
 
       # One predictable name per platform, so the release page reads well and
       # a re-run replaces the same asset rather than adding another.
@@ -265,9 +243,9 @@ jobs:
             **Windows:** run the `-x64-setup.exe`. SmartScreen will warn because the
             build is unsigned; choose *More info → Run anyway*.
 
-            **macOS:** open the `.dmg` for your Mac — `macos-arm64` for Apple Silicon
-            (M1 and later), `macos-x64` for Intel — and drag SKWAD to Applications.
-            The build is unsigned, so the first launch is *right-click → Open*, or:
+            **macOS (Apple Silicon, M1 and later):** open the `.dmg` and drag SKWAD to
+            Applications. Intel Macs are not supported by this build. The build is
+            unsigned, so the first launch is *right-click → Open*, or:
 
             ```
             xattr -d com.apple.quarantine "/Applications/SKWAD Media Organiser.app"

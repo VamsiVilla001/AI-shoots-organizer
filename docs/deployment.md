@@ -176,10 +176,16 @@ Two things worth knowing before a wide rollout:
 
 ## Path A — CI builds every installer (recommended)
 
-`.github/workflows/release.yml` builds three installers on GitHub's machines —
-macOS Apple Silicon `.dmg`, macOS Intel `.dmg`, Windows `.exe` — with the
-server and the face models inside, and attaches them to a release. No Mac is
-needed: the `.dmg` files are built on GitHub's `macos-14` runners.
+`.github/workflows/release.yml` builds two installers on GitHub's machines —
+macOS Apple Silicon `.dmg` and Windows `.exe` — with the server and the face
+models inside, and attaches them to a release. No Mac is needed: the `.dmg`
+is built on GitHub's `macos-14` runner.
+
+Intel Macs are not built. ONNX Runtime's Rust bindings ship no prebuilt
+library for `x86_64-apple-darwin` (Apple Silicon, Windows and Linux only), so
+an Intel `.dmg` would mean compiling ONNX Runtime from source on every run and
+bundling the result. Apple stopped selling Intel Macs in 2020; one that
+turns up can still use a SKWAD server through its web browser.
 
 ```bash
 # a beta goes out at once as a pre-release named after the tag:
@@ -191,9 +197,9 @@ git tag v1.0.0
 git push origin v1.0.0
 ```
 
-Watch it under the repository's **Actions** tab (three jobs, 15–25 minutes on
+Watch it under the repository's **Actions** tab (two jobs, 15–25 minutes on
 a cold cache). Running the workflow by hand from that tab builds the same
-three as run artefacts; give it a tag name in the **release_tag** box to attach
+two as run artefacts; give it a tag name in the **release_tag** box to attach
 them to that tag's release instead — how to add the `.dmg` to a release that
 was made by hand.
 
