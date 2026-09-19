@@ -40,7 +40,7 @@ if [ ! -f "${prefix}/lib/libraw.a" ]; then
     # bundled into the .app. RAW decoding itself needs none of them.
     ./configure \
       --prefix="${prefix}" \
-      --host="${arch}-apple-darwin" \
+      ${host_flag} \
       --disable-shared --enable-static \
       --disable-lcms --disable-jasper --disable-openmp --disable-jpeg \
       --disable-examples \
