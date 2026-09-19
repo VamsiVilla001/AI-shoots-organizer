@@ -174,24 +174,40 @@ Two things worth knowing before a wide rollout:
   on next launch. Change the panel without bumping it and editors keep the old
   one.
 
-## Path A — CI builds both installers (recommended)
+## Path A — CI builds every installer (recommended)
 
-`.github/workflows/release.yml` builds macOS (Apple Silicon) and Windows on
-every `v*` tag and attaches both installers to a **draft** GitHub release.
+`.github/workflows/release.yml` builds three installers on GitHub's machines —
+macOS Apple Silicon `.dmg`, macOS Intel `.dmg`, Windows `.exe` — with the
+server and the face models inside, and attaches them to a release. No Mac is
+needed: the `.dmg` files are built on GitHub's `macos-14` runners.
 
 ```bash
-# bump the version in apps/desktop/src-tauri/tauri.conf.json, package.json
-# and Cargo.toml (workspace.package.version) so they agree, then:
+# a beta goes out at once as a pre-release named after the tag:
+git tag beta-v1.0.1
+git push origin beta-v1.0.1
+
+# a numbered release lands as a DRAFT for a last look before publishing:
 git tag v1.0.0
 git push origin v1.0.0
 ```
 
-Then open the draft release, check the two artefacts, and publish. Running the
-workflow by hand from the Actions tab instead uploads the installers as run
-artefacts without creating a release — useful for a test build.
+Watch it under the repository's **Actions** tab (three jobs, 15–25 minutes on
+a cold cache). Running the workflow by hand from that tab builds the same
+three as run artefacts; give it a tag name in the **release_tag** box to attach
+them to that tag's release instead — how to add the `.dmg` to a release that
+was made by hand.
 
-The Mac job runs on `macos-14`, which is Apple Silicon: the same architecture as
-a Mac Studio, so the `.dmg` it produces is a native arm64 build.
+To re-release the same tag after a fix, move the tag and push it again:
+
+```bash
+git tag -f beta-v1.0.0 && git push -f origin beta-v1.0.0
+```
+
+The assets are named `SKWAD-Media-Organiser-<tag>-<platform>`, so a re-run
+replaces them rather than adding duplicates. Signing is optional: set the
+`APPLE_*` repository secrets described under [Signing](#signing) and the Mac
+builds are signed and notarised; without them, first launch on a Mac is
+right-click → Open.
 
 ## Path B — build on the Mac Studio itself
 

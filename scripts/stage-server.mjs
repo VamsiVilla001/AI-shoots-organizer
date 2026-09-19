@@ -13,7 +13,10 @@ import { fileURLToPath } from 'node:url'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const exe = process.platform === 'win32' ? 'skwad-server.exe' : 'skwad-server'
-const built = join(root, 'target', 'release', exe)
+// A cross build (`CARGO_BUILD_TARGET=x86_64-apple-darwin` on an Apple Silicon
+// runner) lands under target/<triple>/release rather than target/release.
+const triple = process.env.CARGO_BUILD_TARGET
+const built = triple ? join(root, 'target', triple, 'release', exe) : join(root, 'target', 'release', exe)
 const destination = join(root, 'apps', 'desktop', 'src-tauri', 'binaries')
 
 if (!existsSync(built)) {
