@@ -9,14 +9,17 @@ name: Release
 #
 # How to release:
 #
+#   git push origin release/beta-v1.0.0
+#       -> EVERY commit on a release/<tag> branch builds all three and puts
+#          them on the pre-release for <tag>, moving the tag to that commit.
+#          Nothing else to do: commit, push, and the installers follow.
 #   git tag beta-v1.0.1 && git push origin beta-v1.0.1
 #       -> builds all three, publishes a pre-release named after the tag
 #   git tag v1.0.0 && git push origin v1.0.0
 #       -> builds all three, creates a DRAFT release for you to check and publish
 #   Actions -> Release -> Run workflow
 #       -> builds all three as run artefacts; give it a tag name to attach
-#          them to that tag's release instead (e.g. to add the .dmg to a
-#          release that was made by hand)
+#          them to that tag's release instead
 #
 # The artefacts are UNSIGNED unless the Apple secrets below are set. macOS
 # refuses to open an unsigned .dmg from a download without right-click -> Open
@@ -26,6 +29,7 @@ name: Release
 on:
   push:
     tags: ["v*", "beta-*"]
+    branches: ["release/**"]
   workflow_dispatch:
     inputs:
       with_models:
@@ -40,10 +44,20 @@ on:
 permissions:
   contents: write # needed to create the release and upload assets
 
+# A newer push to the same branch cancels the build still running for the
+# previous one, so the release always ends up matching the latest commit.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
-  # Tag builds always bundle the models; a manual run chooses.
+  # Tag and branch builds always bundle the models; a manual run chooses.
   WITH_MODELS: ${{ github.event_name == 'push' || inputs.with_models }}
+  # Which release the installers go to — the tag pushed, the branch's tag
+  # (release/beta-v1.0.0 -> beta-v1.0.0), or what a manual run asked for —
+  # is worked out by the "Release tag" step in each job.
+  RELEASE_TAG_INPUT: ${{ inputs.release_tag }}
 
 jobs:
   build:
@@ -76,6 +90,19 @@ jobs:
             bundles: target/release/bundle/nsis/*.exe
 
     steps:
+      # release/beta-v1.0.0 -> beta-v1.0.0; a tag is itself; a manual run
+      # says. Empty means "artefacts only, no release".
+      - name: Release tag
+        shell: bash
+        run: |
+          tag="$RELEASE_TAG_INPUT"
+          case "$GITHUB_REF" in
+            refs/tags/*) tag="${GITHUB_REF#refs/tags/}" ;;
+            refs/heads/release/*) [ -z "$tag" ] && tag="${GITHUB_REF#refs/heads/release/}" ;;
+          esac
+          echo "RELEASE_TAG=$tag" >> "$GITHUB_ENV"
+          echo "release tag: ${tag:-<none>}"
+
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
@@ -93,8 +120,12 @@ jobs:
         with:
           key: ${{ matrix.os }}-${{ matrix.target }}
 
+      # `npm ci` is exact and fast; when the lock file has drifted from a
+      # package.json it falls back to a plain install rather than failing the
+      # release — the lock file is committed, so this is a safety net.
       - name: Install dependencies
-        run: npm ci
+        shell: bash
+        run: npm ci || npm install --no-audit --no-fund
 
       # The two ONNX files are ~191 MB and take the installer from ~11 MB to
       # ~190 MB. Without them the app indexes, sorts and exports; only face
@@ -139,8 +170,7 @@ jobs:
         id: name
         shell: bash
         run: |
-          tag="${{ inputs.release_tag }}"
-          if [ -z "$tag" ] && [[ "${GITHUB_REF}" == refs/tags/* ]]; then tag="${GITHUB_REF#refs/tags/}"; fi
+          tag="$RELEASE_TAG"
           if [ -z "$tag" ]; then tag="$(node -p "require('./package.json').version")"; fi
           mkdir -p dist-release
           for f in ${{ matrix.bundles }}; do
@@ -159,11 +189,39 @@ jobs:
 
   release:
     name: Publish release
-    # A tag push publishes; a manual run does only when given a tag.
-    if: startsWith(github.ref, 'refs/tags/') || inputs.release_tag != ''
+    # A tag push and a release-branch push publish; a manual run does only
+    # when given a tag.
+    if: ${{ needs.build.result == 'success' && (startsWith(github.ref, 'refs/tags/') || startsWith(github.ref, 'refs/heads/release/') || inputs.release_tag != '') }}
     needs: build
     runs-on: ubuntu-latest
     steps:
+      # release/beta-v1.0.0 -> beta-v1.0.0; a tag is itself; a manual run
+      # says. Empty means "artefacts only, no release".
+      - name: Release tag
+        shell: bash
+        run: |
+          tag="$RELEASE_TAG_INPUT"
+          case "$GITHUB_REF" in
+            refs/tags/*) tag="${GITHUB_REF#refs/tags/}" ;;
+            refs/heads/release/*) [ -z "$tag" ] && tag="${GITHUB_REF#refs/heads/release/}" ;;
+          esac
+          echo "RELEASE_TAG=$tag" >> "$GITHUB_ENV"
+          echo "release tag: ${tag:-<none>}"
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # A release-branch push moves the branch's tag to this commit, so the
+      # release page and the installers always describe the same code.
+      - name: Point the tag at this commit
+        if: startsWith(github.ref, 'refs/heads/release/')
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -f -a "$RELEASE_TAG" -m "$RELEASE_TAG — built from ${GITHUB_SHA::7}"
+          git push -f origin "refs/tags/$RELEASE_TAG"
+
       - uses: actions/download-artifact@v4
         with:
           path: artefacts
@@ -171,11 +229,13 @@ jobs:
       - name: Attach the installers to the release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.release_tag || github.ref_name }}
-          # beta-* tags go out at once as pre-releases; v* tags land as a draft
-          # for a last look before publishing.
-          draft: ${{ startsWith(inputs.release_tag || github.ref_name, 'v') }}
-          prerelease: ${{ startsWith(inputs.release_tag || github.ref_name, 'beta-') }}
+          tag_name: ${{ env.RELEASE_TAG }}
+          target_commitish: ${{ github.sha }}
+          # beta-* goes out at once as a pre-release; v* lands as a draft for
+          # a last look before publishing.
+          draft: ${{ startsWith(env.RELEASE_TAG, 'v') }}
+          prerelease: ${{ startsWith(env.RELEASE_TAG, 'beta-') }}
+          name: ${{ env.RELEASE_TAG }}
           files: artefacts/**/*
           generate_release_notes: true
           append_body: true
