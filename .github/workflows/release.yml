@@ -170,6 +170,11 @@ jobs:
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
+          # An unset secret arrives as an empty variable, and Tauri would then
+          # try to import an empty certificate. Absent means "do not sign".
+          for v in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            if [ -z "${!v:-}" ]; then unset "$v"; fi
+          done
           script=$([ "$WITH_MODELS" = "true" ] && echo build:models || echo build)
           if [ -n "$CROSS_TARGET" ]; then
             # Only set for a cross build: cargo refuses an empty target.
