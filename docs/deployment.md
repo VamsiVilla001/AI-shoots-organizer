@@ -465,8 +465,55 @@ address, and can go back to a local library from there.
 
 What a client cannot do: install the Premiere Pro panel (the panel's loopback
 bridge needs the library), and pick files with a native dialog for things that
-live on the server — shoot folders come from the server's folder browser, a
-`.skwad` catalogue is uploaded, a published one is downloaded.
+live on the server — a `.skwad` catalogue is uploaded, a published one is
+downloaded. Shoot folders are picked with the client's own dialog and then
+translated into something the server can open, as described next.
+
+### Media on a client's own computer
+
+The server reads media in place: it never copies a shoot, and it can only
+process a folder it can open. A NAS folder is open to everyone. A folder on a
+laptop's own disk — a OneDrive folder on a Mac, a card copied to a desktop —
+is not, until that computer **shares** it. Once it does, the client's **Browse**
+button just works: the desktop notices that the folder sits inside a share and
+offers it to the server as `\\that-computer\share\…`, first by the computer's
+name and then by its address; the server tries each and the first it can list
+goes into the shoot. Nothing moves. The trade-off is that the sharing computer
+must be on, awake and on the LAN whenever the server needs the originals —
+during processing, and later for exports, full-size views and catalogues.
+Thumbnails, proxies and face data live on the server, so browsing the library
+keeps working when it is not.
+
+**On a Mac:** System Settings → General → Sharing → turn on **File Sharing**,
+click its (i), add the folder under *Shared Folders*, then **Options…** and tick
+*Share files and folders using SMB* for the account (macOS asks for its
+password; it needs it to serve SMB). If macOS refuses to add a folder that lives
+under OneDrive or iCloud (`~/Library/CloudStorage/…`), share a parent folder
+that it accepts, or keep the shoot in an ordinary folder. Cloud-only files (the
+ones with a cloud icon) are not readable over the share until they are
+downloaded on the Mac.
+
+**On Windows:** right-click the folder → Properties → Sharing → **Share…**, add
+the account the server will use, *Read* is enough. Administrative shares
+(`C$`) are not used: they need an administrator's login on the server.
+
+**On the server:** it needs a login for that computer's share. When the server
+runs as a user (the `run-server.ps1` way), store one for that user with
+
+```
+cmdkey /add:<computer-name> /user:<account on that computer> /pass:<its password>
+```
+
+and, if the name does not resolve on your network, once more with the address.
+A Mac is reachable as `<name>.local` (its *Local hostname* in Sharing); if the
+server cannot resolve `.local` names, the address is what ends up in the shoot.
+When the server runs as the `SkwadServer` service under a system account, give
+the share *guest* (read-only) access instead, or run the service as a user.
+
+If the folder is neither shared nor on a mounted network volume, the dialog
+says so and repeats the steps above. If it is shared but the server still
+cannot open it, the message names the spellings it tried and the reason each
+failed, which is usually a missing login or the computer being asleep.
 
 ### Worker mode
 

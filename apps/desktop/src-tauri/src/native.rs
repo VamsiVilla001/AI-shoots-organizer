@@ -61,43 +61,12 @@ pub async fn open_catalogue_media(
         .map_err(|e| err(format!("could not open {target}: {e}")))
 }
 
-/// The network spelling of a path on a mapped drive — `Z:\shoots\day1`
-/// becomes `\\nas\media\shoots\day1` — or `None` when the path is not on a
-/// mapped drive. A client picks folders with its own dialog, but the server
-/// is what scans them, and a drive letter means nothing on another machine.
+/// The network spellings of a folder on this machine, best first: a mapped
+/// drive's share, a mounted volume's share, or `\\this-machine\share\…` for
+/// a folder this machine shares — and how to share it when there are none.
+/// A client picks folders with its own dialog, but the server is what scans
+/// them, and a local path means nothing on another machine.
 #[tauri::command]
-pub fn network_path(path: String) -> Result<Option<String>> {
-    Ok(to_network_path(&path))
-}
-
-#[cfg(windows)]
-fn to_network_path(path: &str) -> Option<String> {
-    use windows_sys::Win32::NetworkManagement::WNet::WNetGetConnectionW;
-
-    let bytes = path.as_bytes();
-    let is_drive = bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
-    if !is_drive || path.starts_with("\\\\") {
-        return None;
-    }
-    let drive: Vec<u16> = path[..2].encode_utf16().chain(std::iter::once(0)).collect();
-    let mut remote = vec![0u16; 1024];
-    let mut length = remote.len() as u32;
-    // SAFETY: both buffers outlive the call and `length` is their capacity.
-    let status = unsafe { WNetGetConnectionW(drive.as_ptr(), remote.as_mut_ptr(), &mut length) };
-    if status != 0 {
-        return None;
-    }
-    let end = remote.iter().position(|&c| c == 0).unwrap_or(remote.len());
-    let share = String::from_utf16_lossy(&remote[..end]);
-    let rest = path[2..].trim_start_matches(['\\', '/']);
-    Some(if rest.is_empty() {
-        share
-    } else {
-        format!("{}\\{}", share.trim_end_matches('\\'), rest)
-    })
-}
-
-#[cfg(not(windows))]
-fn to_network_path(_path: &str) -> Option<String> {
-    None
+pub fn network_paths(path: String, server_url: Option<String>) -> Result<crate::netpath::NetworkPaths> {
+    Ok(crate::netpath::resolve(&path, server_url.as_deref()))
 }

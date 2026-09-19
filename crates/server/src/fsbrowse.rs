@@ -136,7 +136,7 @@ pub async fn list(
             }
         }
 
-        directories.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        directories.sort_by_key(|entry| entry.name.to_lowercase());
 
         // A parent is only offered while it is still inside a root, so the
         // picker cannot walk out of the jail one level at a time. Without
@@ -205,5 +205,25 @@ mod tests {
         let (media, has_dirs) = shallow_counts(dir.path());
         assert_eq!(media, 2, "the nested photo is not counted here");
         assert!(has_dirs);
+    }
+
+    /// A client whose shoot sits on its own disk offers the folder as
+    /// `\\client\share\…`; the browse path is what decides whether the
+    /// server accepts it, so a UNC path must survive canonicalisation in
+    /// its ordinary spelling. Exercised against this machine's own `Users`
+    /// share when Windows exposes one.
+    #[cfg(windows)]
+    #[test]
+    fn a_unc_path_is_browsed_in_its_ordinary_spelling() {
+        let computer = std::env::var("COMPUTERNAME").unwrap_or_default();
+        let unc = PathBuf::from(format!(r"\\{computer}\Users"));
+        if computer.is_empty() || !unc.is_dir() {
+            eprintln!("no Users share on this machine; skipping");
+            return;
+        }
+        let resolved = resolve_browse_path(&unc, &[]).unwrap();
+        let text = resolved.to_string_lossy();
+        assert!(text.starts_with(r"\\") && !text.starts_with(r"\\?\"), "{text}");
+        assert!(std::fs::read_dir(&resolved).is_ok());
     }
 }

@@ -416,8 +416,22 @@ export async function localPathFor(item: Pick<Media, 'path' | 'shootId' | 'norma
 export const revealMedia = async (item: Pick<Media, 'path' | 'shootId' | 'normalizedRelativePath'>) =>
   revealInFolder(await localPathFor(item))
 
-/** The network spelling of a path on a mapped drive, or null when it is not on one (desktop only). */
-export const networkPath = (path: string) => call<string | null>('network_path', { path })
+/** What a folder on this machine looks like from the server (desktop only). */
+export interface NetworkPaths {
+  /** Network spellings to try, best first; empty when only this machine can read the folder. */
+  candidates: string[]
+  /** How to share a folder on this operating system, for when there are none. */
+  howToShare: string
+}
+
+/**
+ * The network spellings of a folder on this machine — its mapped drive's
+ * share, its mounted volume's share, or `\this-machineshare…` when
+ * the folder is inside something this machine shares. `serverUrl` lets the
+ * answer include the address the server sees this machine from.
+ */
+export const networkPaths = (path: string, serverUrl: string | null) =>
+  call<NetworkPaths>('network_paths', { path, serverUrl })
 
 // --- taxonomy ----------------------------------------------------------------
 

@@ -11,7 +11,7 @@
 
 import { open, save } from '@tauri-apps/plugin-dialog'
 import * as api from './api'
-import { isTauri, transport, UnsupportedByTransport } from './transport'
+import { isTauri, transport, UnsupportedByTransport, type HttpTransport } from './transport'
 
 export interface FolderRequest {
   title: string
@@ -101,24 +101,44 @@ export function hasLocalFileDialogs(): boolean {
 }
 
 /**
- * Turns a folder this machine picked into one the server can scan: a mapped
- * drive becomes its network path, and the server is asked to list it.
+ * Turns a folder this machine picked into one the server can scan.
+ *
+ * The desktop works out every network spelling it can vouch for — a mapped
+ * drive's share, a mounted volume's share, or `\this-machineshare…`
+ * when the folder sits inside something this machine shares — and the
+ * server is asked to list each in turn; the first it can open is the one
+ * that goes into the shoot. A folder nobody shares is refused with the
+ * steps that would share it, because the server reads media in place and a
+ * laptop's disk is otherwise invisible to it.
  */
 async function shareableWithServer(picked: string): Promise<string> {
   const active = transport()
-  const network = await api.networkPath(picked).catch(() => null)
-  const candidate = network ?? picked
   const browse = active.browse
-  if (!browse) return candidate
-  try {
-    await browse.list(candidate)
-    return candidate
-  } catch {
-    const hint = network
-      ? `The server cannot open ${candidate}.`
-      : `The server cannot open ${candidate} — it is a folder on this machine, not on the network.`
+  const serverUrl = active.kind === 'http' ? (active as HttpTransport).connection.baseUrl : null
+  const answer = await api.networkPaths(picked, serverUrl).catch(() => null)
+  const candidates = answer?.candidates ?? []
+  if (!browse) return candidates[0] ?? picked
+
+  const refusals: string[] = []
+  for (const candidate of candidates) {
+    try {
+      await browse.list(candidate)
+      return candidate
+    } catch (error) {
+      refusals.push(`${candidate}: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  if (candidates.length === 0) {
     throw new Error(
-      `${hint} Choose the folder through its network location (\\\\server\\share\\…) so the server can read it too.`,
+      `${picked} is a folder on this computer, not on the network, so the server cannot read it. ` +
+        (answer?.howToShare ?? 'Share it over the network, or choose it through its network location (\\server\share\…).'),
     )
   }
+  throw new Error(
+    `This folder is shared from this computer, but the server could not open it as ${candidates.join(' or ')}. ` +
+      'Check that file sharing is on here, that this computer is awake and on the same network, and that the ' +
+      'server has a login for this share (on the server: cmdkey /add:<this computer> /user:<account> /pass:<password>). ' +
+      `Details: ${refusals.join('; ')}`,
+  )
 }

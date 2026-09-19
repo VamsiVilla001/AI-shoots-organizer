@@ -476,8 +476,11 @@ pub fn resolve_group_key(conn: &mut dyn Db, kind: &str, key: &str) -> Result<Opt
     row.map(|r| super::at(&r, 0)).transpose()
 }
 
+/// One group assignment: (kind, key, value id, tag, value).
+type GroupAssignment = (String, String, i64, String, String);
+
 /// Every group assignment as (kind, key, value id, tag, value).
-fn group_assignments(conn: &mut dyn Db, shoot_id: Option<i64>) -> Result<Vec<(String, String, i64, String, String)>> {
+fn group_assignments(conn: &mut dyn Db, shoot_id: Option<i64>) -> Result<Vec<GroupAssignment>> {
     let prefix = shoot_id.map(|id| format!("shoot:{id}/")).unwrap_or_default();
     conn.rows(
         "SELECT a.asset_kind, a.asset_key, v.id AS value_id, t.name AS tag, v.value
@@ -591,7 +594,7 @@ pub fn smart_nodes(conn: &mut dyn Db, filters: &[TagFilter], group_by: Option<&s
         };
         let already = filters.iter().any(|f| {
             f.value.eq_ignore_ascii_case(&node.value)
-                && f.name.as_deref().map_or(true, |n| n.eq_ignore_ascii_case(&node.tag))
+                && f.name.as_deref().is_none_or(|n| n.eq_ignore_ascii_case(&node.tag))
         });
         if !already {
             out.push(node);

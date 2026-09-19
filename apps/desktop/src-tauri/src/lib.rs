@@ -7,6 +7,7 @@ pub mod events;
 pub mod library;
 pub mod models;
 pub mod native;
+pub mod netpath;
 pub mod premiere_api;
 pub mod premiere_plugin;
 pub mod protocol;
@@ -275,7 +276,7 @@ pub fn run() {
             commands::set_media_editorial,
             native::reveal_in_folder,
             native::open_path,
-            native::network_path,
+            native::network_paths,
             // players
             commands::list_people,
             commands::list_enrolled_people,

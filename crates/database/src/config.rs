@@ -56,6 +56,18 @@ fn default_connect_timeout_secs() -> u64 {
     10
 }
 
+/// The TCP host of a parsed connection string. A Unix-socket host only
+/// exists on Unix builds, and the app always connects over TCP, so it is
+/// passed over; on Windows the match has one arm, which is why this is a
+/// function rather than a closure clippy would want simplified.
+fn tcp_host(host: &postgres::config::Host) -> Option<String> {
+    match host {
+        postgres::config::Host::Tcp(host) => Some(host.clone()),
+        #[cfg(unix)]
+        postgres::config::Host::Unix(_) => None,
+    }
+}
+
 impl Default for PgConfig {
     fn default() -> Self {
         Self {
@@ -166,14 +178,7 @@ impl PgConfig {
             host: parsed
                 .get_hosts()
                 .iter()
-                .filter_map(|h| match h {
-                    postgres::config::Host::Tcp(host) => Some(host.clone()),
-                    // A Unix-socket host only exists on Unix builds; the app
-                    // always connects over TCP, so it is passed over.
-                    #[cfg(unix)]
-                    postgres::config::Host::Unix(_) => None,
-                })
-                .next()
+                .find_map(tcp_host)
                 .unwrap_or(defaults.host),
             port: parsed.get_ports().first().copied().unwrap_or(defaults.port),
             database: parsed.get_dbname().unwrap_or(&defaults.database).to_string(),
