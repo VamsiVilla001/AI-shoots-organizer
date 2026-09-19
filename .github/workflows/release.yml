@@ -27,10 +27,13 @@ name: Release
 #       -> builds both as run artefacts; give it a tag name to attach
 #          them to that tag's release instead
 #
-# The artefacts are UNSIGNED unless the Apple secrets below are set. macOS
-# refuses to open an unsigned .dmg from a download without right-click -> Open
-# (or `xattr -d com.apple.quarantine`), and Windows SmartScreen warns. See
-# docs/deployment.md, "Signing".
+# Without the Apple secrets below the .app is AD-HOC signed (identity "-"):
+# not trusted, but a valid signature. That matters because an app with no
+# signature at all is reported by macOS as "damaged and can't be opened", with
+# no way past the dialog, whereas an ad-hoc signed one gets the ordinary
+# "Apple could not verify" prompt and System Settings -> Privacy & Security ->
+# Open Anyway. Windows SmartScreen warns either way. See docs/deployment.md,
+# "Signing".
 
 on:
   push:
@@ -130,7 +133,18 @@ jobs:
 
       # The two ONNX files are ~191 MB and take the installer from ~11 MB to
       # ~190 MB. Without them the app indexes, sorts and exports; only face
-      # recognition needs them, and Settings says so.
+      # recognition needs them, and Settings says so. The 280 MB download
+      # behind them is cached between runs; the fetch scripts skip files that
+      # are already there.
+      - name: Cache face models
+        if: env.WITH_MODELS == 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            models/det_10g.onnx
+            models/w600k_r50.onnx
+          key: face-models-buffalo_l-v0.7
+
       - name: Fetch face models
         if: env.WITH_MODELS == 'true'
         shell: bash
@@ -141,9 +155,22 @@ jobs:
             bash scripts/fetch-models.sh
           fi
 
+      # Tauri downloads its packaging tools (NSIS and its plugins on Windows)
+      # from GitHub on first use, with a short timeout that has failed a run
+      # after a successful 13-minute compile. Keep them between runs.
+      - name: Cache Tauri's packaging tools
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/AppData/Local/tauri
+            ~/Library/Caches/tauri
+          key: tauri-tools-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+
       # `build` / `build:models` package the Premiere panel, build and stage
       # `skwad-server` beside the app (under server/ in the bundle), then build
-      # the desktop with the config overlays.
+      # the desktop with the config overlays. Retried because the only thing
+      # that has ever failed at this point is a download; cargo is incremental,
+      # so a second attempt reaches the bundling step in about a minute.
       - name: Build installer
         shell: bash
         env:
@@ -160,7 +187,18 @@ jobs:
           for v in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
             if [ -z "${!v:-}" ]; then unset "$v"; fi
           done
-          if [ "$WITH_MODELS" = "true" ]; then npm run build:models; else npm run build; fi
+          # No certificate: ad-hoc sign so macOS shows "Open Anyway" rather
+          # than "damaged". Tauri treats the identity "-" as exactly that.
+          if [ "$RUNNER_OS" = macOS ] && [ -z "${APPLE_CERTIFICATE:-}" ] && [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
+            export APPLE_SIGNING_IDENTITY=-
+          fi
+          if [ "$WITH_MODELS" = "true" ]; then script=build:models; else script=build; fi
+          for attempt in 1 2 3; do
+            npm run "$script" && break
+            [ "$attempt" = 3 ] && exit 1
+            echo "::warning::build attempt $attempt failed; retrying in case it was a download timeout"
+            sleep 20
+          done
 
       # One predictable name per platform, so the release page reads well and
       # a re-run replaces the same asset rather than adding another.
@@ -244,11 +282,15 @@ jobs:
             build is unsigned; choose *More info → Run anyway*.
 
             **macOS (Apple Silicon, M1 and later):** open the `.dmg` and drag SKWAD to
-            Applications. Intel Macs are not supported by this build. The build is
-            unsigned, so the first launch is *right-click → Open*, or:
+            Applications. Intel Macs are not supported by this build. The app is not
+            notarised, so the first launch says *Apple could not verify…*: click
+            **Done**, open *System Settings → Privacy & Security*, scroll to *Security*
+            and click **Open Anyway** (on macOS 13 and 14, *right-click → Open* is
+            enough). If macOS instead says the app is *damaged*, run this in Terminal
+            and open it again:
 
             ```
-            xattr -d com.apple.quarantine "/Applications/SKWAD Media Organiser.app"
+            xattr -cr "/Applications/SKWAD Media Organiser.app"
             ```
 
             **Server:** one machine runs `skwad-server` (shipped inside the install,

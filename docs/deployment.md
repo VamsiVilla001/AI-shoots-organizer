@@ -284,10 +284,20 @@ fine, right-click instead".
 
 ### macOS
 
-Without a signature, Gatekeeper blocks the app. The recipient needs one of:
+Without a Developer ID, Gatekeeper does not trust the app. The CI build is
+**ad-hoc signed** (`APPLE_SIGNING_IDENTITY=-`, set by the workflow when no
+certificate secret exists), which is a valid but untrusted signature. That
+distinction matters: an app with *no* signature is reported by macOS 14 and
+15 as "damaged and can't be opened", a dead end, while an ad-hoc signed one
+gets the ordinary prompt. The recipient then needs one of:
 
-- right-click the app in Applications → **Open** → **Open** again, or
-- `xattr -dr com.apple.quarantine "/Applications/SKWAD Media Organiser.app"`
+- macOS 15: on the *Apple could not verify…* dialog click **Done**, then
+  *System Settings → Privacy & Security*, scroll to *Security*, **Open Anyway**;
+- macOS 13/14: right-click the app in Applications → **Open** → **Open**;
+- any version, if it still says *damaged* (for example a build made by hand
+  without the identity): `xattr -cr "/Applications/SKWAD Media Organiser.app"`
+  in Terminal, then open it again. The app must be in Applications first; the
+  mounted `.dmg` is read-only.
 
 To sign and notarise properly you need the Apple Developer Program ($99/yr), a
 **Developer ID Application** certificate, and an app-specific password. Tauri
