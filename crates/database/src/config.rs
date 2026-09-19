@@ -166,9 +166,12 @@ impl PgConfig {
             host: parsed
                 .get_hosts()
                 .iter()
-                .map(|h| {
-                    let postgres::config::Host::Tcp(host) = h;
-                    host.clone()
+                .filter_map(|h| match h {
+                    postgres::config::Host::Tcp(host) => Some(host.clone()),
+                    // A Unix-socket host only exists on Unix builds; the app
+                    // always connects over TCP, so it is passed over.
+                    #[cfg(unix)]
+                    postgres::config::Host::Unix(_) => None,
                 })
                 .next()
                 .unwrap_or(defaults.host),
